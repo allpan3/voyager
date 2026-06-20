@@ -1,0 +1,454 @@
+// CIM element adapter around the CIM macro wrapper
+//
+// This module adds two pieces of behavior around the macro wrapper:
+//   1. CIM element-level A_WIDTH can be wider than the macro wrapper's BASE_A_WIDTH.
+//      The element sends A to the macro wrapper MSB slice first, then lower slices, and
+//      combines the returned results in an external accumulator.
+//   2. CIM element-level B_WIDTH can be wider than the macro wrapper's BASE_B_WIDTH.
+//      The element splits each B value across multiple macro wrapper output channels, then
+//      combines the partial results from those channels in the external accumulator.
+
+`include "cim_typedefs.svh"
+
+module CIMIntElement #(
+    parameter int unsigned CH_IN = 64,
+    parameter int unsigned CH_OUT = 8,
+    parameter int unsigned NUM_ROWS = 18,
+
+    // BASE_* parameters describe the base shape of the macro wrapper
+    // In bit-serial mode, the macro wrapper A width may be widened up to BASE_C_WIDTH capacity.
+    parameter int unsigned BASE_A_WIDTH = 4,
+    parameter int unsigned BASE_B_WIDTH = 4,
+    parameter int unsigned BASE_C_WIDTH = 20,
+    parameter int unsigned WRITE_BW = 1,
+    parameter int unsigned MAC_LATENCY = 1,
+    parameter cim_mode_t MODE = CIM_MODE_BIT_SERIAL,
+    parameter cim_macro_wrapper_impl_t MACRO_IMPL = CIM_MACRO_WRAPPER_IMPL_MODEL,
+
+    // A_WIDTH and B_WIDTH are the logical operand widths implemented by this element
+    // SIGNED applies to both logical A and logical B at design time
+    parameter int unsigned A_WIDTH = 8,
+    parameter int unsigned B_WIDTH = 8,
+    parameter bit SIGNED = 1'b0,
+
+    localparam int unsigned A_COLS = CH_IN,
+    localparam int unsigned SUM_GUARD_WIDTH = (A_COLS <= 1) ? 1 : $clog2(A_COLS),
+
+    // One B value is split across NUM_B_SLICES physical macro wrapper output channels
+    localparam int unsigned NUM_B_SLICES = B_WIDTH / BASE_B_WIDTH,
+    localparam int unsigned B_COLS = CH_OUT / NUM_B_SLICES,
+    localparam int unsigned B_ROWS = WRITE_BW,
+
+    // C_WIDTH is the result width depending on the operand widths and the vector length
+    localparam int unsigned C_WIDTH = A_WIDTH + B_WIDTH + SUM_GUARD_WIDTH,
+    localparam int unsigned BITS_CH_IN = (CH_IN <= 1) ? 1 : $clog2(CH_IN),
+    localparam int unsigned BITS_ROW = (NUM_ROWS <= 1) ? 1 : $clog2(NUM_ROWS)
+) (
+    input  logic                       wclk,
+    input  logic                       mclk,
+    input  logic                       rstn,
+
+    // Logical A operand is a vector of length A_COLS
+    input  logic [A_WIDTH-1:0]         a [A_COLS],
+
+    // Logical B operand data for one write event. B_COLS is the number of B matrix
+    // columns provided, and B_ROWS is the number of matrix rows written in this cycle
+    input  logic [B_WIDTH-1:0]         b [B_COLS][B_ROWS],
+    input  logic                       wen,
+    input  logic [BITS_CH_IN-1:0]      widx,
+    input  logic [BITS_ROW-1:0]        wrow,
+
+    // mac_start pulses to begin a MAC when mac_busy is low
+    input  logic                       mac_start,
+    input  logic [BITS_ROW-1:0]        mrow,
+
+    output logic [C_WIDTH-1:0]         c [B_COLS],
+    output logic                       c_valid,    // high while c holds a completed result
+    output logic                       mac_busy    // high while a new mac_start cannot be accepted
+);
+
+  // CIM element walks operand A slice by slice. The width of a slice depends on the selected macro wrapper mode:
+  // For bit-parallel, the slice is the fixed BASE_A_WIDTH fed into the macro wrapper. For bit-serial, the internal
+  // accumulator width may allow the macro wrapper to process a wider slice than BASE_A_WIDTH, so it performs an
+  // additional "intra-slice" (or window) walking.
+  // We refer the base width the macro wrapper processes at a time as a "window", and the max width the macro wrapper
+  // can process a "slice". A slice contains one or more window.
+
+  // ---------------------------------------------------------------------------
+  // Slice Walking
+  // ---------------------------------------------------------------------------
+
+  logic start_mac;
+  // Operation finishes when the final A slice reaches the accumulator
+  logic finish_mac;
+
+  // Max operand A width supported by the macro wrapper in serial mode
+  localparam int unsigned SERIAL_MAX_SLICE_WIDTH = BASE_C_WIDTH - BASE_B_WIDTH - SUM_GUARD_WIDTH;
+
+  // The slice width may just be A_WIDTH if the A_WIDTH is smaller than what the macro wrapper can handle
+  localparam int unsigned SERIAL_SLICE_WIDTH = (A_WIDTH < SERIAL_MAX_SLICE_WIDTH) ? A_WIDTH : SERIAL_MAX_SLICE_WIDTH;
+  localparam int unsigned SLICE_WIDTH = (MODE == CIM_MODE_BIT_SERIAL) ? SERIAL_SLICE_WIDTH : BASE_A_WIDTH;
+  // Number of A slices needed for A_WIDTH; + SLICE_WIDTH - 1 implements ceiling division to cover any partial final slice
+  localparam int unsigned NUM_SLICES = (A_WIDTH + SLICE_WIDTH - 1) / SLICE_WIDTH;
+  localparam int unsigned BITS_SLICE = (NUM_SLICES <= 1) ? 1 : $clog2(NUM_SLICES);
+
+  // SLICE_LAUNCH_INTERVAL is the number of cycles between launching slices into the macro wrapper
+  // Bit-parallel consumes a slice in one cycle; bit-serial consumes one bit per cycle, padded to whole windows
+  localparam int unsigned SERIAL_SLICE_INTERVAL = (SERIAL_SLICE_WIDTH + BASE_A_WIDTH - 1) / BASE_A_WIDTH * BASE_A_WIDTH;
+  localparam int unsigned SLICE_LAUNCH_INTERVAL = (MODE == CIM_MODE_BIT_SERIAL) ? SERIAL_SLICE_INTERVAL : 1;
+  localparam int unsigned BITS_SLICE_LAUNCH_INTERVAL =
+    (SLICE_LAUNCH_INTERVAL <= 1) ? 1 : $clog2(SLICE_LAUNCH_INTERVAL + 1);
+  // The actual MAC latency for a slice; for bit-serial, including the tail latency for completing the last bit of the slice
+  localparam int unsigned SLICE_MAC_CYCLES = SLICE_LAUNCH_INTERVAL + MAC_LATENCY - 1;
+
+  // Slice driven into the window walker this cycle. Slice 0 contains the MSB bits of operand A.
+  logic [BITS_SLICE-1:0] issue_a_slice_idx;
+  // Next slice that can be issued once the current slice is retiring
+  logic [BITS_SLICE-1:0] next_a_slice_idx;
+  // All slices have entered the macro wrapper; results may still be retiring through the macro wrapper pipeline
+  logic issued_all_slices;
+  // Cycle counter for the current slice; it is set to 1 because the launch cycle already feeds the macro wrapper
+  logic [BITS_SLICE_LAUNCH_INTERVAL-1:0] slice_cycle;
+  // Registered slice walk state after the launch cycle
+  logic slice_walk_active;
+  assign slice_walk_active = (slice_cycle != '0);
+  assign mac_busy = !rstn || slice_walk_active;
+  assign start_mac = mac_start && !mac_busy;
+
+  // issue_slice marks the first cycle of a slice
+  logic issue_slice;
+  assign issue_slice = start_mac || (rstn && !issued_all_slices &&
+    (slice_cycle == BITS_SLICE_LAUNCH_INTERVAL'(SLICE_LAUNCH_INTERVAL)));
+
+  always_comb begin
+    // eagerly update the issue slice index
+    issue_a_slice_idx = next_a_slice_idx;
+
+    // A new mac operation issues the first slice
+    if (start_mac) begin
+      issue_a_slice_idx = '0;
+    end
+  end
+
+  always_ff @(posedge mclk or negedge rstn) begin
+    if (!rstn) begin
+      slice_cycle <= '0;
+    end else if (finish_mac) begin
+      slice_cycle <= '0;
+    end else if (issue_slice) begin
+      slice_cycle <= BITS_SLICE_LAUNCH_INTERVAL'(1);
+    end else if (slice_walk_active && (slice_cycle < BITS_SLICE_LAUNCH_INTERVAL'(SLICE_LAUNCH_INTERVAL))) begin
+      slice_cycle <= slice_cycle + BITS_SLICE_LAUNCH_INTERVAL'(1);
+    end
+  end
+
+  always_ff @(posedge mclk or negedge rstn) begin
+    if (!rstn) begin
+      next_a_slice_idx <= '0;
+      issued_all_slices <= 1'b0;
+    end else if (finish_mac) begin
+      next_a_slice_idx <= '0;
+      issued_all_slices <= 1'b0;
+    end else if (issue_slice) begin
+      if (issue_a_slice_idx == BITS_SLICE'(NUM_SLICES - 1)) begin
+        next_a_slice_idx <= '0;
+        issued_all_slices <= 1'b1;
+      end else begin
+        next_a_slice_idx <= issue_a_slice_idx + BITS_SLICE'(1);
+        issued_all_slices <= 1'b0;
+      end
+    end
+  end
+
+  // first marks the signed/MSB A slice, and last marks completion of the element op.
+  logic slice_valid_pipe [SLICE_MAC_CYCLES];
+  logic slice_is_first_pipe [SLICE_MAC_CYCLES];
+  logic slice_is_last_pipe [SLICE_MAC_CYCLES];
+
+  always_ff @(posedge mclk or negedge rstn) begin
+    if (!rstn) begin
+      for (int stage = 0; stage < SLICE_MAC_CYCLES; stage++) begin
+        slice_valid_pipe[stage] <= 1'b0;
+        slice_is_first_pipe[stage] <= 1'b0;
+        slice_is_last_pipe[stage] <= 1'b0;
+      end
+    end else begin
+      slice_valid_pipe[0] <= issue_slice;
+      slice_is_first_pipe[0] <= issue_slice && (issue_a_slice_idx == '0);
+      slice_is_last_pipe[0] <= issue_slice && (issue_a_slice_idx == BITS_SLICE'(NUM_SLICES - 1));
+      for (int stage = 1; stage < SLICE_MAC_CYCLES; stage++) begin
+        slice_valid_pipe[stage] <= slice_valid_pipe[stage-1];
+        slice_is_first_pipe[stage] <= slice_is_first_pipe[stage-1];
+        slice_is_last_pipe[stage] <= slice_is_last_pipe[stage-1];
+      end
+    end
+  end
+
+  // Indicates the current slice has reached the external accumulator.
+  logic slice_result_ready;
+  assign slice_result_ready = slice_valid_pipe[SLICE_MAC_CYCLES-1];
+
+  // Indicates the current retiring slice is the first/final A slice.
+  logic retiring_first_a_slice, retiring_last_a_slice;
+  assign retiring_first_a_slice = slice_is_first_pipe[SLICE_MAC_CYCLES-1];
+  assign retiring_last_a_slice = slice_is_last_pipe[SLICE_MAC_CYCLES-1];
+
+  // The final slice result is written to the external accumulator, so the MAC op finishes after the edge
+  assign finish_mac = slice_result_ready && retiring_last_a_slice;
+
+  // ---------------------------------------------------------------------------
+  // Window Walking
+  // ---------------------------------------------------------------------------
+
+  // Number of windows in a slice
+  localparam int unsigned A_WINDOWS_PER_SLICE = (SLICE_WIDTH + BASE_A_WIDTH - 1) / BASE_A_WIDTH;
+  localparam int unsigned BITS_A_WINDOW = (A_WINDOWS_PER_SLICE <= 1) ? 1 : $clog2(A_WINDOWS_PER_SLICE);
+
+  // Active slice stays registered after launch because the issue index immediately advances
+  logic [BITS_SLICE-1:0] a_window_slice_idx;
+  logic [BITS_SLICE-1:0] macro_wrapper_a_slice_idx;
+  assign macro_wrapper_a_slice_idx = issue_slice ? issue_a_slice_idx : a_window_slice_idx;
+
+  always_ff @(posedge mclk or negedge rstn) begin
+    if (!rstn) begin
+      a_window_slice_idx <= '0;
+    end else if (finish_mac) begin
+      a_window_slice_idx <= '0;
+    end else if (issue_slice) begin
+      a_window_slice_idx <= issue_a_slice_idx;
+    end
+  end
+
+  // The mac signal of the macro wrapper is asserted for SLICE_LAUNCH_INTERVAL cycles so that all bits are fed to the wrapper
+  // This does not include the tail latency for the MAC op to finish
+  logic macro_wrapper_mac;
+  assign macro_wrapper_mac = rstn && (issue_slice ||
+    (slice_walk_active && (slice_cycle < BITS_SLICE_LAUNCH_INTERVAL'(SLICE_LAUNCH_INTERVAL))));
+
+  // Each window remains stable while the serial macro wrapper consumes its BASE_A_WIDTH bits
+  logic [BITS_A_WINDOW-1:0] issue_a_window_idx;
+
+  always_comb begin
+    issue_a_window_idx = '0;
+    if (macro_wrapper_mac) begin
+        if (issue_slice)
+          issue_a_window_idx = '0;
+        else
+          issue_a_window_idx = BITS_A_WINDOW'(slice_cycle / BASE_A_WIDTH);
+    end
+  end
+
+  logic macro_wrapper_a_signed;
+  assign macro_wrapper_a_signed = SIGNED && (macro_wrapper_a_slice_idx == '0) && (issue_a_window_idx == '0);
+
+  logic macro_wrapper_init;
+  assign macro_wrapper_init = (MODE == CIM_MODE_BIT_SERIAL) ? issue_slice : macro_wrapper_mac;
+
+  // ---------------------------------------------------------------------------
+  // Macro-Wrapper-Facing Data Buses
+  // ---------------------------------------------------------------------------
+
+  // Select one macro-wrapper-width A window from a logical A slice
+  function automatic logic [BASE_A_WIDTH-1:0] select_a_window(
+      input logic [A_WIDTH-1:0] a,
+      input logic [BITS_SLICE-1:0] slice_idx,
+      input logic [BITS_A_WINDOW-1:0] window_idx
+  );
+    int unsigned slice_lower_bit;
+    int unsigned window_bit_offset;
+    int unsigned slice_bit_idx;
+    int unsigned a_bit_idx;
+    logic sign_bit;
+    begin
+      // Slice numbering is MSB first. The expression below finds the LSB of the slice in the A operand
+      slice_lower_bit = (NUM_SLICES - 1 - int'(slice_idx)) * SLICE_WIDTH;
+
+      // Similarly, find the LSB of the window in the slice
+      window_bit_offset = (A_WINDOWS_PER_SLICE - 1 - int'(window_idx)) * BASE_A_WIDTH;
+
+      // Pre-fill with sign bits so a narrow MSB slice is sign- or zero-extended
+      sign_bit = SIGNED && (slice_idx == 0) && a[A_WIDTH - 1];
+      select_a_window = {BASE_A_WIDTH{sign_bit}};
+
+      // Copy only the real bits in this slice; any remaining high bits keep
+      // the sign/zero fill from above.
+      for (int bit_idx = 0; bit_idx < BASE_A_WIDTH; bit_idx++) begin
+        slice_bit_idx = window_bit_offset + bit_idx;
+        a_bit_idx = slice_lower_bit + slice_bit_idx;
+        if ((slice_bit_idx < SLICE_WIDTH) && (a_bit_idx < A_WIDTH)) begin
+          select_a_window[bit_idx] = a[a_bit_idx];
+        end
+      end
+    end
+  endfunction
+
+  function automatic logic [BASE_B_WIDTH-1:0] select_b_slice(
+      input logic [B_WIDTH-1:0] b,
+      input int unsigned slice_idx
+  );
+    int unsigned lower_bit;
+    begin
+      lower_bit = (NUM_B_SLICES - 1 - slice_idx) * BASE_B_WIDTH;
+      select_b_slice = b[lower_bit +: BASE_B_WIDTH];
+    end
+  endfunction
+
+  function automatic logic [C_WIDTH-1:0] extend_macro_wrapper_c(
+      input logic [BASE_C_WIDTH-1:0] value,
+      input logic result_is_signed
+  );
+    logic signed [BASE_C_WIDTH-1:0] signed_value;
+    begin
+      signed_value = value;
+      extend_macro_wrapper_c = result_is_signed ? C_WIDTH'(signed_value) : C_WIDTH'(value);
+    end
+  endfunction
+
+  function automatic logic [C_WIDTH-1:0] reduce_b_slices(
+      input int unsigned cho
+  );
+    int unsigned phys_cho;
+    int unsigned b_shift;
+    logic result_is_signed;
+    begin
+      reduce_b_slices = '0;
+      for (int b_slice = 0; b_slice < NUM_B_SLICES; b_slice++) begin
+        phys_cho = cho * NUM_B_SLICES + b_slice;
+        b_shift = (NUM_B_SLICES - 1 - b_slice) * BASE_B_WIDTH;
+        result_is_signed = SIGNED && (retiring_first_a_slice || (b_slice == 0));
+        reduce_b_slices += extend_macro_wrapper_c(macro_wrapper_c[phys_cho], result_is_signed) << b_shift;
+      end
+    end
+  endfunction
+
+  // Repack A/B operands into the fixed macro wrapper shape. B signedness is also
+  // expanded here because only the MSB physical B slice should be signed.
+  logic [BASE_A_WIDTH-1:0] macro_wrapper_a [A_COLS];
+  logic [BASE_B_WIDTH-1:0] macro_wrapper_b [CH_OUT][WRITE_BW];
+  logic macro_wrapper_b_signed [CH_OUT];
+  logic [BASE_C_WIDTH-1:0] macro_wrapper_c [CH_OUT];
+
+  always_comb begin
+    for (int chi = 0; chi < A_COLS; chi++) begin
+      macro_wrapper_a[chi] = select_a_window(a[chi], macro_wrapper_a_slice_idx, issue_a_window_idx);
+    end
+  end
+
+  // b (logical):
+  //       col0         col1         col2         col3
+  // row0  b[0][0]      b[1][0]      b[2][0]      b[3][0]
+  // row1  b[0][1]      b[1][1]      b[2][1]      b[3][1]
+  //
+  // macro_wrapper_b (physical):
+  //       cho0         cho1         cho2         cho3         cho4         cho5         cho6         cho7
+  // chi0  b[0][0].sl0  b[0][0].sl1  b[1][0].sl0  b[1][0].sl1  b[2][0].sl0  b[2][0].sl1  b[3][0].sl0  b[3][0].sl1
+  // chi1  b[0][1].sl0  b[0][1].sl1  b[1][1].sl0  b[1][1].sl1  b[2][1].sl0  b[2][1].sl1  b[3][1].sl0  b[3][1].sl1
+  always_comb begin
+    for (int cho = 0; cho < CH_OUT; cho++) begin
+      int unsigned col;
+      int unsigned slice_idx;
+
+      col = cho / NUM_B_SLICES;
+      slice_idx = cho % NUM_B_SLICES;
+      // Only the MSB slice needs to be signed
+      macro_wrapper_b_signed[cho] = SIGNED && (slice_idx == 0);
+
+      // row in the B matrix
+      for (int row = 0; row < B_ROWS; row++) begin
+        macro_wrapper_b[cho][row] = select_b_slice(b[col][row], slice_idx);
+      end
+    end
+  end
+
+
+  // ---------------------------------------------------------------------------
+  // CIM Macro Wrapper
+  // ---------------------------------------------------------------------------
+
+  CIMIntMacroWrapper #(
+      .CH_IN(CH_IN),
+      .CH_OUT(CH_OUT),
+      .NUM_ROWS(NUM_ROWS),
+      .A_WIDTH(BASE_A_WIDTH),
+      .B_WIDTH(BASE_B_WIDTH),
+      .C_WIDTH(BASE_C_WIDTH),
+      .WRITE_BW(WRITE_BW),
+      .MAC_LATENCY(MAC_LATENCY),
+      .MODE(MODE),
+      .IMPL(MACRO_IMPL)
+  ) macro_wrapper (
+      .wclk(wclk),
+      .mclk(mclk),
+      .a(macro_wrapper_a),
+      .b(macro_wrapper_b),
+      .wen(wen),
+      .mac(macro_wrapper_mac),
+      .init(macro_wrapper_init),
+      .a_signed(macro_wrapper_a_signed),
+      .b_signed(macro_wrapper_b_signed),
+      .widx(widx),
+      .wrow(wrow),
+      .mrow(mrow),
+      .c(macro_wrapper_c)
+  );
+
+  // ---------------------------------------------------------------------------
+  // External Accumulator and Outputs
+  // ---------------------------------------------------------------------------
+
+  // Hold partial results while CIM PE walks across multiple A slices
+  logic [C_WIDTH-1:0] acc [B_COLS];
+  assign c = acc;
+
+  always_ff @(posedge mclk or negedge rstn) begin
+    if (!rstn) begin
+      c_valid <= 1'b0;
+      for (int cho = 0; cho < B_COLS; cho++) begin
+        acc[cho] <= '0;
+      end
+    end else if (start_mac) begin
+      c_valid <= 1'b0;
+      for (int cho = 0; cho < B_COLS; cho++) begin
+        acc[cho] <= '0;
+      end
+    end else if (slice_result_ready) begin
+      for (int cho = 0; cho < B_COLS; cho++) begin
+        // acc is cleared on each accepted element mac, so the same shift-add handles the first A slice
+        acc[cho] <= (acc[cho] << SLICE_WIDTH) + reduce_b_slices(cho);
+      end
+      if (retiring_last_a_slice) begin
+        c_valid <= 1'b1;
+      end
+    end
+  end
+
+  // ---------------------------------------------------------------------------
+  // Static Parameter Checks
+  // ---------------------------------------------------------------------------
+  // Check static element parameters during elaboration
+  generate
+    if (A_WIDTH == 0) begin : gen_invalid_a_width
+      $fatal(1, "CIMIntElement: A_WIDTH must be positive");
+    end
+    if (B_WIDTH == 0) begin : gen_invalid_b_width
+      $fatal(1, "CIMIntElement: B_WIDTH must be positive");
+    end
+    if (BASE_B_WIDTH != 0) begin : gen_check_base_b_width
+      if ((B_WIDTH % BASE_B_WIDTH) != 0) begin : gen_invalid_b_width_base_b_width
+        $fatal(1, "CIMIntElement: B_WIDTH must be a multiple of BASE_B_WIDTH");
+      end
+    end
+    if (NUM_B_SLICES == 0) begin : gen_invalid_num_b_slices
+      $fatal(1, "CIMIntElement: B_WIDTH must be at least BASE_B_WIDTH");
+    end
+    if (NUM_B_SLICES != 0) begin : gen_check_num_b_slices
+      if ((CH_OUT % NUM_B_SLICES) != 0) begin : gen_invalid_ch_out_num_b_slices
+        $fatal(1, "CIMIntElement: CH_OUT must be divisible by NUM_B_SLICES for wider B grouping");
+      end
+    end
+    if (SLICE_WIDTH == 0) begin : gen_invalid_slice_width
+      $fatal(1, "CIMIntElement: selected macro wrapper A slice width must be positive");
+    end
+  endgenerate
+
+endmodule
