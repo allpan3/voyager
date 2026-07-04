@@ -79,7 +79,7 @@ endmodule
 module CIMVanillaMacroAdapter #(
     parameter int unsigned CH_IN = 64,
     parameter int unsigned CH_OUT = 8,
-    parameter int unsigned NUM_ROWS = 1,
+    parameter int unsigned B_SETS = 1,
     parameter int unsigned A_WIDTH = 4,
     parameter int unsigned B_WIDTH = 4,
     parameter int unsigned C_WIDTH = 20,
@@ -87,7 +87,7 @@ module CIMVanillaMacroAdapter #(
     parameter int unsigned MAC_LATENCY = 1,
     parameter cim_mode_t MODE = CIM_MODE_BIT_SERIAL,
     localparam int unsigned BITS_CH_IN = (CH_IN <= 1) ? 1 : $clog2(CH_IN),
-    localparam int unsigned BITS_ROW = (NUM_ROWS <= 1) ? 1 : $clog2(NUM_ROWS)
+    localparam int unsigned BITS_SET = (B_SETS <= 1) ? 1 : $clog2(B_SETS)
 ) (
     input  logic                  wclk,
     input  logic                  mclk,
@@ -98,9 +98,9 @@ module CIMVanillaMacroAdapter #(
     input  logic                  init,
     input  logic                  a_signed,
     input  logic                  b_signed [CH_OUT],
-    input  logic [BITS_CH_IN-1:0] widx,
-    input  logic [BITS_ROW-1:0]   wrow,
-    input  logic [BITS_ROW-1:0]   mrow,
+    input  logic [BITS_CH_IN-1:0] waddr,
+    input  logic [BITS_SET-1:0]   wset,
+    input  logic [BITS_SET-1:0]   mset,
     output logic [C_WIDTH-1:0]    c [CH_OUT]
 );
 
@@ -126,7 +126,7 @@ module CIMVanillaMacroAdapter #(
   assign active_bit_idx = (init && mac) ? '0 : bit_idx;
   assign internal_compute = mac || flush_pending;
   assign generic_clk = mclk | wclk;  // Vanilla macro has one shared write/compute clock
-  assign generic_waddr = widx;
+  assign generic_waddr = waddr;
   assign generic_wen_n = ~wen;
   assign generic_cen_n = ~internal_compute;
 
@@ -198,8 +198,8 @@ module CIMVanillaMacroAdapter #(
 
 `ifndef SYNTHESIS
   initial begin
-    if (NUM_ROWS != 1) begin
-      $fatal(1, "CIMVanillaMacroAdapter: CIM macro 1 adapter requires NUM_ROWS == 1");
+    if (B_SETS != 1) begin
+      $fatal(1, "CIMVanillaMacroAdapter: CIM macro 1 adapter requires B_SETS == 1");
     end
     if (WRITE_CH_IN != 1) begin
       $fatal(1, "CIMVanillaMacroAdapter: CIM macro 1 adapter requires WRITE_CH_IN == 1");
@@ -222,15 +222,15 @@ module CIMVanillaMacroAdapter #(
         $error("CIMVanillaMacroAdapter: b_signed[%0d] must stay low", cho);
       end
     end
-    if (mac && (mrow != '0)) begin
-      $error("CIMVanillaMacroAdapter: mrow must stay zero because CIM macro 1 has no row banking");
+    if (mac && (mset != '0)) begin
+      $error("CIMVanillaMacroAdapter: mset must stay zero because the vanilla macro has a single B set");
     end
   end
 
   // The generic macro has one CLK, so write traffic is assumed synchronous to mclk
   always @(posedge wclk) begin
-    if (wen && (wrow != '0)) begin
-      $error("CIMVanillaMacroAdapter: wrow must stay zero because CIM macro 1 has no row banking");
+    if (wen && (wset != '0)) begin
+      $error("CIMVanillaMacroAdapter: wset must stay zero because the vanilla macro has a single B set");
     end
   end
 `endif

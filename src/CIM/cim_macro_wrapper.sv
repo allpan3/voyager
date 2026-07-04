@@ -70,7 +70,7 @@ endpackage
 module CIMIntMacroWrapper #(
     parameter int unsigned CH_IN,
     parameter int unsigned CH_OUT,
-    parameter int unsigned NUM_ROWS,
+    parameter int unsigned B_SETS,
     parameter int unsigned A_WIDTH,                  // Bit-width of A operand (the streaming operand)
     parameter int unsigned B_WIDTH,                  // Base bit-width of B operand (the stored operand)
     parameter int unsigned WRITE_CH_IN,                 // Number of input channels written per cycle when writing B
@@ -79,7 +79,7 @@ module CIMIntMacroWrapper #(
     parameter cim_mode_t MODE = CIM_MODE_BIT_SERIAL, // Select bit-parallel or bit-serial MAC behavior
     parameter cim_macro_wrapper_impl_t IMPL = CIM_MACRO_WRAPPER_IMPL_MODEL,     // Select the implementation behind this wrapper
     localparam int unsigned BITS_CH_IN = (CH_IN <= 1) ? 1 : $clog2(CH_IN),      // Number of bits needed to index the B operand when writing; note when WRITE_CH_IN > 1, continguous addresses are written
-    localparam int unsigned BITS_ROW  = (NUM_ROWS <= 1) ? 1 : $clog2(NUM_ROWS)  // Number of bits needed to address the rows
+    localparam int unsigned BITS_SET  = (B_SETS <= 1) ? 1 : $clog2(B_SETS)  // Number of bits needed to index the B sets
 ) (
     input  logic                  wclk,
     input  logic                  mclk,
@@ -90,9 +90,9 @@ module CIMIntMacroWrapper #(
     input  logic                  init,                    // Bit-serial: marks the first partial result when mac is high; ignored by bit-parallel
     input  logic                  a_signed,
     input  logic                  b_signed [CH_OUT],       // Each output channel can have different signedness, which is needed to support wider signed B computation
-    input  logic [BITS_CH_IN-1:0] widx,                    // Address to select the slot (bank) for writing b
-    input  logic [BITS_ROW-1:0]   wrow,                    // Address to select the row for writing b
-    input  logic [BITS_ROW-1:0]   mrow,                    // Address to select the row for MAC computation
+    input  logic [BITS_CH_IN-1:0] waddr,                    // Address of the slot (bank) within a set for writing b
+    input  logic [BITS_SET-1:0]   wset,                    // Index of the B set to write
+    input  logic [BITS_SET-1:0]   mset,                    // Index of the B set used for MAC computation
     output logic [C_WIDTH-1:0]    c [CH_OUT]
 );
 `ifndef SYNTHESIS
@@ -104,7 +104,7 @@ module CIMIntMacroWrapper #(
       CIMIntMacroModel #(
           .CH_IN(CH_IN),
           .CH_OUT(CH_OUT),
-          .NUM_ROWS(NUM_ROWS),
+          .NUM_ROWS(B_SETS),
           .A_WIDTH(A_WIDTH),
           .B_WIDTH(B_WIDTH),
           .C_WIDTH(C_WIDTH),
@@ -121,16 +121,16 @@ module CIMIntMacroWrapper #(
           .init(init),
           .a_signed(a_signed),
           .b_signed(b_signed),
-          .widx(widx),
-          .wrow(wrow),
-          .mrow(mrow),
+          .waddr(waddr),
+          .wrow(wset),
+          .mrow(mset),
           .c(c)
       );
     end else if (IMPL == CIM_MACRO_WRAPPER_IMPL_CIM_MACRO_1) begin : gen_cim_macro_1_impl
       CIMVanillaMacroAdapter #(
           .CH_IN(CH_IN),
           .CH_OUT(CH_OUT),
-          .NUM_ROWS(NUM_ROWS),
+          .B_SETS(B_SETS),
           .A_WIDTH(A_WIDTH),
           .B_WIDTH(B_WIDTH),
           .C_WIDTH(C_WIDTH),
@@ -147,9 +147,9 @@ module CIMIntMacroWrapper #(
           .init(init),
           .a_signed(a_signed),
           .b_signed(b_signed),
-          .widx(widx),
-          .wrow(wrow),
-          .mrow(mrow),
+          .waddr(waddr),
+          .wset(wset),
+          .mset(mset),
           .c(c)
       );
     end else begin : gen_unsupported_impl
@@ -177,8 +177,8 @@ module CIMIntMacroWrapper #(
     if (CH_OUT == 0) begin : gen_invalid_ch_out
       $fatal(1, "CIMIntMacroWrapper: CH_OUT must be positive");
     end
-    if (NUM_ROWS == 0) begin : gen_invalid_num_rows
-      $fatal(1, "CIMIntMacroWrapper: NUM_ROWS must be positive");
+    if (B_SETS == 0) begin : gen_invalid_b_sets
+      $fatal(1, "CIMIntMacroWrapper: B_SETS must be positive");
     end
     if (A_WIDTH == 0) begin : gen_invalid_a_width
       $fatal(1, "CIMIntMacroWrapper: A_WIDTH must be positive");

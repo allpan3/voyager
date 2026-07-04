@@ -1,9 +1,9 @@
 // Shared CIM testbench helpers for generated Verilator harnesses
 // Include this inside a generated test module after defining CASE_NAME, CH_IN,
-// NUM_ROWS, A_WIDTH, NUM_ITERS, MCLK_PERIOD, and WCLK_PERIOD
+// B_SETS, A_WIDTH, NUM_ITERS, MCLK_PERIOD, and WCLK_PERIOD
 
 localparam int unsigned BITS_CH_IN = (CH_IN <= 1) ? 1 : $clog2(CH_IN);
-localparam int unsigned BITS_ROW = (NUM_ROWS <= 1) ? 1 : $clog2(NUM_ROWS);
+localparam int unsigned BITS_SET = (B_SETS <= 1) ? 1 : $clog2(B_SETS);
 localparam int unsigned DEFAULT_RNG_SEED = 32'h1;
 
 int unsigned rng_state;

@@ -1,7 +1,7 @@
 // SystemC behavioral tests for the standalone CIMArray lane protocol
 //
-// These tests stream MAC and B write requests through the CIMArray Connections
-// interface and compare per-sector C beats against an independent delivery model
+// These tests stream MAC and store requests through the CIMArray Connections
+// interface and compare per-group C beats against an independent delivery model
 
 #include <ac_int.h>
 #include <systemc.h>
@@ -27,20 +27,20 @@ static constexpr long long mask_for_width(int width) {
 template <int CH_IN, int CH_OUT, int B_SETS, int BASE_A_WIDTH,
           int BASE_B_WIDTH, int BASE_C_WIDTH, int WRITE_CH_IN, int MAC_LATENCY,
           int MODE, int A_WIDTH, int B_WIDTH, bool IS_SIGNED, int INPUT_LANES,
-          int OUTPUT_LANES, int SECTORS,
+          int OUTPUT_LANES, int MULTICAST_GROUPS,
           typename DutType =
               CIMArray<CH_IN, CH_OUT, B_SETS, BASE_A_WIDTH, BASE_B_WIDTH,
                       BASE_C_WIDTH, WRITE_CH_IN, MAC_LATENCY, MODE, A_WIDTH,
-                      B_WIDTH, IS_SIGNED, INPUT_LANES, OUTPUT_LANES, SECTORS>>
+                      B_WIDTH, IS_SIGNED, INPUT_LANES, OUTPUT_LANES, MULTICAST_GROUPS>>
 struct CIMArraySystemCTestCase : sc_module {
   using Dut = DutType;
   using CBeat = typename Dut::CBeat;
   using MACRequest = typename Dut::MACRequest;
-  using BWriteRequest = typename Dut::BWriteRequest;
+  using StoreRequest = typename Dut::StoreRequest;
   using ElementSet = typename Dut::ElementSet;
-  using SectorIndex = typename Dut::SectorIndex;
+  using MulticastGroupIndex = typename Dut::MulticastGroupIndex;
 
-  static constexpr int SECTOR_OUTPUT_LANES = Dut::SECTOR_OUTPUT_LANES;
+  static constexpr int MULTICAST_GROUP_LANES = Dut::MULTICAST_GROUP_LANES;
 
   static_assert(A_WIDTH < 31, "A_WIDTH must fit this unit test golden model");
   static_assert(B_WIDTH < 31, "B_WIDTH must fit this unit test golden model");
@@ -50,16 +50,16 @@ struct CIMArraySystemCTestCase : sc_module {
   Dut dut;
   sc_clock clk;
   sc_signal<bool> rstn;
-  Connections::Combinational<MACRequest> a_channel;
-  Connections::Combinational<BWriteRequest> b_channel;
-  Connections::Combinational<CBeat> c_channel;
+  Connections::Combinational<MACRequest> mac_channel;
+  Connections::Combinational<StoreRequest> store_channel;
+  Connections::Combinational<CBeat> result_channel;
 
   ac_int<B_WIDTH, false>
       expected_weights[B_SETS][Dut::ELEMENTS][Dut::ELEMENT_B_COLS][CH_IN];
 
-  // ExpectedBeat mirrors one per-sector C beat in issue order
+  // ExpectedBeat mirrors one per-group C beat in issue order
   struct ExpectedBeat {
-    long long value[SECTOR_OUTPUT_LANES][Dut::ELEMENT_B_COLS];
+    long long value[MULTICAST_GROUP_LANES][Dut::ELEMENT_B_COLS];
   };
   std::deque<ExpectedBeat> expected_beats;
 
@@ -72,9 +72,9 @@ struct CIMArraySystemCTestCase : sc_module {
 
     dut.clk(clk);
     dut.rstn(rstn);
-    dut.a_channel(a_channel);
-    dut.b_channel(b_channel);
-    dut.c_channel(c_channel);
+    dut.mac_channel(mac_channel);
+    dut.store_channel(store_channel);
+    dut.result_channel(result_channel);
 
     clear_expected_state();
 
@@ -109,9 +109,9 @@ struct CIMArraySystemCTestCase : sc_module {
 
   // Reset the testbench-side Connections endpoints
   void reset_channels() {
-    a_channel.ResetWrite();
-    b_channel.ResetWrite();
-    c_channel.ResetRead();
+    mac_channel.ResetWrite();
+    store_channel.ResetWrite();
+    result_channel.ResetRead();
   }
 
   // Encode one integer as an unsigned ac_int bit pattern
@@ -202,12 +202,13 @@ struct CIMArraySystemCTestCase : sc_module {
     tick();
   }
 
-  // Drive one B write request and mirror it into the expected weight model
-  void drive_b_write(ElementSet set, int input_lane_idx, int chunk, int phase) {
-    BWriteRequest request;
+  // Drive one store request and mirror it into the expected weight model
+  void drive_store(ElementSet set, int input_lane_idx, int chunk, int phase) {
+    StoreRequest request;
     request.set = set;
-    request.input_lane = input_lane_idx;
-    request.widx = chunk * Dut::ELEMENT_B_WRITE_ROWS;
+    request.lane = input_lane_idx;
+    request.waddr = chunk * Dut::ELEMENT_B_WRITE_ROWS;
+    request.fanout = 0;
 
     for (int output_lane_idx = 0; output_lane_idx < OUTPUT_LANES; output_lane_idx++) {
       for (int col = 0; col < Dut::ELEMENT_B_COLS; col++) {
@@ -233,7 +234,7 @@ struct CIMArraySystemCTestCase : sc_module {
       }
     }
 
-    b_channel.Push(request);
+    store_channel.Push(request);
     settle();
   }
 
@@ -241,18 +242,71 @@ struct CIMArraySystemCTestCase : sc_module {
   void load_b_operands(ElementSet set, int phase) {
     for (int chunk = 0; chunk < Dut::ELEMENT_B_BEATS; chunk++) {
       for (int input_lane_idx = 0; input_lane_idx < INPUT_LANES; input_lane_idx++) {
-        drive_b_write(set, input_lane_idx, chunk, phase);
+        drive_store(set, input_lane_idx, chunk, phase);
       }
     }
   }
 
-  // Compute one delivery chunk's expected C beat for one MAC request
-  ExpectedBeat expected_sector_beat(ElementSet set, int sector_idx,
+  // Drive one fanout store and mirror the replicated tile into every multicast group
+  void drive_store_fanout(ElementSet set, int base_lane, int chunk, int phase) {
+    StoreRequest request;
+    request.set = set;
+    request.lane = base_lane;
+    request.waddr = chunk * Dut::ELEMENT_B_WRITE_ROWS;
+    request.fanout = 1;
+
+    for (int section = 0; section < MULTICAST_GROUPS; section++) {
+      for (int group_lane = 0; group_lane < MULTICAST_GROUP_LANES; group_lane++) {
+        for (int col = 0; col < Dut::ELEMENT_B_COLS; col++) {
+          for (int lane = 0; lane < Dut::ELEMENT_B_WRITE_ROWS; lane++) {
+            request.data[section * MULTICAST_GROUP_LANES + group_lane][col][lane] =
+                weight_value(base_lane + section, chunk, group_lane, col, lane, phase);
+          }
+        }
+      }
+    }
+
+    const int set_idx = set.to_int();
+    const int base_chi = chunk * Dut::ELEMENT_B_WRITE_ROWS;
+    for (int section = 0; section < MULTICAST_GROUPS; section++) {
+      const int input_lane_idx = base_lane + section;
+      for (int group_idx = 0; group_idx < MULTICAST_GROUPS; group_idx++) {
+        for (int group_lane = 0; group_lane < MULTICAST_GROUP_LANES; group_lane++) {
+          const int output_lane_idx = group_idx * MULTICAST_GROUP_LANES + group_lane;
+          const int element_idx = element_index(input_lane_idx, output_lane_idx);
+          for (int col = 0; col < Dut::ELEMENT_B_COLS; col++) {
+            for (int lane = 0; lane < Dut::ELEMENT_B_WRITE_ROWS; lane++) {
+              const int chi = base_chi + lane;
+              if (chi < CH_IN) {
+                expected_weights[set_idx][element_idx][col][chi] =
+                    request.data[section * MULTICAST_GROUP_LANES + group_lane][col][lane];
+              }
+            }
+          }
+        }
+      }
+    }
+
+    store_channel.Push(request);
+    settle();
+  }
+
+  // Load a replicated tile through fanout writes covering all input lanes
+  void load_b_operands_fanout(ElementSet set, int phase) {
+    for (int chunk = 0; chunk < Dut::ELEMENT_B_BEATS; chunk++) {
+      for (int base_lane = 0; base_lane < INPUT_LANES; base_lane += MULTICAST_GROUPS) {
+        drive_store_fanout(set, base_lane, chunk, phase);
+      }
+    }
+  }
+
+  // Compute one multicast group's expected C beat for one MAC request
+  ExpectedBeat expected_group_beat(ElementSet set, int group_idx,
                                    int phase) const {
     ExpectedBeat beat;
     const int set_idx = set.to_int();
-    for (int sector_lane = 0; sector_lane < SECTOR_OUTPUT_LANES; sector_lane++) {
-      const int output_lane_idx = sector_idx * SECTOR_OUTPUT_LANES + sector_lane;
+    for (int group_lane = 0; group_lane < MULTICAST_GROUP_LANES; group_lane++) {
+      const int output_lane_idx = group_idx * MULTICAST_GROUP_LANES + group_lane;
       for (int col = 0; col < Dut::ELEMENT_B_COLS; col++) {
         long long sum = 0;
         for (int input_lane_idx = 0; input_lane_idx < INPUT_LANES; input_lane_idx++) {
@@ -265,7 +319,7 @@ struct CIMArraySystemCTestCase : sc_module {
             sum += a_value * b_value;
           }
         }
-        beat.value[sector_lane][col] = sum;
+        beat.value[group_lane][col] = sum;
       }
     }
     return beat;
@@ -275,8 +329,8 @@ struct CIMArraySystemCTestCase : sc_module {
   MACRequest build_mac_request(ElementSet set, int phase) const {
     MACRequest request;
     request.set = set;
-    request.sector = 0;
-    request.span = 0;
+    request.group = 0;
+    request.bcast = 0;
 
     for (int input_lane_idx = 0; input_lane_idx < INPUT_LANES; input_lane_idx++) {
       for (int chi = 0; chi < CH_IN; chi++) {
@@ -287,27 +341,27 @@ struct CIMArraySystemCTestCase : sc_module {
     return request;
   }
 
-  // Drive one chunk-addressed MAC request and queue its expected beat
-  void drive_mac_sector(ElementSet set, int sector_idx, int phase) {
+  // Drive one group-addressed MAC request and queue its expected beat
+  void drive_mac_group(ElementSet set, int group_idx, int phase) {
     MACRequest request = build_mac_request(set, phase);
-    request.sector = sector_idx;
+    request.group = group_idx;
 
-    expected_beats.push_back(expected_sector_beat(set, sector_idx, phase));
+    expected_beats.push_back(expected_group_beat(set, group_idx, phase));
 
-    a_channel.Push(request);
+    mac_channel.Push(request);
     settle();
   }
 
-  // Drive one spanning MAC request and queue expected beats for every chunk
-  void drive_mac_span(ElementSet set, int phase) {
+  // Drive one broadcast MAC request and queue expected beats for every group
+  void drive_mac_bcast(ElementSet set, int phase) {
     MACRequest request = build_mac_request(set, phase);
-    request.span = 1;
+    request.bcast = 1;
 
-    for (int sector_idx = 0; sector_idx < SECTORS; sector_idx++) {
-      expected_beats.push_back(expected_sector_beat(set, sector_idx, phase));
+    for (int group_idx = 0; group_idx < MULTICAST_GROUPS; group_idx++) {
+      expected_beats.push_back(expected_group_beat(set, group_idx, phase));
     }
 
-    a_channel.Push(request);
+    mac_channel.Push(request);
     settle();
   }
 
@@ -315,21 +369,21 @@ struct CIMArraySystemCTestCase : sc_module {
   void pop_and_check() {
     require(!expected_beats.empty(), "c beat popped with no expected beat");
 
-    const CBeat actual = c_channel.Pop();
+    const CBeat actual = result_channel.Pop();
     const ExpectedBeat expected = expected_beats.front();
     expected_beats.pop_front();
 
-    for (int sector_lane = 0; sector_lane < SECTOR_OUTPUT_LANES; sector_lane++) {
+    for (int group_lane = 0; group_lane < MULTICAST_GROUP_LANES; group_lane++) {
       for (int col = 0; col < Dut::ELEMENT_B_COLS; col++) {
         const ac_int<Dut::C_WIDTH, false> expected_bits =
-            encode_value<Dut::C_WIDTH>(expected.value[sector_lane][col]);
-        if (actual[sector_lane][col] == expected_bits) {
+            encode_value<Dut::C_WIDTH>(expected.value[group_lane][col]);
+        if (actual[group_lane][col] == expected_bits) {
           continue;
         }
 
         std::ostringstream text;
-        text << "unexpected c beat[" << sector_lane << "][" << col
-             << "] got " << actual[sector_lane][col].to_int() << " expected "
+        text << "unexpected c beat[" << group_lane << "][" << col
+             << "] got " << actual[group_lane][col].to_int() << " expected "
              << expected_bits.to_int();
         require(false, text.str());
       }
@@ -349,8 +403,8 @@ struct CIMArraySystemCTestCase : sc_module {
     return ElementSet(phase % B_SETS);
   }
 
-  // Run one spanning transaction with optional idle and backpressure cycles
-  void run_span_transaction(int phase, bool insert_idle_cycles,
+  // Run one broadcast transaction with optional idle and backpressure cycles
+  void run_bcast_transaction(int phase, bool insert_idle_cycles,
                              int c_backpressure_cycles) {
     const ElementSet set = transaction_set(phase);
     load_b_operands(set, phase);
@@ -359,7 +413,7 @@ struct CIMArraySystemCTestCase : sc_module {
       tick();
     }
 
-    drive_mac_span(set, phase + 3);
+    drive_mac_bcast(set, phase + 3);
 
     if (insert_idle_cycles) {
       tick();
@@ -374,8 +428,8 @@ struct CIMArraySystemCTestCase : sc_module {
 
   // Run the basic load/MAC/result path with and without extra idle spacing
   void run_basic_transaction_checks() {
-    run_span_transaction(1, true, 3);
-    run_span_transaction(13, false, 3);
+    run_bcast_transaction(1, true, 3);
+    run_bcast_transaction(13, false, 3);
   }
 
   // Check that loaded rows remain independently addressable across later loads
@@ -386,39 +440,58 @@ struct CIMArraySystemCTestCase : sc_module {
     load_b_operands(first_set, 21);
     load_b_operands(second_set, 29);
 
-    drive_mac_span(first_set, 35);
+    drive_mac_bcast(first_set, 35);
     drain_expected_beats();
 
-    drive_mac_span(second_set, 39);
+    drive_mac_bcast(second_set, 39);
     drain_expected_beats();
 
-    drive_mac_span(first_set, 43);
+    drive_mac_bcast(first_set, 43);
     drain_expected_beats();
   }
 
-  // Check per-chunk issue of distinct phases to every delivery chunk back to back
-  void run_sector_issue_check() {
+  // Check per-group issue of distinct phases to every group back to back
+  void run_group_issue_check() {
     const ElementSet set = transaction_set(47);
     load_b_operands(set, 47);
 
     // Issue one request per chunk without collecting in between
-    for (int sector_idx = 0; sector_idx < SECTORS; sector_idx++) {
-      drive_mac_sector(set, sector_idx, 49 + sector_idx);
+    for (int group_idx = 0; group_idx < MULTICAST_GROUPS; group_idx++) {
+      drive_mac_group(set, group_idx, 49 + group_idx);
     }
 
     drain_expected_beats();
   }
 
-  // Check that reissuing a busy chunk serializes on the collected result
-  void run_same_sector_reissue_check() {
+  // Check that reissuing a busy group serializes on the collected result
+  void run_same_group_reissue_check() {
     const ElementSet set = transaction_set(53);
 
     load_b_operands(set, 53);
-    drive_mac_sector(set, 0, 59);
-    drive_mac_sector(set, 0, 61);
+    drive_mac_group(set, 0, 59);
+    drive_mac_group(set, 0, 61);
     drain_expected_beats();
 
-    drive_mac_span(set, 63);
+    drive_mac_bcast(set, 63);
+    drain_expected_beats();
+  }
+
+  // Load a replicated tile via fanout writes, then verify per-group and broadcast MACs
+  void run_fanout_write_check() {
+    if constexpr ((INPUT_LANES % MULTICAST_GROUPS) != 0) {
+      return;
+    }
+
+    const ElementSet set = transaction_set(107);
+    load_b_operands_fanout(set, 107);
+
+    // Groups hold identical tiles; distinct phases verify per-group A delivery
+    for (int group_idx = 0; group_idx < MULTICAST_GROUPS; group_idx++) {
+      drive_mac_group(set, group_idx, 109 + group_idx);
+    }
+    drain_expected_beats();
+
+    drive_mac_bcast(set, 113);
     drain_expected_beats();
   }
 
@@ -427,7 +500,7 @@ struct CIMArraySystemCTestCase : sc_module {
     const ElementSet set = transaction_set(67);
 
     load_b_operands(set, 67);
-    drive_mac_span(set, 71);
+    drive_mac_bcast(set, 71);
 
     for (int cycle = 0; cycle < 9; cycle++) {
       tick();
@@ -436,18 +509,18 @@ struct CIMArraySystemCTestCase : sc_module {
     drain_expected_beats();
   }
 
-  // Check B writes to another set while a MAC is already in flight
-  void run_b_write_during_mac_check() {
+  // Check stores to another set while a MAC is already in flight
+  void run_store_during_mac_check() {
     const ElementSet mac_set = ElementSet(0);
-    const ElementSet write_set = ElementSet((B_SETS > 1) ? 1 : 0);
+    const ElementSet store_set = ElementSet((B_SETS > 1) ? 1 : 0);
 
     load_b_operands(mac_set, 79);
-    drive_mac_span(mac_set, 83);
+    drive_mac_bcast(mac_set, 83);
 
-    load_b_operands(write_set, 89);
+    load_b_operands(store_set, 89);
     drain_expected_beats();
 
-    drive_mac_span(write_set, 97);
+    drive_mac_bcast(store_set, 97);
     drain_expected_beats();
   }
 
@@ -455,7 +528,7 @@ struct CIMArraySystemCTestCase : sc_module {
   void run_reset_recovery_check() {
     const ElementSet set = transaction_set(31);
     load_b_operands(set, 31);
-    drive_mac_sector(set, 0, 37);
+    drive_mac_group(set, 0, 37);
 
     rstn.write(false);
     reset_channels();
@@ -465,7 +538,7 @@ struct CIMArraySystemCTestCase : sc_module {
     rstn.write(true);
     tick();
 
-    run_span_transaction(103, true, 3);
+    run_bcast_transaction(103, true, 3);
   }
 
   // Run the full case sequence
@@ -476,10 +549,11 @@ struct CIMArraySystemCTestCase : sc_module {
 
     run_basic_transaction_checks();
     run_set_retention_check();
-    run_sector_issue_check();
-    run_same_sector_reissue_check();
+    run_group_issue_check();
+    run_same_group_reissue_check();
+    run_fanout_write_check();
     run_long_c_backpressure_check();
-    run_b_write_during_mac_check();
+    run_store_during_mac_check();
     run_reset_recovery_check();
 
     std::cout << "[PASS] " << name() << std::endl;
@@ -497,7 +571,7 @@ int sc_main(int argc, char** argv) {
 
   CIMArraySystemCTestCase<4, 2, 2, 4, 4, 12, 2, 2,
                          CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, false, 2, 3, 1>
-      spanning_dense_unsigned("spanning_dense_unsigned");
+      bcast_dense_unsigned("bcast_dense_unsigned");
 
   CIMArraySystemCTestCase<5, 2, 3, 4, 4, 16, 1, 4,
                          CIM_MODE_BIT_PARALLEL_VALUE, 5, 4, true, 3, 2, 1>
@@ -509,11 +583,11 @@ int sc_main(int argc, char** argv) {
 
   CIMArraySystemCTestCase<4, 2, 2, 4, 4, 12, 2, 2,
                          CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, true, 2, 4, 2>
-      sectored_parallel_signed("sectored_parallel_signed");
+      grouped_parallel_signed("grouped_parallel_signed");
 
   CIMArraySystemCTestCase<4, 2, 2, 4, 4, 12, 2, 2,
                          CIM_MODE_BIT_SERIAL_VALUE, 4, 4, false, 2, 2, 2>
-      sectored_serial_unsigned("sectored_serial_unsigned");
+      grouped_serial_unsigned("grouped_serial_unsigned");
 
   sc_start();
   return g_cases_remaining;

@@ -50,7 +50,7 @@ class Inst:
     base_c_width: int = 10
     a_width: int = 4
     b_width: int = 4
-    expect_busy_mac: bool = False
+    expect_dropped_issue: bool = False
     test_kind: int = TEST_NORMAL
     impl: str = IMPL_MODEL
 
@@ -76,7 +76,7 @@ CASES = (
         mclk_period=5,
         wclk_period=7,
         a_width=9,
-        expect_busy_mac=True,
+        expect_dropped_issue=True,
     ),
     Inst(
         name="generic_element_parallel_wide_b_unsigned",
@@ -89,7 +89,7 @@ CASES = (
         wclk_period=7,
         ch_out=4,
         b_width=8,
-        expect_busy_mac=True,
+        expect_dropped_issue=False,
     ),
     Inst(
         name="generic_element_parallel_wide_a_b_signed_partial",
@@ -106,7 +106,7 @@ CASES = (
         base_c_width=12,
         a_width=10,
         b_width=8,
-        expect_busy_mac=True,
+        expect_dropped_issue=True,
     ),
     Inst(
         name="generic_element_parallel_chin1_equal_clocks_min_c",
@@ -132,7 +132,7 @@ CASES = (
         ch_out=4,
         b_sets=1,
         b_width=16,
-        expect_busy_mac=True,
+        expect_dropped_issue=False,
     ),
     Inst(
         name="generic_element_parallel_b12_chout6_unsigned",
@@ -145,7 +145,7 @@ CASES = (
         wclk_period=7,
         ch_out=6,
         b_width=12,
-        expect_busy_mac=True,
+        expect_dropped_issue=False,
     ),
     Inst(
         name="generic_element_parallel_a3_one_less_unsigned",
@@ -157,7 +157,7 @@ CASES = (
         mclk_period=5,
         wclk_period=7,
         a_width=3,
-        expect_busy_mac=True,
+        expect_dropped_issue=False,
     ),
     Inst(
         name="generic_element_parallel_a5_one_more_signed",
@@ -169,7 +169,7 @@ CASES = (
         mclk_period=5,
         wclk_period=7,
         a_width=5,
-        expect_busy_mac=True,
+        expect_dropped_issue=True,
     ),
     Inst(
         name="generic_element_parallel_latency5_rows5_signed",
@@ -186,7 +186,7 @@ CASES = (
         base_c_width=12,
         a_width=5,
         b_width=8,
-        expect_busy_mac=True,
+        expect_dropped_issue=True,
     ),
     Inst(
         name="generic_element_parallel_divisible_clocks_b16_unsigned",
@@ -199,7 +199,7 @@ CASES = (
         wclk_period=8,
         ch_out=4,
         b_width=16,
-        expect_busy_mac=True,
+        expect_dropped_issue=False,
     ),
     Inst(
         name="generic_element_serial_base_signed",
@@ -210,7 +210,7 @@ CASES = (
         iterations=6,
         mclk_period=5,
         wclk_period=7,
-        expect_busy_mac=True,
+        expect_dropped_issue=True,
     ),
     Inst(
         name="generic_element_serial_window_unsigned",
@@ -224,7 +224,7 @@ CASES = (
         base_a_width=2,
         base_c_width=12,
         a_width=6,
-        expect_busy_mac=True,
+        expect_dropped_issue=True,
     ),
     Inst(
         name="generic_element_serial_multi_slice_signed",
@@ -242,7 +242,7 @@ CASES = (
         base_c_width=12,
         a_width=11,
         b_width=8,
-        expect_busy_mac=True,
+        expect_dropped_issue=True,
     ),
     Inst(
         name="generic_element_serial_a1_unsigned",
@@ -267,7 +267,7 @@ CASES = (
         base_a_width=3,
         base_c_width=12,
         a_width=6,
-        expect_busy_mac=True,
+        expect_dropped_issue=True,
     ),
     Inst(
         name="generic_element_serial_slice_one_less_unsigned",
@@ -281,7 +281,7 @@ CASES = (
         base_a_width=3,
         base_c_width=12,
         a_width=5,
-        expect_busy_mac=True,
+        expect_dropped_issue=True,
     ),
     Inst(
         name="generic_element_serial_slice_one_more_signed",
@@ -295,7 +295,7 @@ CASES = (
         base_a_width=3,
         base_c_width=12,
         a_width=7,
-        expect_busy_mac=True,
+        expect_dropped_issue=True,
     ),
     Inst(
         name="generic_element_serial_b12_chout6_signed",
@@ -308,7 +308,7 @@ CASES = (
         wclk_period=7,
         ch_out=6,
         b_width=12,
-        expect_busy_mac=True,
+        expect_dropped_issue=True,
     ),
     Inst(
         name="generic_element_serial_chin1_single_row_unsigned",
@@ -322,7 +322,7 @@ CASES = (
         a_cols=1,
         b_sets=1,
         base_c_width=9,
-        expect_busy_mac=True,
+        expect_dropped_issue=True,
     ),
     Inst(
         name="generic_element_reset_mid_op",
@@ -337,7 +337,7 @@ CASES = (
         base_c_width=12,
         a_width=9,
         b_width=8,
-        expect_busy_mac=True,
+        expect_dropped_issue=True,
         test_kind=TEST_RESET_MID_OP,
     ),
     Inst(
@@ -353,7 +353,7 @@ CASES = (
         base_c_width=12,
         a_width=7,
         b_width=8,
-        expect_busy_mac=True,
+        expect_dropped_issue=True,
         test_kind=TEST_RESET_MID_OP,
     ),
     Inst(
@@ -372,7 +372,7 @@ CASES = (
         base_c_width=12,
         a_width=11,
         b_width=12,
-        expect_busy_mac=True,
+        expect_dropped_issue=True,
     ),
     Inst(
         name="macro1_element_serial_unsigned_lat3_wb1_equal_clocks",
@@ -385,7 +385,7 @@ CASES = (
         wclk_period=5,
         b_sets=1,
         base_c_width=10,
-        expect_busy_mac=True,
+        expect_dropped_issue=True,
         impl=IMPL_MACRO_1,
     ),
     Inst(
@@ -401,7 +401,7 @@ CASES = (
         ch_out=3,
         b_sets=1,
         base_c_width=11,
-        expect_busy_mac=True,
+        expect_dropped_issue=True,
         impl=IMPL_MACRO_1,
     ),
 )
@@ -512,7 +512,7 @@ def tb_text(case: Inst) -> str:
   localparam int unsigned NUM_ITERS = {case.iterations};
   localparam int unsigned MCLK_PERIOD = {case.mclk_period};
   localparam int unsigned WCLK_PERIOD = {case.wclk_period};
-  localparam bit EXPECT_BUSY_MAC_ATTEMPT = {sv_bit(case.expect_busy_mac)};
+  localparam bit EXPECT_DROPPED_ISSUE = {sv_bit(case.expect_dropped_issue)};
   localparam int unsigned TEST_KIND = {case.test_kind};
 
 `include \"cim_element_tb_common.svh\"

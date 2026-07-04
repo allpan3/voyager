@@ -2,7 +2,7 @@
 //
 // These tests drive the fast SystemC CIMElement model and a Verilated
 // CIMIntElement RTL model with the same native CIM interface, then compare the
-// observable start/busy contract and valid result payloads cycle by cycle
+// observable issue/ready contract, retire toggles, and result payloads cycle by cycle
 
 #include <ac_int.h>
 #include <systemc.h>
@@ -61,13 +61,15 @@ struct CIMElementSystemCTestCase : sc_module {
   ZeroSignal<ac_int<A_WIDTH, false>> a[A_COLS];
   ZeroSignal<ac_int<B_WIDTH, false>> b[Dut::B_COLS][Dut::B_ROWS];
   sc_signal<bool> wen;
-  ZeroSignal<ac_int<Dut::BITS_CH_IN, false>> widx;
+  ZeroSignal<ac_int<Dut::BITS_CH_IN, false>> waddr;
   ZeroSignal<ac_int<Dut::BITS_SET, false>> wset;
-  sc_signal<bool> mac_start;
+  sc_signal<bool> mac_issue;
   ZeroSignal<ac_int<Dut::BITS_SET, false>> mset;
   ZeroSignal<ac_int<Dut::C_WIDTH, false>> c[Dut::B_COLS];
-  sc_signal<bool> c_valid;
-  sc_signal<bool> mac_busy;
+  sc_signal<bool> c_retire;
+  sc_signal<bool> mac_ready;
+
+  bool last_retire_ = false;
 
   SC_HAS_PROCESS(CIMElementSystemCTestCase);
 
@@ -80,12 +82,12 @@ struct CIMElementSystemCTestCase : sc_module {
     dut.mclk(clk);
     dut.rstn(rstn);
     dut.wen(wen);
-    dut.widx(widx);
+    dut.waddr(waddr);
     dut.wset(wset);
-    dut.mac_start(mac_start);
+    dut.mac_issue(mac_issue);
     dut.mset(mset);
-    dut.c_valid(c_valid);
-    dut.mac_busy(mac_busy);
+    dut.c_retire(c_retire);
+    dut.mac_ready(mac_ready);
 
     for (int chi = 0; chi < A_COLS; chi++) {
       dut.a[chi](a[chi]);
@@ -149,9 +151,9 @@ struct CIMElementSystemCTestCase : sc_module {
     rtl.mclk = clk.read();
     rtl.rstn = rstn.read();
     rtl.wen = wen.read();
-    rtl.widx = signal_value(widx);
+    rtl.waddr = signal_value(waddr);
     rtl.wset = signal_value(wset);
-    rtl.mac_start = mac_start.read();
+    rtl.mac_issue = mac_issue.read();
     rtl.mset = signal_value(mset);
 
     for (int chi = 0; chi < A_COLS; chi++) {
@@ -178,24 +180,20 @@ struct CIMElementSystemCTestCase : sc_module {
     compare_outputs(label);
   }
 
-  // Compare start/busy every cycle and payload while valid or reset is active
+  // Compare issue/ready, retire toggles, and the registered result every cycle
   void compare_outputs(const char* label) {
-    if (mac_busy.read() != static_cast<bool>(rtl.mac_busy)) {
+    if (mac_ready.read() != static_cast<bool>(rtl.mac_ready)) {
       std::ostringstream text;
-      text << label << ": mac_busy mismatch, SystemC=" << mac_busy.read()
-           << " RTL=" << static_cast<int>(rtl.mac_busy);
+      text << label << ": mac_ready mismatch, SystemC=" << mac_ready.read()
+           << " RTL=" << static_cast<int>(rtl.mac_ready);
       require(false, text.str());
     }
 
-    if (c_valid.read() != static_cast<bool>(rtl.c_valid)) {
+    if (c_retire.read() != static_cast<bool>(rtl.c_retire)) {
       std::ostringstream text;
-      text << label << ": c_valid mismatch, SystemC=" << c_valid.read()
-           << " RTL=" << static_cast<int>(rtl.c_valid);
+      text << label << ": c_retire mismatch, SystemC=" << c_retire.read()
+           << " RTL=" << static_cast<int>(rtl.c_retire);
       require(false, text.str());
-    }
-
-    if (!c_valid.read() && rstn.read()) {
-      return;
     }
 
     for (int col = 0; col < Dut::B_COLS; col++) {
@@ -230,9 +228,9 @@ struct CIMElementSystemCTestCase : sc_module {
     clk.write(false);
     rstn.write(false);
     wen.write(false);
-    widx.write(0);
+    waddr.write(0);
     wset.write(0);
-    mac_start.write(false);
+    mac_issue.write(false);
     mset.write(0);
     for (int chi = 0; chi < A_COLS; chi++) {
       a[chi].write(0);
@@ -245,18 +243,19 @@ struct CIMElementSystemCTestCase : sc_module {
     settle_and_compare("initialize");
   }
 
-  // Apply reset and release into an idle non-busy state
+  // Apply reset and release into an idle ready state
   void apply_reset() {
     rstn.write(false);
     wen.write(false);
-    mac_start.write(false);
+    mac_issue.write(false);
     settle_and_compare("reset asserted");
     tick("reset clock");
 
     rstn.write(true);
     settle_and_compare("reset release");
-    require(!mac_busy.read(), "mac_busy stayed high after reset release");
-    require(!c_valid.read(), "c_valid stayed high after reset release");
+    require(mac_ready.read(), "mac_ready stayed low after reset release");
+    require(!c_retire.read(), "c_retire recovered high after reset release");
+    last_retire_ = false;
   }
 
   // Drive one activation vector
@@ -270,7 +269,7 @@ struct CIMElementSystemCTestCase : sc_module {
   void write_weight_group(int row, int base) {
     wen.write(true);
     wset.write(row);
-    widx.write(base);
+    waddr.write(base);
 
     for (int col = 0; col < Dut::B_COLS; col++) {
       for (int lane = 0; lane < Dut::B_ROWS; lane++) {
@@ -293,58 +292,92 @@ struct CIMElementSystemCTestCase : sc_module {
     }
   }
 
-  // Wait until both models report c_valid or fail on timeout
-  void wait_for_valid() {
+  // Wait until both models flip c_retire or fail on timeout
+  void wait_for_retire() {
     for (int cycle = 0; cycle < 128; cycle++) {
-      if (c_valid.read()) {
-        require(static_cast<bool>(rtl.c_valid),
-                "SystemC c_valid asserted before RTL c_valid");
+      if (c_retire.read() != last_retire_) {
+        last_retire_ = c_retire.read();
         return;
       }
-      tick("wait valid");
+      tick("wait retire");
     }
-    require(false, "timed out waiting for c_valid");
+    require(false, "timed out waiting for c_retire");
   }
 
-  // Launch a MAC and optionally pulse a start while the held payload stays stable
-  void run_mac_check(int row, int phase, bool pulse_while_busy) {
+  // Launch a MAC and optionally pulse an ignored issue while not ready
+  void run_mac_check(int row, int phase, bool pulse_while_pending) {
     drive_activation(phase);
     mset.write(row);
-    mac_start.write(true);
+    mac_issue.write(true);
     tick("launch mac");
-    require(mac_busy.read(), "mac_busy did not assert after accepted MAC");
-
-    if (pulse_while_busy) {
-      mac_start.write(true);
-      tick("busy mac pulse");
+    if (Dut::issue_window() > 1) {
+      require(!mac_ready.read(), "mac_ready did not drop inside the issue window");
+    } else {
+      require(mac_ready.read(), "mac_ready must stay high for a one-cycle issue window");
     }
 
-    mac_start.write(false);
+    if (pulse_while_pending && Dut::issue_window() > 1) {
+      mac_issue.write(true);
+      tick("dropped issue pulse");
+    }
+
+    mac_issue.write(false);
     settle_and_compare("mac idle");
-    wait_for_valid();
+    wait_for_retire();
     compare_outputs("completed mac");
     tick("hold result");
     compare_outputs("held result");
+  }
+
+  // Issue ops back to back at the ready cadence while comparing both models
+  void run_pipelined_check(int row, int base_phase) {
+    constexpr int kOps = 3;
+    int issued = 0;
+    int retired = 0;
+    int guard = 0;
+
+    while (retired < kOps) {
+      if (issued < kOps && mac_ready.read()) {
+        drive_activation(base_phase + issued);
+        mset.write(row);
+        mac_issue.write(true);
+        issued++;
+      } else {
+        mac_issue.write(false);
+      }
+      tick("pipelined");
+      mac_issue.write(false);
+
+      if (c_retire.read() != last_retire_) {
+        last_retire_ = c_retire.read();
+        retired++;
+      }
+
+      require(++guard < 512, "pipelined check stalled");
+    }
   }
 
   // Reset an in-flight MAC and confirm resetless weights serve later operations
   void run_reset_mid_operation_check() {
     drive_activation(7);
     mset.write(0);
-    mac_start.write(true);
+    mac_issue.write(true);
     tick("launch reset test");
-    require(mac_busy.read(), "mac_busy did not assert before mid-operation reset");
+    if (Dut::issue_window() > 1) {
+      require(!mac_ready.read(), "mac_ready did not drop before mid-operation reset");
+    }
 
-    mac_start.write(false);
+    mac_issue.write(false);
     rstn.write(false);
     settle_and_compare("mid-operation reset");
     tick("mid-operation reset clock");
     rstn.write(true);
     settle_and_compare("mid-operation reset release");
-    require(!mac_busy.read(),
-            "mac_busy stayed high after mid-operation reset");
-    require(!c_valid.read(),
-            "c_valid recovered high after mid-operation reset");
+    require(mac_ready.read(),
+            "mac_ready stayed low after mid-operation reset");
+    require(!c_retire.read(),
+            "c_retire recovered high after mid-operation reset");
+    last_retire_ = false;
 
     run_mac_check(B_SETS - 1, 8, false);
   }
@@ -356,8 +389,9 @@ struct CIMElementSystemCTestCase : sc_module {
     tick("idle reset clock");
     rstn.write(true);
     settle_and_compare("idle reset release");
-    require(!mac_busy.read(), "mac_busy stayed high after idle reset");
-    require(!c_valid.read(), "c_valid recovered high after idle reset");
+    require(mac_ready.read(), "mac_ready stayed low after idle reset");
+    require(!c_retire.read(), "c_retire recovered high after idle reset");
+    last_retire_ = false;
 
     run_mac_check(B_SETS - 1, 8, false);
   }
@@ -369,6 +403,7 @@ struct CIMElementSystemCTestCase : sc_module {
     load_weights();
     run_mac_check(0, 1, true);
     run_mac_check(B_SETS / 2, 3, false);
+    run_pipelined_check(0, 20);
     if constexpr (MODE == CIM_MODE_BIT_SERIAL_VALUE) {
       run_idle_reset_weight_retention_check();
     } else {

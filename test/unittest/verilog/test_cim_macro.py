@@ -45,7 +45,7 @@ class Inst:
     wclk_period: int
     ch_in: int = 4
     ch_out: int = 2
-    num_rows: int = 2
+    b_sets: int = 2
     a_width: int = 4
     b_width: int = 4
     c_width: int = 16
@@ -97,7 +97,7 @@ CASES = (
         iterations=36,
         mclk_period=6,
         wclk_period=11,
-        num_rows=4,
+        b_sets=4,
     ),
     Inst(
         name="generic_parallel_unsigned_single_row_lat2_wb2",
@@ -109,7 +109,7 @@ CASES = (
         iterations=16,
         mclk_period=5,
         wclk_period=7,
-        num_rows=1,
+        b_sets=1,
     ),
     Inst(
         name="generic_parallel_equal_clocks_mixed_b",
@@ -144,7 +144,7 @@ CASES = (
         mclk_period=5,
         wclk_period=8,
         ch_out=4,
-        num_rows=3,
+        b_sets=3,
         c_width=10,
     ),
     Inst(
@@ -187,7 +187,7 @@ CASES = (
         mclk_period=7,
         wclk_period=11,
         ch_in=5,
-        num_rows=5,
+        b_sets=5,
         c_width=11,
     ),
     Inst(
@@ -274,7 +274,7 @@ CASES = (
         mclk_period=7,
         wclk_period=11,
         ch_in=5,
-        num_rows=5,
+        b_sets=5,
         c_width=11,
     ),
     Inst(
@@ -287,7 +287,7 @@ CASES = (
         iterations=10,
         mclk_period=5,
         wclk_period=5,
-        num_rows=1,
+        b_sets=1,
         c_width=10,
         impl=IMPL_MACRO_1,
     ),
@@ -303,7 +303,7 @@ CASES = (
         wclk_period=6,
         ch_in=8,
         ch_out=3,
-        num_rows=1,
+        b_sets=1,
         c_width=11,
         impl=IMPL_MACRO_1,
     ),
@@ -347,7 +347,7 @@ def impl_label(case: Inst) -> str:
 
 # Catch parameter combinations that the shared SV harness cannot model correctly
 def validate_case(case: Inst) -> None:
-    if case.ch_in <= 0 or case.ch_out <= 0 or case.num_rows <= 0:
+    if case.ch_in <= 0 or case.ch_out <= 0 or case.b_sets <= 0:
         raise ValueError(f"{case.name}: dimensions must be positive")
     if case.a_width <= 0 or case.b_width <= 0 or case.c_width <= 0:
         raise ValueError(f"{case.name}: widths must be positive")
@@ -370,8 +370,8 @@ def validate_case(case: Inst) -> None:
             raise ValueError(f"{case.name}: macro1 requires CH_IN greater than one")
         if case.a_signed or case.b_signed_mask != 0:
             raise ValueError(f"{case.name}: macro1 wrapper cases must be unsigned")
-        if case.num_rows != 1:
-            raise ValueError(f"{case.name}: macro1 requires NUM_ROWS=1")
+        if case.b_sets != 1:
+            raise ValueError(f"{case.name}: macro1 requires B_SETS=1")
         if case.write_ch_in != 1:
             raise ValueError(f"{case.name}: macro1 requires WRITE_CH_IN=1")
         if case.mac_latency < 3:
@@ -389,7 +389,7 @@ def tb_text(case: Inst) -> str:
   localparam string CASE_NAME = \"{case.name}\";
   localparam int unsigned CH_IN = {case.ch_in};
   localparam int unsigned CH_OUT = {case.ch_out};
-  localparam int unsigned NUM_ROWS = {case.num_rows};
+  localparam int unsigned B_SETS = {case.b_sets};
   localparam int unsigned A_WIDTH = {case.a_width};
   localparam int unsigned B_WIDTH = {case.b_width};
   localparam int unsigned C_WIDTH = {case.c_width};

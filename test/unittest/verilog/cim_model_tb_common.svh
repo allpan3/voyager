@@ -1,6 +1,6 @@
 // Common CIMIntMacroWrapper unit-test harness code
 // Include this inside a generated test module after defining the localparams below:
-// CASE_NAME, CH_IN, CH_OUT, NUM_ROWS, A_WIDTH, B_WIDTH, C_WIDTH, WRITE_CH_IN,
+// CASE_NAME, CH_IN, CH_OUT, B_SETS, A_WIDTH, B_WIDTH, C_WIDTH, WRITE_CH_IN,
 // MAC_LATENCY, INST_MODE, INST_IMPL, A_SIGNED, B_SIGNED_MASK, IS_SERIAL, NUM_ITERS,
 // MCLK_PERIOD, WCLK_PERIOD, and TEST_KIND
 
@@ -20,18 +20,18 @@ logic                  mac;
 logic                  init;
 logic                  a_signed;
 logic                  b_signed [CH_OUT];
-logic [BITS_CH_IN-1:0] widx;
-logic [BITS_ROW-1:0]   wrow;
-logic [BITS_ROW-1:0]   mrow;
+logic [BITS_CH_IN-1:0] waddr;
+logic [BITS_SET-1:0]   wset;
+logic [BITS_SET-1:0]   mset;
 logic [C_WIDTH-1:0]    c [CH_OUT];
 
 // Reference state used by the self-checker. Rows start invalid and become
 // usable only after the write scheduler has completed all write groups for that row
-logic [B_WIDTH-1:0] model_weights [NUM_ROWS][CH_OUT][CH_IN];
+logic [B_WIDTH-1:0] model_weights [B_SETS][CH_OUT][CH_IN];
 logic [C_WIDTH-1:0] expected [NUM_ITERS][CH_OUT];
 int expected_row [NUM_ITERS];
-bit row_valid [NUM_ROWS];
-int row_mac_pending [NUM_ROWS];
+bit row_valid [B_SETS];
+int row_mac_pending [B_SETS];
 
 // Event scheduler state for independent mclk/wclk periods. The two clocks may
 // be equal, divisible, or relatively prime depending on the generated case
@@ -56,7 +56,7 @@ logic checker_result_valid;
 CIMIntMacroWrapper #(
     .CH_IN(CH_IN),
     .CH_OUT(CH_OUT),
-    .NUM_ROWS(NUM_ROWS),
+    .B_SETS(B_SETS),
     .A_WIDTH(A_WIDTH),
     .B_WIDTH(B_WIDTH),
     .C_WIDTH(C_WIDTH),
@@ -74,9 +74,9 @@ CIMIntMacroWrapper #(
     .init(init),
     .a_signed(a_signed),
     .b_signed(b_signed),
-    .widx(widx),
-    .wrow(wrow),
-    .mrow(mrow),
+    .waddr(waddr),
+    .wset(wset),
+    .mset(mset),
     .c(c)
 );
 
@@ -174,9 +174,9 @@ task automatic drive_defaults;
     mac = 1'b0;
     init = 1'b0;
     a_signed = A_SIGNED;
-    widx = '0;
-    wrow = '0;
-    mrow = '0;
+    waddr = '0;
+    wset = '0;
+    mset = '0;
     init_rng_from_plusarg();
     tb_now = 0;
     next_m_edge = 0;
@@ -187,7 +187,7 @@ task automatic drive_defaults;
     overlapped_write_mac_events = 0;
     parallel_init_noise_events = 0;
 
-    for (int row = 0; row < NUM_ROWS; row++) begin
+    for (int row = 0; row < B_SETS; row++) begin
       row_valid[row] = 1'b0;
       row_mac_pending[row] = 0;
     end
@@ -266,8 +266,8 @@ endtask
 task automatic drive_random_weight_group(input int row, input int base);
   int unsigned value;
   begin
-    wrow = BITS_ROW'(row);
-    widx = BITS_CH_IN'(base);
+    wset = BITS_SET'(row);
+    waddr = BITS_CH_IN'(base);
     for (int cho = 0; cho < CH_OUT; cho++) begin
       for (int lane = 0; lane < WRITE_CH_IN; lane++) begin
         rng_next(value);
@@ -317,12 +317,12 @@ function automatic int choose_mac_row;
   int candidate;
   begin
     choose_mac_row = -1;
-    for (int attempt = 0; attempt < NUM_ROWS; attempt++) begin
-      candidate = (next_mac_row + attempt) % NUM_ROWS;
+    for (int attempt = 0; attempt < B_SETS; attempt++) begin
+      candidate = (next_mac_row + attempt) % B_SETS;
       // A row may be used by MAC only after all write groups of its latest write completed
       if (row_valid[candidate]) begin
         // Advance the round-robin cursor only after this call claims a usable row
-        next_mac_row = (candidate + 1) % NUM_ROWS;
+        next_mac_row = (candidate + 1) % B_SETS;
         return candidate;
       end
     end
@@ -340,15 +340,15 @@ task automatic maybe_start_write(input int avoid_row);
       return;
     end
 
-    for (int attempt = 0; attempt < NUM_ROWS; attempt++) begin
-      candidate = (next_write_row + attempt) % NUM_ROWS;
+    for (int attempt = 0; attempt < B_SETS; attempt++) begin
+      candidate = (next_write_row + attempt) % B_SETS;
       // The writer can take any row that is not the current MAC row and has no
       // in-flight MAC result depending on its old weights
       if ((candidate != avoid_row) && (row_mac_pending[candidate] == 0)) begin
         write_row = candidate;
         write_base = 0;
         row_valid[candidate] = 1'b0;
-        next_write_row = (candidate + 1) % NUM_ROWS;
+        next_write_row = (candidate + 1) % B_SETS;
         return;
       end
     end
@@ -547,7 +547,7 @@ task automatic run_parallel;
         // If all rows are being rewritten, skip this mclk edge rather than using stale data
         if (mac_row >= 0) begin
           randomize_activation();
-          mrow = BITS_ROW'(mac_row);
+          mset = BITS_SET'(mac_row);
           mac = 1'b1;
           record_expected(launched, mac_row);
           row_mac_pending[mac_row]++;
@@ -577,7 +577,7 @@ task automatic run_illegal_suite;
     init = 1'b0;
 
     randomize_activation();
-    mrow = '0;
+    mset = '0;
     mac = 1'b1;
     init = 1'b1;
     tick_mclk_blocking();
@@ -587,7 +587,7 @@ task automatic run_illegal_suite;
 
     randomize_activation();
     drive_random_weight_group(0, 0);
-    mrow = '0;
+    mset = '0;
     mac = 1'b1;
     init = 1'b0;
     tick_wclk_blocking();
@@ -625,7 +625,7 @@ task automatic run_serial;
       end
 
       randomize_activation();
-      mrow = BITS_ROW'(mac_row);
+      mset = BITS_SET'(mac_row);
       record_expected(launched, mac_row);
       row_mac_pending[mac_row]++;
 
@@ -675,7 +675,7 @@ task automatic check_stress_coverage;
     end
     // Single-row cases allow writes only when no MAC result is pending, so they
     // do not need the multi-row overlap coverage requirement
-    if (NUM_ROWS > 1) begin
+    if (B_SETS > 1) begin
       // A passing multi-row test should have completed at least one full row update
       if (completed_row_updates == 0) begin
         $fatal(1, "%s: no background row updates completed", CASE_NAME);

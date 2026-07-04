@@ -24,7 +24,7 @@ module CIMIntMacroModel #(
     input  logic                  init,                    // Serial: marks the first partial result when mac is high; ignored by bit-parallel
     input  logic                  a_signed,
     input  logic                  b_signed [CH_OUT],       // Each output channel can have different signedness, which is needed to support wider signed B computation
-    input  logic [BITS_CH_IN-1:0] widx,                    // Address to select the slot (bank) for writing b
+    input  logic [BITS_CH_IN-1:0] waddr,                    // Address of the slot (bank) within a row for writing b
     input  logic [BITS_ROW-1:0]   wrow,                    // Address to select the row for writing b
     input  logic [BITS_ROW-1:0]   mrow,                    // Address to select the row for MAC computation
     output logic [C_WIDTH-1:0]    c [CH_OUT]
@@ -41,7 +41,7 @@ module CIMIntMacroModel #(
     if (wen) begin
       for (int cho = 0; cho < CH_OUT; cho++) begin : chan_out
         for (int lane = 0; lane < WRITE_CH_IN; lane++) begin : chan_in
-          b_mem[wrow][cho][widx + BITS_CH_IN'(lane)] <= b[cho][lane];
+          b_mem[wrow][cho][waddr + BITS_CH_IN'(lane)] <= b[cho][lane];
         end
       end
     end

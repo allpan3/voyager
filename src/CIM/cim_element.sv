@@ -48,23 +48,25 @@ module CIMIntElement #(
     input  logic                       mclk,
     input  logic                       rstn,
 
-    // Logical A operand is a vector of length A_COLS
+    // Logical A operand is a vector of length A_COLS. a and mset must remain
+    // stable from an accepted issue until mac_ready returns high (the issue window)
     input  logic [A_WIDTH-1:0]         a [A_COLS],
 
     // Logical B operand data for one write event. B_COLS is the number of B matrix
     // columns provided, and B_ROWS is the number of matrix rows written in this cycle
     input  logic [B_WIDTH-1:0]         b [B_COLS][B_ROWS],
     input  logic                       wen,
-    input  logic [BITS_CH_IN-1:0]      widx,
+    input  logic [BITS_CH_IN-1:0]      waddr,
     input  logic [BITS_SET-1:0]        wset,
 
-    // mac_start pulses to begin a MAC when mac_busy is low
-    input  logic                       mac_start,
+    // mac_issue pulses to begin a MAC when mac_ready is high; issues while not
+    // ready are ignored so the reservation must be made by the producer
+    input  logic                       mac_issue,
     input  logic [BITS_SET-1:0]        mset,
 
-    output logic [C_WIDTH-1:0]         c [B_COLS],
-    output logic                       c_valid,    // high while c holds a completed result
-    output logic                       mac_busy    // high while a new mac_start cannot be accepted
+    output logic [C_WIDTH-1:0]         c [B_COLS],  // registered result, stable until the next retire
+    output logic                       c_retire,   // toggles once per retired result
+    output logic                       mac_ready   // high when an issue presented this cycle is accepted
 );
 
   // CIM element walks operand A slice by slice. The width of a slice depends on the selected macro wrapper mode:
@@ -79,8 +81,8 @@ module CIMIntElement #(
   // ---------------------------------------------------------------------------
 
   logic start_mac;
-  // Operation finishes when the final A slice reaches the accumulator
-  logic finish_mac;
+  // The final A slice result reaches the accumulator on the retire edge
+  logic retire_op;
 
   // Max operand A width supported by the macro wrapper in serial mode
   localparam int unsigned SERIAL_MAX_SLICE_WIDTH = BASE_C_WIDTH - BASE_B_WIDTH - SUM_GUARD_WIDTH;
@@ -112,8 +114,14 @@ module CIMIntElement #(
   // Registered slice walk state after the launch cycle
   logic slice_walk_active;
   assign slice_walk_active = (slice_cycle != '0);
-  assign mac_busy = !rstn || slice_walk_active;
-  assign start_mac = mac_start && !mac_busy;
+
+  // The issue window closes once the final slice has fed its last window; the
+  // retire pipeline may still be draining while a new issue is accepted
+  logic issue_window_open;
+  assign issue_window_open = slice_walk_active &&
+    !(issued_all_slices && (slice_cycle == BITS_SLICE_LAUNCH_INTERVAL'(SLICE_LAUNCH_INTERVAL)));
+  assign mac_ready = rstn && !issue_window_open;
+  assign start_mac = mac_issue && mac_ready;
 
   // issue_slice marks the first cycle of a slice
   logic issue_slice;
@@ -133,8 +141,6 @@ module CIMIntElement #(
   always_ff @(posedge mclk or negedge rstn) begin
     if (!rstn) begin
       slice_cycle <= '0;
-    end else if (finish_mac) begin
-      slice_cycle <= '0;
     end else if (issue_slice) begin
       slice_cycle <= BITS_SLICE_LAUNCH_INTERVAL'(1);
     end else if (slice_walk_active && (slice_cycle < BITS_SLICE_LAUNCH_INTERVAL'(SLICE_LAUNCH_INTERVAL))) begin
@@ -144,9 +150,6 @@ module CIMIntElement #(
 
   always_ff @(posedge mclk or negedge rstn) begin
     if (!rstn) begin
-      next_a_slice_idx <= '0;
-      issued_all_slices <= 1'b0;
-    end else if (finish_mac) begin
       next_a_slice_idx <= '0;
       issued_all_slices <= 1'b0;
     end else if (issue_slice) begin
@@ -193,8 +196,8 @@ module CIMIntElement #(
   assign retiring_first_a_slice = slice_is_first_pipe[SLICE_MAC_CYCLES-1];
   assign retiring_last_a_slice = slice_is_last_pipe[SLICE_MAC_CYCLES-1];
 
-  // The final slice result is written to the external accumulator, so the MAC op finishes after the edge
-  assign finish_mac = slice_result_ready && retiring_last_a_slice;
+  // The final slice result is written to the output stage on the retire edge
+  assign retire_op = slice_result_ready && retiring_last_a_slice;
 
   // ---------------------------------------------------------------------------
   // Window Walking
@@ -211,8 +214,6 @@ module CIMIntElement #(
 
   always_ff @(posedge mclk or negedge rstn) begin
     if (!rstn) begin
-      a_window_slice_idx <= '0;
-    end else if (finish_mac) begin
       a_window_slice_idx <= '0;
     end else if (issue_slice) begin
       a_window_slice_idx <= issue_a_slice_idx;
@@ -368,7 +369,7 @@ module CIMIntElement #(
   CIMIntMacroWrapper #(
       .CH_IN(CH_IN),
       .CH_OUT(CH_OUT),
-      .NUM_ROWS(B_SETS),
+      .B_SETS(B_SETS),
       .A_WIDTH(BASE_A_WIDTH),
       .B_WIDTH(BASE_B_WIDTH),
       .C_WIDTH(BASE_C_WIDTH),
@@ -386,9 +387,9 @@ module CIMIntElement #(
       .init(macro_wrapper_init),
       .a_signed(macro_wrapper_a_signed),
       .b_signed(macro_wrapper_b_signed),
-      .widx(widx),
-      .wrow(wset),
-      .mrow(mset),
+      .waddr(waddr),
+      .wset(wset),
+      .mset(mset),
       .c(macro_wrapper_c)
   );
 
@@ -396,28 +397,37 @@ module CIMIntElement #(
   // External Accumulator and Outputs
   // ---------------------------------------------------------------------------
 
-  // Hold partial results while CIM PE walks across multiple A slices
+  // Hold partial results while the element walks across multiple A slices
   logic [C_WIDTH-1:0] acc [B_COLS];
-  assign c = acc;
+  // Next accumulator value shared by the accumulator and the retire capture
+  logic [C_WIDTH-1:0] acc_next [B_COLS];
+  // Registered output stage keeps a retired result stable while the next op accumulates
+  logic [C_WIDTH-1:0] c_out [B_COLS];
+  assign c = c_out;
+
+  always_comb begin
+    for (int cho = 0; cho < B_COLS; cho++) begin
+      // The first retiring slice restarts the accumulation, so back-to-back ops need no clear
+      acc_next[cho] = (retiring_first_a_slice ? {C_WIDTH{1'b0}} : (acc[cho] << SLICE_WIDTH)) + reduce_b_slices(cho);
+    end
+  end
 
   always_ff @(posedge mclk or negedge rstn) begin
     if (!rstn) begin
-      c_valid <= 1'b0;
+      c_retire <= 1'b0;
       for (int cho = 0; cho < B_COLS; cho++) begin
         acc[cho] <= '0;
-      end
-    end else if (start_mac) begin
-      c_valid <= 1'b0;
-      for (int cho = 0; cho < B_COLS; cho++) begin
-        acc[cho] <= '0;
+        c_out[cho] <= '0;
       end
     end else if (slice_result_ready) begin
       for (int cho = 0; cho < B_COLS; cho++) begin
-        // acc is cleared on each accepted element mac, so the same shift-add handles the first A slice
-        acc[cho] <= (acc[cho] << SLICE_WIDTH) + reduce_b_slices(cho);
+        acc[cho] <= acc_next[cho];
       end
-      if (retiring_last_a_slice) begin
-        c_valid <= 1'b1;
+      if (retire_op) begin
+        c_retire <= !c_retire;
+        for (int cho = 0; cho < B_COLS; cho++) begin
+          c_out[cho] <= acc_next[cho];
+        end
       end
     end
   end

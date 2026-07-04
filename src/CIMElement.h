@@ -3,11 +3,15 @@
 // CIMElement is a PE-level Catapult block boundary for the native CIM vector and
 // matrix interface. The synthesized implementation blackboxes the existing
 // SystemVerilog CIMIntElement, while the C++ body provides event-level simulation
+// of the issue/retire protocol: mac_issue accepted while mac_ready, results
+// retiring into c with a c_retire toggle after a fixed latency
 
 #pragma once
 
 #include <ac_int.h>
 #include <systemc.h>
+
+#include <deque>
 
 #include <ac_blackbox.h>
 
@@ -120,34 +124,41 @@ SC_MODULE(CIMElement) {
   sc_in<ac_int<A_WIDTH, false>> a[A_COLS];
   sc_in<ac_int<B_WIDTH, false>> b[B_COLS][B_ROWS];
   sc_in<bool> CCS_INIT_S1(wen);
-  sc_in<ac_int<BITS_CH_IN, false>> CCS_INIT_S1(widx);
+  sc_in<ac_int<BITS_CH_IN, false>> CCS_INIT_S1(waddr);
   sc_in<ac_int<BITS_SET, false>> CCS_INIT_S1(wset);
 
-  // CIMElement MAC start interface
-  sc_in<bool> CCS_INIT_S1(mac_start);
+  // CIMElement MAC issue interface; a and mset must stay stable from an
+  // accepted issue until mac_ready returns high (the issue window)
+  sc_in<bool> CCS_INIT_S1(mac_issue);
   sc_in<ac_int<BITS_SET, false>> CCS_INIT_S1(mset);
 
-  // CIMElement result and flow-control interface
+  // CIMElement result interface; c holds the last retired result and c_retire
+  // toggles once per retirement
   sc_out<ac_int<C_WIDTH, false>> c[B_COLS];
-  sc_out<bool> CCS_INIT_S1(c_valid);
-  sc_out<bool> CCS_INIT_S1(mac_busy);
+  sc_out<bool> CCS_INIT_S1(c_retire);
+  sc_out<bool> CCS_INIT_S1(mac_ready);
 
  private:
   // Resetless weight storage matching the RTL CIM macro wrapper memory
   ac_int<B_WIDTH, false> weight_mem[B_SETS][B_COLS][A_COLS];
 
+  // PendingResult carries one computed result through the fixed retire latency
+  struct PendingResult {
+    ac_int<C_WIDTH, false> value[B_COLS];
+    int cycles_remaining;
+  };
+
   // Resettable C++ registers owned by the mclk process
-  ac_int<C_WIDTH, false> pending_result[B_COLS];
-  ac_int<C_WIDTH, false> c_reg[B_COLS];
-  bool operation_active;
-  int cycles_remaining;
-  sc_signal<bool> operation_active_state;
+  std::deque<PendingResult> pending_results;
+  int window_remaining;
+  bool retire_state;
+  sc_signal<bool> window_idle_state;
 
  public:
   // Construct the CIMElement behavioral model and blackbox metadata
   SC_CTOR(CIMElement)
-      : operation_active(false),
-      cycles_remaining(0) {
+      : window_remaining(0),
+      retire_state(false) {
     initialize_model_state();
 
     SC_METHOD(write_weights);
@@ -158,8 +169,8 @@ SC_MODULE(CIMElement) {
     sensitive << mclk.pos() << rstn.neg();
     dont_initialize();
 
-    SC_METHOD(drive_mac_busy);
-    sensitive << rstn << operation_active_state;
+    SC_METHOD(drive_mac_ready);
+    sensitive << rstn << window_idle_state;
 
     ac_blackbox()
         .entity("CIMIntElement")
@@ -181,9 +192,9 @@ SC_MODULE(CIMElement) {
         .end();
   }
 
- private:
-  // Return the logical number of mclk cycles before a result is valid
-  static constexpr int operation_latency() {
+ public:
+  // Return the number of mclk cycles an accepted issue keeps the element not ready
+  static constexpr int issue_window() {
     constexpr int serial_max_slice_width =
         BASE_C_WIDTH - BASE_B_WIDTH - SUM_GUARD_WIDTH;
     constexpr int serial_slice_width =
@@ -196,16 +207,21 @@ SC_MODULE(CIMElement) {
         ceil_div(serial_slice_width, BASE_A_WIDTH) * BASE_A_WIDTH;
     constexpr int slice_launch_interval =
         (MODE == CIM_MODE_BIT_SERIAL_VALUE) ? serial_slice_interval : 1;
-    return num_slices * slice_launch_interval + MAC_LATENCY - 1;
+    return num_slices * slice_launch_interval;
   }
 
+  // Return the number of mclk cycles from an accepted issue to its retirement
+  static constexpr int operation_latency() {
+    return issue_window() + MAC_LATENCY - 1;
+  }
+
+ private:
   // Initialize observable model state while leaving resetless weights untouched
   void initialize_model_state() {
-    for (int b_col_idx = 0; b_col_idx < B_COLS; b_col_idx++) {
-      pending_result[b_col_idx] = 0;
-      c_reg[b_col_idx] = 0;
-    }
-    operation_active_state.write(false);
+    pending_results.clear();
+    window_remaining = 0;
+    retire_state = false;
+    window_idle_state.write(true);
   }
 
   // Decode a CIM operand with the configured signedness
@@ -223,7 +239,7 @@ SC_MODULE(CIMElement) {
     }
 
     const int macro_row_idx = wset.read().to_int();
-    const int base_a_col = widx.read().to_int();
+    const int base_a_col = waddr.read().to_int();
 
     if (macro_row_idx >= B_SETS) {
       return;
@@ -240,75 +256,82 @@ SC_MODULE(CIMElement) {
     }
   }
 
-  // Compute one native CIM matrix-vector operation into the pending result
-  void compute_result() {
-    const int macro_row_idx = mset.read().to_int();
+  // Compute one native CIM matrix-vector operation for the issued payload
+  PendingResult compute_result() {
+    PendingResult pending;
+    pending.cycles_remaining = operation_latency();
+    const int b_set_idx = mset.read().to_int();
 
     for (int b_col_idx = 0; b_col_idx < B_COLS; b_col_idx++) {
       ac_int<C_WIDTH, SIGNED> acc = 0;
 
-      if (macro_row_idx < B_SETS) {
+      if (b_set_idx < B_SETS) {
         for (int a_col_idx = 0; a_col_idx < A_COLS; a_col_idx++) {
           const ac_int<A_WIDTH, SIGNED> a_value =
               decode_operand<A_WIDTH>(a[a_col_idx].read());
           const ac_int<B_WIDTH, SIGNED> b_value =
               decode_operand<B_WIDTH>(
-                  weight_mem[macro_row_idx][b_col_idx][a_col_idx]);
+                  weight_mem[b_set_idx][b_col_idx][a_col_idx]);
           acc += a_value * b_value;
         }
       }
-      pending_result[b_col_idx] = acc;
+      pending.value[b_col_idx] = acc;
     }
+    return pending;
   }
 
   // Clear resettable CIM element state while preserving resetless weights
   void reset_element_state() {
-    operation_active = false;
-    operation_active_state.write(false);
-    cycles_remaining = 0;
+    pending_results.clear();
+    window_remaining = 0;
+    retire_state = false;
+    window_idle_state.write(true);
     for (int b_col_idx = 0; b_col_idx < B_COLS; b_col_idx++) {
-      pending_result[b_col_idx] = 0;
-      c_reg[b_col_idx] = 0;
       c[b_col_idx].write(0);
     }
-    c_valid.write(false);
+    c_retire.write(false);
   }
 
-  // Advance the mclk-domain request and result state machine
+  // Advance the mclk-domain issue and retire state
   void run_mclk() {
     if (!rstn.read()) {
       reset_element_state();
       return;
     }
 
-    if (operation_active) {
-      if (cycles_remaining <= 1) {
-        operation_active = false;
-        operation_active_state.write(false);
-        cycles_remaining = 0;
-        for (int b_col_idx = 0; b_col_idx < B_COLS; b_col_idx++) {
-          c_reg[b_col_idx] = pending_result[b_col_idx];
-          c[b_col_idx].write(c_reg[b_col_idx]);
-        }
-        c_valid.write(true);
-      } else {
-        cycles_remaining--;
+    // Sample readiness before this edge's updates, mirroring the RTL comb ready
+    const bool ready_now = (window_remaining == 0);
+
+    // Advance the retire pipeline; ops are spaced by at least the issue window,
+    // so at most one result retires per edge
+    if (!pending_results.empty()) {
+      for (PendingResult& pending : pending_results) {
+        pending.cycles_remaining--;
       }
-      return;
+      if (pending_results.front().cycles_remaining == 0) {
+        for (int b_col_idx = 0; b_col_idx < B_COLS; b_col_idx++) {
+          c[b_col_idx].write(pending_results.front().value[b_col_idx]);
+        }
+        retire_state = !retire_state;
+        c_retire.write(retire_state);
+        pending_results.pop_front();
+      }
     }
 
-    if (mac_start.read()) {
-      compute_result();
-      operation_active = true;
-      operation_active_state.write(true);
-      cycles_remaining = operation_latency();
-      c_valid.write(false);
-      return;
+    if (window_remaining > 0) {
+      window_remaining--;
     }
+
+    if (mac_issue.read() && ready_now) {
+      pending_results.push_back(compute_result());
+      window_remaining = issue_window() - 1;
+    }
+
+    window_idle_state.write(window_remaining == 0);
   }
 
-  // Drive combinational busy state from reset and active MAC state
-  void drive_mac_busy() {
-    mac_busy.write(!rstn.read() || operation_active_state.read());
+  // Drive combinational ready state from reset and the issue-window state
+  void drive_mac_ready() {
+    mac_ready.write(rstn.read() && window_idle_state.read());
   }
 };
