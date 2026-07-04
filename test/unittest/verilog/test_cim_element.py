@@ -38,13 +38,13 @@ class Inst:
     mode: str
     signed: bool
     mac_latency: int
-    write_bw: int
+    write_ch_in: int
     iterations: int
     mclk_period: int
     wclk_period: int
     a_cols: int = 4
     ch_out: int = 2
-    num_rows: int = 2
+    b_sets: int = 2
     base_a_width: int = 4
     base_b_width: int = 4
     base_c_width: int = 10
@@ -61,7 +61,7 @@ CASES = (
         mode=MODE_PARALLEL,
         signed=False,
         mac_latency=1,
-        write_bw=2,
+        write_ch_in=2,
         iterations=8,
         mclk_period=5,
         wclk_period=7,
@@ -71,7 +71,7 @@ CASES = (
         mode=MODE_PARALLEL,
         signed=False,
         mac_latency=2,
-        write_bw=2,
+        write_ch_in=2,
         iterations=8,
         mclk_period=5,
         wclk_period=7,
@@ -83,7 +83,7 @@ CASES = (
         mode=MODE_PARALLEL,
         signed=False,
         mac_latency=2,
-        write_bw=2,
+        write_ch_in=2,
         iterations=8,
         mclk_period=5,
         wclk_period=7,
@@ -96,13 +96,13 @@ CASES = (
         mode=MODE_PARALLEL,
         signed=True,
         mac_latency=3,
-        write_bw=1,
+        write_ch_in=1,
         iterations=10,
         mclk_period=6,
         wclk_period=11,
         a_cols=5,
         ch_out=6,
-        num_rows=3,
+        b_sets=3,
         base_c_width=12,
         a_width=10,
         b_width=8,
@@ -113,7 +113,7 @@ CASES = (
         mode=MODE_PARALLEL,
         signed=False,
         mac_latency=1,
-        write_bw=1,
+        write_ch_in=1,
         iterations=6,
         mclk_period=6,
         wclk_period=6,
@@ -125,12 +125,12 @@ CASES = (
         mode=MODE_PARALLEL,
         signed=True,
         mac_latency=2,
-        write_bw=2,
+        write_ch_in=2,
         iterations=6,
         mclk_period=5,
         wclk_period=7,
         ch_out=4,
-        num_rows=1,
+        b_sets=1,
         b_width=16,
         expect_busy_mac=True,
     ),
@@ -139,7 +139,7 @@ CASES = (
         mode=MODE_PARALLEL,
         signed=False,
         mac_latency=2,
-        write_bw=2,
+        write_ch_in=2,
         iterations=8,
         mclk_period=5,
         wclk_period=7,
@@ -152,7 +152,7 @@ CASES = (
         mode=MODE_PARALLEL,
         signed=False,
         mac_latency=2,
-        write_bw=2,
+        write_ch_in=2,
         iterations=8,
         mclk_period=5,
         wclk_period=7,
@@ -164,7 +164,7 @@ CASES = (
         mode=MODE_PARALLEL,
         signed=True,
         mac_latency=2,
-        write_bw=2,
+        write_ch_in=2,
         iterations=8,
         mclk_period=5,
         wclk_period=7,
@@ -176,13 +176,13 @@ CASES = (
         mode=MODE_PARALLEL,
         signed=True,
         mac_latency=5,
-        write_bw=5,
+        write_ch_in=5,
         iterations=10,
         mclk_period=7,
         wclk_period=11,
         a_cols=5,
         ch_out=4,
-        num_rows=5,
+        b_sets=5,
         base_c_width=12,
         a_width=5,
         b_width=8,
@@ -193,7 +193,7 @@ CASES = (
         mode=MODE_PARALLEL,
         signed=False,
         mac_latency=3,
-        write_bw=2,
+        write_ch_in=2,
         iterations=8,
         mclk_period=4,
         wclk_period=8,
@@ -206,7 +206,7 @@ CASES = (
         mode=MODE_SERIAL,
         signed=True,
         mac_latency=1,
-        write_bw=2,
+        write_ch_in=2,
         iterations=6,
         mclk_period=5,
         wclk_period=7,
@@ -217,7 +217,7 @@ CASES = (
         mode=MODE_SERIAL,
         signed=False,
         mac_latency=2,
-        write_bw=2,
+        write_ch_in=2,
         iterations=6,
         mclk_period=5,
         wclk_period=7,
@@ -231,13 +231,13 @@ CASES = (
         mode=MODE_SERIAL,
         signed=True,
         mac_latency=2,
-        write_bw=1,
+        write_ch_in=1,
         iterations=6,
         mclk_period=7,
         wclk_period=10,
         a_cols=5,
         ch_out=4,
-        num_rows=3,
+        b_sets=3,
         base_a_width=3,
         base_c_width=12,
         a_width=11,
@@ -249,7 +249,7 @@ CASES = (
         mode=MODE_SERIAL,
         signed=False,
         mac_latency=1,
-        write_bw=2,
+        write_ch_in=2,
         iterations=5,
         mclk_period=5,
         wclk_period=7,
@@ -260,7 +260,7 @@ CASES = (
         mode=MODE_SERIAL,
         signed=True,
         mac_latency=2,
-        write_bw=2,
+        write_ch_in=2,
         iterations=5,
         mclk_period=5,
         wclk_period=7,
@@ -274,7 +274,7 @@ CASES = (
         mode=MODE_SERIAL,
         signed=False,
         mac_latency=2,
-        write_bw=2,
+        write_ch_in=2,
         iterations=5,
         mclk_period=5,
         wclk_period=7,
@@ -288,7 +288,7 @@ CASES = (
         mode=MODE_SERIAL,
         signed=True,
         mac_latency=2,
-        write_bw=2,
+        write_ch_in=2,
         iterations=5,
         mclk_period=5,
         wclk_period=7,
@@ -302,7 +302,7 @@ CASES = (
         mode=MODE_SERIAL,
         signed=True,
         mac_latency=2,
-        write_bw=2,
+        write_ch_in=2,
         iterations=5,
         mclk_period=5,
         wclk_period=7,
@@ -315,12 +315,12 @@ CASES = (
         mode=MODE_SERIAL,
         signed=False,
         mac_latency=2,
-        write_bw=1,
+        write_ch_in=1,
         iterations=4,
         mclk_period=5,
         wclk_period=7,
         a_cols=1,
-        num_rows=1,
+        b_sets=1,
         base_c_width=9,
         expect_busy_mac=True,
     ),
@@ -329,7 +329,7 @@ CASES = (
         mode=MODE_PARALLEL,
         signed=True,
         mac_latency=2,
-        write_bw=2,
+        write_ch_in=2,
         iterations=4,
         mclk_period=5,
         wclk_period=7,
@@ -345,7 +345,7 @@ CASES = (
         mode=MODE_SERIAL,
         signed=True,
         mac_latency=2,
-        write_bw=2,
+        write_ch_in=2,
         iterations=4,
         mclk_period=5,
         wclk_period=7,
@@ -361,13 +361,13 @@ CASES = (
         mode=MODE_SERIAL,
         signed=True,
         mac_latency=5,
-        write_bw=1,
+        write_ch_in=1,
         iterations=5,
         mclk_period=7,
         wclk_period=10,
         a_cols=5,
         ch_out=6,
-        num_rows=5,
+        b_sets=5,
         base_a_width=3,
         base_c_width=12,
         a_width=11,
@@ -379,11 +379,11 @@ CASES = (
         mode=MODE_SERIAL,
         signed=False,
         mac_latency=3,
-        write_bw=1,
+        write_ch_in=1,
         iterations=6,
         mclk_period=5,
         wclk_period=5,
-        num_rows=1,
+        b_sets=1,
         base_c_width=10,
         expect_busy_mac=True,
         impl=IMPL_MACRO_1,
@@ -393,13 +393,13 @@ CASES = (
         mode=MODE_SERIAL,
         signed=False,
         mac_latency=3,
-        write_bw=1,
+        write_ch_in=1,
         iterations=5,
         mclk_period=6,
         wclk_period=6,
         a_cols=8,
         ch_out=3,
-        num_rows=1,
+        b_sets=1,
         base_c_width=11,
         expect_busy_mac=True,
         impl=IMPL_MACRO_1,
@@ -435,20 +435,20 @@ def minimum_base_c_width(case: Inst) -> int:
 
 # Catch parameter combinations that the shared SV harness cannot model correctly
 def validate_case(case: Inst) -> None:
-    if case.a_cols <= 0 or case.ch_out <= 0 or case.num_rows <= 0:
+    if case.a_cols <= 0 or case.ch_out <= 0 or case.b_sets <= 0:
         raise ValueError(f"{case.name}: dimensions must be positive")
     if case.base_a_width <= 0 or case.base_b_width <= 0 or case.base_c_width <= 0:
         raise ValueError(f"{case.name}: base widths must be positive")
     if case.a_width <= 0 or case.b_width <= 0:
         raise ValueError(f"{case.name}: logical widths must be positive")
-    if case.write_bw <= 0 or case.mac_latency <= 0:
-        raise ValueError(f"{case.name}: WRITE_BW and MAC_LATENCY must be positive")
+    if case.write_ch_in <= 0 or case.mac_latency <= 0:
+        raise ValueError(f"{case.name}: WRITE_CH_IN and MAC_LATENCY must be positive")
     if case.iterations <= 0:
         raise ValueError(f"{case.name}: iterations must be positive")
     if case.mclk_period <= 1 or case.wclk_period <= 1:
         raise ValueError(f"{case.name}: clock periods must be greater than one tick")
-    if (case.a_cols % case.write_bw) != 0:
-        raise ValueError(f"{case.name}: A_COLS must be divisible by WRITE_BW")
+    if (case.a_cols % case.write_ch_in) != 0:
+        raise ValueError(f"{case.name}: A_COLS must be divisible by WRITE_CH_IN")
     if (case.b_width % case.base_b_width) != 0:
         raise ValueError(f"{case.name}: B_WIDTH must be divisible by BASE_B_WIDTH")
     if num_b_slices(case) <= 0:
@@ -472,10 +472,10 @@ def validate_case(case: Inst) -> None:
             raise ValueError(f"{case.name}: macro1 requires CH_IN greater than one")
         if case.signed:
             raise ValueError(f"{case.name}: macro1 element cases must be unsigned")
-        if case.num_rows != 1:
-            raise ValueError(f"{case.name}: macro1 requires NUM_ROWS=1")
-        if case.write_bw != 1:
-            raise ValueError(f"{case.name}: macro1 requires WRITE_BW=1")
+        if case.b_sets != 1:
+            raise ValueError(f"{case.name}: macro1 requires B_SETS=1")
+        if case.write_ch_in != 1:
+            raise ValueError(f"{case.name}: macro1 requires WRITE_CH_IN=1")
         if case.mac_latency < 3:
             raise ValueError(f"{case.name}: macro1 requires MAC_LATENCY >= 3")
         if case.mclk_period != case.wclk_period:
@@ -498,11 +498,11 @@ def tb_text(case: Inst) -> str:
   localparam string CASE_NAME = \"{case.name}\";
   localparam int unsigned CH_IN = {case.a_cols};
   localparam int unsigned CH_OUT = {case.ch_out};
-  localparam int unsigned NUM_ROWS = {case.num_rows};
+  localparam int unsigned B_SETS = {case.b_sets};
   localparam int unsigned BASE_A_WIDTH = {case.base_a_width};
   localparam int unsigned BASE_B_WIDTH = {case.base_b_width};
   localparam int unsigned BASE_C_WIDTH = {case.base_c_width};
-  localparam int unsigned WRITE_BW = {case.write_bw};
+  localparam int unsigned WRITE_CH_IN = {case.write_ch_in};
   localparam int unsigned MAC_LATENCY = {case.mac_latency};
   localparam cim_mode_t INST_MODE = {case.mode};
   localparam cim_macro_wrapper_impl_t INST_IMPL = {case.impl};

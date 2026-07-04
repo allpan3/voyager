@@ -1,6 +1,6 @@
 // Common CIMIntMacroWrapper unit-test harness code
 // Include this inside a generated test module after defining the localparams below:
-// CASE_NAME, CH_IN, CH_OUT, NUM_ROWS, A_WIDTH, B_WIDTH, C_WIDTH, WRITE_BW,
+// CASE_NAME, CH_IN, CH_OUT, NUM_ROWS, A_WIDTH, B_WIDTH, C_WIDTH, WRITE_CH_IN,
 // MAC_LATENCY, INST_MODE, INST_IMPL, A_SIGNED, B_SIGNED_MASK, IS_SERIAL, NUM_ITERS,
 // MCLK_PERIOD, WCLK_PERIOD, and TEST_KIND
 
@@ -14,7 +14,7 @@ localparam int unsigned ILLEGAL_SUITE_EXPECTED_EXCEPTION_COUNT = 3;
 logic                  wclk;
 logic                  mclk;
 logic [A_WIDTH-1:0]    a [CH_IN];
-logic [B_WIDTH-1:0]    b [CH_OUT][WRITE_BW];
+logic [B_WIDTH-1:0]    b [CH_OUT][WRITE_CH_IN];
 logic                  wen;
 logic                  mac;
 logic                  init;
@@ -60,7 +60,7 @@ CIMIntMacroWrapper #(
     .A_WIDTH(A_WIDTH),
     .B_WIDTH(B_WIDTH),
     .C_WIDTH(C_WIDTH),
-    .WRITE_BW(WRITE_BW),
+    .WRITE_CH_IN(WRITE_CH_IN),
     .MAC_LATENCY(MAC_LATENCY),
     .MODE(INST_MODE),
     .IMPL(INST_IMPL)
@@ -198,7 +198,7 @@ task automatic drive_defaults;
       a[chi] = '0;
     end
     for (int cho = 0; cho < CH_OUT; cho++) begin
-      for (int lane = 0; lane < WRITE_BW; lane++) begin
+      for (int lane = 0; lane < WRITE_CH_IN; lane++) begin
         b[cho][lane] = '0;
       end
     end
@@ -262,14 +262,14 @@ task automatic check_illegal_suite_exceptions;
   end
 endtask
 
-// Drive one WRITE_BW-wide write group of random B values for a row and base channel
+// Drive one WRITE_CH_IN-wide write group of random B values for a row and base channel
 task automatic drive_random_weight_group(input int row, input int base);
   int unsigned value;
   begin
     wrow = BITS_ROW'(row);
     widx = BITS_CH_IN'(base);
     for (int cho = 0; cho < CH_OUT; cho++) begin
-      for (int lane = 0; lane < WRITE_BW; lane++) begin
+      for (int lane = 0; lane < WRITE_CH_IN; lane++) begin
         rng_next(value);
         b[cho][lane] = B_WIDTH'(value);
       end
@@ -282,7 +282,7 @@ endtask
 task automatic commit_weight_group(input int row, input int base);
   begin
     for (int cho = 0; cho < CH_OUT; cho++) begin
-      for (int lane = 0; lane < WRITE_BW; lane++) begin
+      for (int lane = 0; lane < WRITE_CH_IN; lane++) begin
         model_weights[row][cho][base + lane] = b[cho][lane];
       end
     end
@@ -355,7 +355,7 @@ task automatic maybe_start_write(input int avoid_row);
   end
 endtask
 
-// Drive the write port for the next wclk edge. This prepares one WRITE_BW
+// Drive the write port for the next wclk edge. This prepares one WRITE_CH_IN
 // write group; finish_write_for_event commits it to the reference model after the edge
 task automatic setup_write_for_event(input int avoid_row);
   begin
@@ -376,7 +376,7 @@ task automatic finish_write_for_event;
     // Only commit to the reference model when setup_write_for_event drove wen
     if (wen) begin
       commit_weight_group(write_row, write_base);
-      write_base += WRITE_BW;
+      write_base += WRITE_CH_IN;
       // Revalidate the row once the final channel group has reached both models
       if (write_base >= CH_IN) begin
         row_valid[write_row] = 1'b1;

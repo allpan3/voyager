@@ -83,7 +83,7 @@ module CIMVanillaMacroAdapter #(
     parameter int unsigned A_WIDTH = 4,
     parameter int unsigned B_WIDTH = 4,
     parameter int unsigned C_WIDTH = 20,
-    parameter int unsigned WRITE_BW = 1,
+    parameter int unsigned WRITE_CH_IN = 1,
     parameter int unsigned MAC_LATENCY = 1,
     parameter cim_mode_t MODE = CIM_MODE_BIT_SERIAL,
     localparam int unsigned BITS_CH_IN = (CH_IN <= 1) ? 1 : $clog2(CH_IN),
@@ -92,7 +92,7 @@ module CIMVanillaMacroAdapter #(
     input  logic                  wclk,
     input  logic                  mclk,
     input  logic [A_WIDTH-1:0]    a [CH_IN],
-    input  logic [B_WIDTH-1:0]    b [CH_OUT][WRITE_BW],
+    input  logic [B_WIDTH-1:0]    b [CH_OUT][WRITE_CH_IN],
     input  logic                  wen,
     input  logic                  mac,
     input  logic                  init,
@@ -201,8 +201,8 @@ module CIMVanillaMacroAdapter #(
     if (NUM_ROWS != 1) begin
       $fatal(1, "CIMVanillaMacroAdapter: CIM macro 1 adapter requires NUM_ROWS == 1");
     end
-    if (WRITE_BW != 1) begin
-      $fatal(1, "CIMVanillaMacroAdapter: CIM macro 1 adapter requires WRITE_BW == 1");
+    if (WRITE_CH_IN != 1) begin
+      $fatal(1, "CIMVanillaMacroAdapter: CIM macro 1 adapter requires WRITE_CH_IN == 1");
     end
     if (MODE != CIM_MODE_BIT_SERIAL) begin
       $fatal(1, "CIMVanillaMacroAdapter: CIM macro 1 adapter requires bit-serial mode");

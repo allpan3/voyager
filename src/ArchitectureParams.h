@@ -19,6 +19,8 @@ constexpr int NUM_COEFFS = 3;
 #define SA_INPUT_TYPE INPUT_DATATYPE::decoded
 #define SA_WEIGHT_TYPE WEIGHT_DATATYPE::decoded
 
+#define CIM_SIGNED true
+
 #elif defined(E4M3)
 
 #define INPUT_DATATYPE DataTypes::e4m3
@@ -95,6 +97,7 @@ using F9 = StdFloat<3, 5>;
 #define WEIGHT_DATATYPE DataTypes::int8
 #define ACCUM_DATATYPE DataTypes::int24
 #define VECTOR_DATATYPE DataTypes::bfloat16
+#define CIM_SIGNED true
 
 #elif defined(INT8_32)
 
@@ -102,6 +105,7 @@ using F9 = StdFloat<3, 5>;
 #define WEIGHT_DATATYPE DataTypes::int8
 #define ACCUM_DATATYPE DataTypes::int32
 #define VECTOR_DATATYPE DataTypes::bfloat16
+#define CIM_SIGNED true
 
 #elif defined(MXINT8)
 

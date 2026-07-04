@@ -39,7 +39,7 @@ class Inst:
     a_signed: bool
     b_signed_mask: int
     mac_latency: int
-    write_bw: int
+    write_ch_in: int
     iterations: int
     mclk_period: int
     wclk_period: int
@@ -60,7 +60,7 @@ CASES = (
         a_signed=False,
         b_signed_mask=0,
         mac_latency=1,
-        write_bw=1,
+        write_ch_in=1,
         iterations=24,
         mclk_period=5,
         wclk_period=7,
@@ -71,7 +71,7 @@ CASES = (
         a_signed=False,
         b_signed_mask=0,
         mac_latency=4,
-        write_bw=2,
+        write_ch_in=2,
         iterations=28,
         mclk_period=7,
         wclk_period=11,
@@ -82,7 +82,7 @@ CASES = (
         a_signed=True,
         b_signed_mask=0b11,
         mac_latency=2,
-        write_bw=4,
+        write_ch_in=4,
         iterations=24,
         mclk_period=5,
         wclk_period=9,
@@ -93,7 +93,7 @@ CASES = (
         a_signed=True,
         b_signed_mask=0b11,
         mac_latency=3,
-        write_bw=2,
+        write_ch_in=2,
         iterations=36,
         mclk_period=6,
         wclk_period=11,
@@ -105,7 +105,7 @@ CASES = (
         a_signed=False,
         b_signed_mask=0,
         mac_latency=2,
-        write_bw=2,
+        write_ch_in=2,
         iterations=16,
         mclk_period=5,
         wclk_period=7,
@@ -117,7 +117,7 @@ CASES = (
         a_signed=False,
         b_signed_mask=0b01,
         mac_latency=2,
-        write_bw=2,
+        write_ch_in=2,
         iterations=20,
         mclk_period=6,
         wclk_period=6,
@@ -128,7 +128,7 @@ CASES = (
         a_signed=True,
         b_signed_mask=0,
         mac_latency=2,
-        write_bw=2,
+        write_ch_in=2,
         iterations=20,
         mclk_period=4,
         wclk_period=8,
@@ -139,7 +139,7 @@ CASES = (
         a_signed=False,
         b_signed_mask=0b1010,
         mac_latency=3,
-        write_bw=2,
+        write_ch_in=2,
         iterations=30,
         mclk_period=5,
         wclk_period=8,
@@ -153,7 +153,7 @@ CASES = (
         a_signed=False,
         b_signed_mask=0,
         mac_latency=2,
-        write_bw=1,
+        write_ch_in=1,
         iterations=12,
         mclk_period=6,
         wclk_period=6,
@@ -167,7 +167,7 @@ CASES = (
         a_signed=True,
         b_signed_mask=0b101,
         mac_latency=3,
-        write_bw=1,
+        write_ch_in=1,
         iterations=18,
         mclk_period=5,
         wclk_period=9,
@@ -182,7 +182,7 @@ CASES = (
         a_signed=True,
         b_signed_mask=0b01,
         mac_latency=5,
-        write_bw=5,
+        write_ch_in=5,
         iterations=24,
         mclk_period=7,
         wclk_period=11,
@@ -196,7 +196,7 @@ CASES = (
         a_signed=False,
         b_signed_mask=0,
         mac_latency=1,
-        write_bw=2,
+        write_ch_in=2,
         iterations=10,
         mclk_period=5,
         wclk_period=7,
@@ -207,7 +207,7 @@ CASES = (
         a_signed=False,
         b_signed_mask=0,
         mac_latency=3,
-        write_bw=1,
+        write_ch_in=1,
         iterations=10,
         mclk_period=7,
         wclk_period=10,
@@ -218,7 +218,7 @@ CASES = (
         a_signed=True,
         b_signed_mask=0b11,
         mac_latency=3,
-        write_bw=4,
+        write_ch_in=4,
         iterations=10,
         mclk_period=6,
         wclk_period=11,
@@ -229,7 +229,7 @@ CASES = (
         a_signed=True,
         b_signed_mask=0b10,
         mac_latency=2,
-        write_bw=2,
+        write_ch_in=2,
         iterations=12,
         mclk_period=5,
         wclk_period=10,
@@ -241,7 +241,7 @@ CASES = (
         a_signed=False,
         b_signed_mask=0,
         mac_latency=1,
-        write_bw=1,
+        write_ch_in=1,
         iterations=8,
         mclk_period=5,
         wclk_period=7,
@@ -255,7 +255,7 @@ CASES = (
         a_signed=True,
         b_signed_mask=0b10,
         mac_latency=3,
-        write_bw=1,
+        write_ch_in=1,
         iterations=8,
         mclk_period=6,
         wclk_period=10,
@@ -269,7 +269,7 @@ CASES = (
         a_signed=True,
         b_signed_mask=0b11,
         mac_latency=5,
-        write_bw=5,
+        write_ch_in=5,
         iterations=8,
         mclk_period=7,
         wclk_period=11,
@@ -283,7 +283,7 @@ CASES = (
         a_signed=False,
         b_signed_mask=0,
         mac_latency=3,
-        write_bw=1,
+        write_ch_in=1,
         iterations=10,
         mclk_period=5,
         wclk_period=5,
@@ -297,7 +297,7 @@ CASES = (
         a_signed=False,
         b_signed_mask=0,
         mac_latency=3,
-        write_bw=1,
+        write_ch_in=1,
         iterations=8,
         mclk_period=6,
         wclk_period=6,
@@ -313,7 +313,7 @@ CASES = (
         a_signed=False,
         b_signed_mask=0,
         mac_latency=1,
-        write_bw=2,
+        write_ch_in=2,
         iterations=1,
         mclk_period=5,
         wclk_period=7,
@@ -351,8 +351,8 @@ def validate_case(case: Inst) -> None:
         raise ValueError(f"{case.name}: dimensions must be positive")
     if case.a_width <= 0 or case.b_width <= 0 or case.c_width <= 0:
         raise ValueError(f"{case.name}: widths must be positive")
-    if case.write_bw <= 0 or case.mac_latency <= 0:
-        raise ValueError(f"{case.name}: WRITE_BW and MAC_LATENCY must be positive")
+    if case.write_ch_in <= 0 or case.mac_latency <= 0:
+        raise ValueError(f"{case.name}: WRITE_CH_IN and MAC_LATENCY must be positive")
     if case.iterations <= 0:
         raise ValueError(f"{case.name}: iterations must be positive")
     if case.mclk_period <= 1 or case.wclk_period <= 1:
@@ -372,8 +372,8 @@ def validate_case(case: Inst) -> None:
             raise ValueError(f"{case.name}: macro1 wrapper cases must be unsigned")
         if case.num_rows != 1:
             raise ValueError(f"{case.name}: macro1 requires NUM_ROWS=1")
-        if case.write_bw != 1:
-            raise ValueError(f"{case.name}: macro1 requires WRITE_BW=1")
+        if case.write_ch_in != 1:
+            raise ValueError(f"{case.name}: macro1 requires WRITE_CH_IN=1")
         if case.mac_latency < 3:
             raise ValueError(f"{case.name}: macro1 requires MAC_LATENCY >= 3")
         if case.mclk_period != case.wclk_period:
@@ -393,7 +393,7 @@ def tb_text(case: Inst) -> str:
   localparam int unsigned A_WIDTH = {case.a_width};
   localparam int unsigned B_WIDTH = {case.b_width};
   localparam int unsigned C_WIDTH = {case.c_width};
-  localparam int unsigned WRITE_BW = {case.write_bw};
+  localparam int unsigned WRITE_CH_IN = {case.write_ch_in};
   localparam int unsigned MAC_LATENCY = {case.mac_latency};
   localparam cim_mode_t INST_MODE = {case.mode};
   localparam cim_macro_wrapper_impl_t INST_IMPL = {case.impl};

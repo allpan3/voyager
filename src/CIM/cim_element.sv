@@ -13,14 +13,14 @@
 module CIMIntElement #(
     parameter int unsigned CH_IN = 64,
     parameter int unsigned CH_OUT = 8,
-    parameter int unsigned NUM_ROWS = 18,
+    parameter int unsigned B_SETS = 18,
 
     // BASE_* parameters describe the base shape of the macro wrapper
     // In bit-serial mode, the macro wrapper A width may be widened up to BASE_C_WIDTH capacity.
     parameter int unsigned BASE_A_WIDTH = 4,
     parameter int unsigned BASE_B_WIDTH = 4,
     parameter int unsigned BASE_C_WIDTH = 20,
-    parameter int unsigned WRITE_BW = 1,
+    parameter int unsigned WRITE_CH_IN = 1,
     parameter int unsigned MAC_LATENCY = 1,
     parameter cim_mode_t MODE = CIM_MODE_BIT_SERIAL,
     parameter cim_macro_wrapper_impl_t MACRO_IMPL = CIM_MACRO_WRAPPER_IMPL_MODEL,
@@ -37,12 +37,12 @@ module CIMIntElement #(
     // One B value is split across NUM_B_SLICES physical macro wrapper output channels
     localparam int unsigned NUM_B_SLICES = B_WIDTH / BASE_B_WIDTH,
     localparam int unsigned B_COLS = CH_OUT / NUM_B_SLICES,
-    localparam int unsigned B_ROWS = WRITE_BW,
+    localparam int unsigned B_ROWS = WRITE_CH_IN,
 
     // C_WIDTH is the result width depending on the operand widths and the vector length
     localparam int unsigned C_WIDTH = A_WIDTH + B_WIDTH + SUM_GUARD_WIDTH,
     localparam int unsigned BITS_CH_IN = (CH_IN <= 1) ? 1 : $clog2(CH_IN),
-    localparam int unsigned BITS_ROW = (NUM_ROWS <= 1) ? 1 : $clog2(NUM_ROWS)
+    localparam int unsigned BITS_SET = (B_SETS <= 1) ? 1 : $clog2(B_SETS)
 ) (
     input  logic                       wclk,
     input  logic                       mclk,
@@ -56,11 +56,11 @@ module CIMIntElement #(
     input  logic [B_WIDTH-1:0]         b [B_COLS][B_ROWS],
     input  logic                       wen,
     input  logic [BITS_CH_IN-1:0]      widx,
-    input  logic [BITS_ROW-1:0]        wrow,
+    input  logic [BITS_SET-1:0]        wset,
 
     // mac_start pulses to begin a MAC when mac_busy is low
     input  logic                       mac_start,
-    input  logic [BITS_ROW-1:0]        mrow,
+    input  logic [BITS_SET-1:0]        mset,
 
     output logic [C_WIDTH-1:0]         c [B_COLS],
     output logic                       c_valid,    // high while c holds a completed result
@@ -324,7 +324,7 @@ module CIMIntElement #(
   // Repack A/B operands into the fixed macro wrapper shape. B signedness is also
   // expanded here because only the MSB physical B slice should be signed.
   logic [BASE_A_WIDTH-1:0] macro_wrapper_a [A_COLS];
-  logic [BASE_B_WIDTH-1:0] macro_wrapper_b [CH_OUT][WRITE_BW];
+  logic [BASE_B_WIDTH-1:0] macro_wrapper_b [CH_OUT][WRITE_CH_IN];
   logic macro_wrapper_b_signed [CH_OUT];
   logic [BASE_C_WIDTH-1:0] macro_wrapper_c [CH_OUT];
 
@@ -368,11 +368,11 @@ module CIMIntElement #(
   CIMIntMacroWrapper #(
       .CH_IN(CH_IN),
       .CH_OUT(CH_OUT),
-      .NUM_ROWS(NUM_ROWS),
+      .NUM_ROWS(B_SETS),
       .A_WIDTH(BASE_A_WIDTH),
       .B_WIDTH(BASE_B_WIDTH),
       .C_WIDTH(BASE_C_WIDTH),
-      .WRITE_BW(WRITE_BW),
+      .WRITE_CH_IN(WRITE_CH_IN),
       .MAC_LATENCY(MAC_LATENCY),
       .MODE(MODE),
       .IMPL(MACRO_IMPL)
@@ -387,8 +387,8 @@ module CIMIntElement #(
       .a_signed(macro_wrapper_a_signed),
       .b_signed(macro_wrapper_b_signed),
       .widx(widx),
-      .wrow(wrow),
-      .mrow(mrow),
+      .wrow(wset),
+      .mrow(mset),
       .c(macro_wrapper_c)
   );
 

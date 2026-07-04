@@ -178,6 +178,8 @@ WeightController: $(CATAPULT_BUILD_DIR)/WeightController/WeightController.v1/con
 SystolicArray: $(CATAPULT_BUILD_DIR)/SystolicArray/SystolicArray.v1/concat_rtl.v
 MatrixProcessor: $(CATAPULT_BUILD_DIR)/MatrixProcessor/MatrixProcessor.v1/concat_rtl.v
 ProcessingElement: $(CATAPULT_BUILD_DIR)/ProcessingElement/ProcessingElement.v1/concat_rtl.v
+CIMElement: $(CATAPULT_BUILD_DIR)/CIMElement/CIMElement.v1/concat_rtl.v
+CIMUnit: $(CATAPULT_BUILD_DIR)/CIMUnit/CIMUnit.v1/concat_rtl.v
 VectorFetchUnit: $(CATAPULT_BUILD_DIR)/VectorFetchUnit/VectorFetchUnit.v1/concat_rtl.v
 VectorUnit: $(CATAPULT_BUILD_DIR)/VectorUnit/VectorUnit.v1/concat_rtl.v
 OutputController: $(CATAPULT_BUILD_DIR)/OutputController/OutputController.v1/concat_rtl.v
@@ -199,6 +201,14 @@ $(CATAPULT_BUILD_DIR)/WeightController/WeightController.v1/concat_rtl.v: src/Wei
 $(CATAPULT_BUILD_DIR)/ProcessingElement/ProcessingElement.v1/concat_rtl.v: src/ProcessingElement.h $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=ProcessingElement catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/ProcessingElement.log
+
+$(CATAPULT_BUILD_DIR)/CIMElement/CIMElement.v1/concat_rtl.v: src/CIMElement.h src/CIM/cim_typedefs.svh src/CIM/cim_macro_wrapper.sv src/CIM/cim_macro_model.sv src/CIM/cim_macro_1.sv src/CIM/cim_element.sv
+	mkdir -p $(CATAPULT_BUILD_DIR)
+	BLOCK=CIMElement catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/CIMElement.log
+
+$(CATAPULT_BUILD_DIR)/CIMUnit/CIMUnit.v1/concat_rtl.v: src/CIMUnit.h src/CIMElement.h src/CIM/cim_typedefs.svh src/CIM/cim_macro_wrapper.sv src/CIM/cim_macro_model.sv src/CIM/cim_macro_1.sv src/CIM/cim_element.sv
+	mkdir -p $(CATAPULT_BUILD_DIR)
+	BLOCK=CIMUnit catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/CIMUnit.log
 
 $(CATAPULT_BUILD_DIR)/SystolicArrayRow/SystolicArrayRow.v1/concat_rtl.v: src/SystolicArray.h $(CATAPULT_BUILD_DIR)/ProcessingElement/ProcessingElement.v1/concat_rtl.v $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
@@ -289,7 +299,7 @@ $(CATAPULT_BUILD_DIR)/Accelerator/Accelerator.v1/concat_rtl.v: \
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=Accelerator catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/Accelerator.log
 
-.PHONY: rtl Accelerator InputController WeightController MatrixProcessor ProcessingElement VectorUnit VectorParamsDeserializer VectorFetchUnit VectorPipeline VectorReducer VectorAccumulator OutputController MatrixVectorUnit MulAddTree DwCUnit
+.PHONY: rtl Accelerator InputController WeightController MatrixProcessor ProcessingElement CIMElement CIMUnit VectorUnit VectorParamsDeserializer VectorFetchUnit VectorPipeline VectorReducer VectorAccumulator OutputController MatrixVectorUnit MulAddTree DwCUnit
 
 # Run RTL simulation
 .PHONY: rtl-sim

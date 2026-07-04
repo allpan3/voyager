@@ -12,6 +12,7 @@ if { $DATATYPE == "P8_1" } {
   set INPUT_DTYPE_WIDTH 8
   set WEIGHT_DTYPE_WIDTH 8
   set ACCUM_DATATYPE_WIDTH 16
+  set CIM_SIGNED true
 } elseif { $DATATYPE == "E4M3" } {
   set INPUT_DATATYPE "DataTypes::e4m3"
   set WEIGHT_DATATYPE "DataTypes::e4m3"
@@ -23,6 +24,7 @@ if { $DATATYPE == "P8_1" } {
   set INPUT_DTYPE_WIDTH 8
   set WEIGHT_DTYPE_WIDTH 8
   set ACCUM_DATATYPE_WIDTH 16
+  set CIM_SIGNED true
 } elseif { $DATATYPE == "E4M3_NS" } {
   set INPUT_DATATYPE "F8"
   set WEIGHT_DATATYPE "F8"
@@ -34,6 +36,7 @@ if { $DATATYPE == "P8_1" } {
   set INPUT_DTYPE_WIDTH 8
   set WEIGHT_DTYPE_WIDTH 8
   set ACCUM_DATATYPE_WIDTH 16
+  set CIM_SIGNED true
 } elseif { $DATATYPE == "E4M3_DW" } {
   set INPUT_DATATYPE "F8"
   set WEIGHT_DATATYPE "F8"
@@ -45,6 +48,7 @@ if { $DATATYPE == "P8_1" } {
   set INPUT_DTYPE_WIDTH 8
   set WEIGHT_DTYPE_WIDTH 8
   set ACCUM_DATATYPE_WIDTH 16
+  set CIM_SIGNED true
 } elseif { $DATATYPE == "E4M3_DW_NS" } {
   set INPUT_DATATYPE "F8"
   set WEIGHT_DATATYPE "F8"
@@ -56,6 +60,7 @@ if { $DATATYPE == "P8_1" } {
   set INPUT_DTYPE_WIDTH 8
   set WEIGHT_DTYPE_WIDTH 8
   set ACCUM_DATATYPE_WIDTH 16
+  set CIM_SIGNED true
 } elseif { $DATATYPE == "E5M2" } {
   set INPUT_DATATYPE "DataTypes::e5m2"
   set WEIGHT_DATATYPE "DataTypes::e5m2"
@@ -67,6 +72,7 @@ if { $DATATYPE == "P8_1" } {
   set INPUT_DTYPE_WIDTH 8
   set WEIGHT_DTYPE_WIDTH 8
   set ACCUM_DATATYPE_WIDTH 16
+  set CIM_SIGNED true
 } elseif { $DATATYPE == "HYBRID_FP8" } {
   set INPUT_DATATYPE "F8"
   set WEIGHT_DATATYPE "F8"
@@ -78,6 +84,7 @@ if { $DATATYPE == "P8_1" } {
   set INPUT_DTYPE_WIDTH 8
   set WEIGHT_DTYPE_WIDTH 8
   set ACCUM_DATATYPE_WIDTH 16
+  set CIM_SIGNED true
 } elseif { $DATATYPE == "BF16" } {
   set INPUT_DATATYPE "DataTypes::bfloat16"
   set WEIGHT_DATATYPE "DataTypes::bfloat16"
@@ -88,6 +95,7 @@ if { $DATATYPE == "P8_1" } {
 
   set IO_DATATYPE_WIDTH 16
   set ACCUM_DATATYPE_WIDTH 16
+  set CIM_SIGNED true
 } elseif { $DATATYPE == "FP32" } {
   set INPUT_DATATYPE "DataTypes::float32"
   set WEIGHT_DATATYPE "DataTypes::float32"
@@ -99,6 +107,7 @@ if { $DATATYPE == "P8_1" } {
   set INPUT_DTYPE_WIDTH 32
   set WEIGHT_DTYPE_WIDTH 32
   set ACCUM_DATATYPE_WIDTH 32
+  set CIM_SIGNED true
 } elseif { $DATATYPE == "INT8" } {
   set INPUT_DATATYPE "DataTypes::int8"
   set WEIGHT_DATATYPE "DataTypes::int8"
@@ -110,6 +119,7 @@ if { $DATATYPE == "P8_1" } {
   set INPUT_DTYPE_WIDTH 8
   set WEIGHT_DTYPE_WIDTH 8
   set ACCUM_DATATYPE_WIDTH 24
+  set CIM_SIGNED true
 } elseif { $DATATYPE == "INT8_32" } {
   set INPUT_DATATYPE "DataTypes::int8"
   set WEIGHT_DATATYPE "DataTypes::int8"
@@ -121,6 +131,7 @@ if { $DATATYPE == "P8_1" } {
   set INPUT_DTYPE_WIDTH 8
   set WEIGHT_DTYPE_WIDTH 8
   set ACCUM_DATATYPE_WIDTH 32
+  set CIM_SIGNED true
 } elseif {$DATATYPE == "MXINT8"} {
   set INPUT_DATATYPE "DataTypes::int8"
   set WEIGHT_DATATYPE "DataTypes::int8"
@@ -137,6 +148,7 @@ if { $DATATYPE == "P8_1" } {
   set WEIGHT_DTYPE_WIDTH 8
   set ACCUM_DATATYPE_WIDTH 16
   set SCALE_DATATYPE_WIDTH 8
+  set CIM_SIGNED true
 } elseif {$DATATYPE == "MXNF4"} {
   set INPUT_DATATYPE "DataTypes::uint2, DataTypes::int4, DataTypes::int6"
   set WEIGHT_DATATYPE "DataTypes::uint2, DataTypes::int4, DataTypes::int6"
@@ -168,6 +180,7 @@ if { $DATATYPE == "P8_1" } {
   set VECTOR_UNIT_WIDTH $OC_DIMENSION
   set REDUCER_WIDTH [expr {$OC_DIMENSION / 2}]
   set ACCUMULATOR_WIDTH [expr {$OC_DIMENSION / 2}]
+  set CIM_SIGNED true
 } else {
   puts "Invalid DATATYPE"
   exit 1
@@ -250,6 +263,54 @@ if {![info exists INPUT_DTYPE_WIDTH]} {
 
 if {![info exists WEIGHT_DTYPE_WIDTH]} {
   set WEIGHT_DTYPE_WIDTH "${WEIGHT_DATATYPE}::width"
+}
+
+# ================================================================
+# CIM Configuration
+# ================================================================
+
+if {![info exists CIM_CH_IN]} {
+  set CIM_CH_IN 64
+}
+
+if {![info exists CIM_A_COLS]} {
+  set CIM_A_COLS $CIM_CH_IN
+}
+
+if {![info exists CIM_CH_OUT]} {
+  set CIM_CH_OUT 8
+}
+
+if {![info exists CIM_B_SETS]} {
+  set CIM_B_SETS 18
+}
+
+if {![info exists CIM_BASE_A_WIDTH]} {
+  set CIM_BASE_A_WIDTH 4
+}
+
+if {![info exists CIM_BASE_B_WIDTH]} {
+  set CIM_BASE_B_WIDTH 4
+}
+
+if {![info exists CIM_BASE_C_WIDTH]} {
+  set CIM_BASE_C_WIDTH 20
+}
+
+if {![info exists CIM_WRITE_CH_IN]} {
+  set CIM_WRITE_CH_IN 1
+}
+
+if {![info exists CIM_MAC_LATENCY]} {
+  set CIM_MAC_LATENCY 1
+}
+
+if {![info exists CIM_MODE]} {
+  set CIM_MODE 1
+}
+
+if {![info exists CIM_SIGNED]} {
+  set CIM_SIGNED true
 }
 
 # ================================================================

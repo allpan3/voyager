@@ -1,17 +1,17 @@
 // Common CIMIntElement unit-test harness code
 // Include this inside a generated test module after defining the localparams below:
-// CASE_NAME, CH_IN, CH_OUT, NUM_ROWS, BASE_A_WIDTH, BASE_B_WIDTH, BASE_C_WIDTH,
-// WRITE_BW, MAC_LATENCY, INST_MODE, INST_IMPL, SIGNED, A_WIDTH, B_WIDTH, NUM_ITERS,
+// CASE_NAME, CH_IN, CH_OUT, B_SETS, BASE_A_WIDTH, BASE_B_WIDTH, BASE_C_WIDTH,
+// WRITE_CH_IN, MAC_LATENCY, INST_MODE, INST_IMPL, SIGNED, A_WIDTH, B_WIDTH, NUM_ITERS,
 // MCLK_PERIOD, WCLK_PERIOD, EXPECT_BUSY_MAC_ATTEMPT, and TEST_KIND
 
 localparam int unsigned A_COLS = CH_IN;
 localparam int unsigned SUM_GUARD_WIDTH = (A_COLS <= 1) ? 1 : $clog2(A_COLS);
 localparam int unsigned NUM_B_SLICES = B_WIDTH / BASE_B_WIDTH;
 localparam int unsigned B_COLS = CH_OUT / NUM_B_SLICES;
-localparam int unsigned B_ROWS = WRITE_BW;
+localparam int unsigned B_ROWS = WRITE_CH_IN;
 localparam int unsigned C_WIDTH = A_WIDTH + B_WIDTH + SUM_GUARD_WIDTH;
 localparam int unsigned BITS_A_COLS = (A_COLS <= 1) ? 1 : $clog2(A_COLS);
-localparam int unsigned BITS_ROW = (NUM_ROWS <= 1) ? 1 : $clog2(NUM_ROWS);
+localparam int unsigned BITS_SET = (B_SETS <= 1) ? 1 : $clog2(B_SETS);
 localparam int unsigned DEFAULT_RNG_SEED = 32'h1;
 
 localparam int unsigned TEST_NORMAL = 0;
@@ -25,14 +25,14 @@ logic [A_WIDTH-1:0]         a [A_COLS];
 logic [B_WIDTH-1:0]         b [B_COLS][B_ROWS];
 logic                       wen;
 logic [BITS_A_COLS-1:0]     widx;
-logic [BITS_ROW-1:0]        wrow;
+logic [BITS_SET-1:0]        wset;
 logic                       mac_start;
-logic [BITS_ROW-1:0]        mrow;
+logic [BITS_SET-1:0]        mset;
 logic [C_WIDTH-1:0]         c [B_COLS];
 logic                       c_valid;
 logic                       mac_busy;
 
-logic [B_WIDTH-1:0] model_weights [NUM_ROWS][B_COLS][A_COLS];
+logic [B_WIDTH-1:0] model_weights [B_SETS][B_COLS][A_COLS];
 logic [C_WIDTH-1:0] expected [NUM_ITERS][B_COLS];
 int unsigned busy_mac_attempts;
 int unsigned rng_state;
@@ -41,11 +41,11 @@ string waveform_path;
 CIMIntElement #(
     .CH_IN(CH_IN),
     .CH_OUT(CH_OUT),
-    .NUM_ROWS(NUM_ROWS),
+    .B_SETS(B_SETS),
     .BASE_A_WIDTH(BASE_A_WIDTH),
     .BASE_B_WIDTH(BASE_B_WIDTH),
     .BASE_C_WIDTH(BASE_C_WIDTH),
-    .WRITE_BW(WRITE_BW),
+    .WRITE_CH_IN(WRITE_CH_IN),
     .MAC_LATENCY(MAC_LATENCY),
     .MODE(INST_MODE),
     .MACRO_IMPL(INST_IMPL),
@@ -60,9 +60,9 @@ CIMIntElement #(
     .b(b),
     .wen(wen),
     .widx(widx),
-    .wrow(wrow),
+    .wset(wset),
     .mac_start(mac_start),
-    .mrow(mrow),
+    .mset(mset),
     .c(c),
     .c_valid(c_valid),
     .mac_busy(mac_busy)
@@ -165,9 +165,9 @@ task automatic drive_defaults;
     rstn = 1'b0;
     wen = 1'b0;
     widx = '0;
-    wrow = '0;
+    wset = '0;
     mac_start = 1'b0;
-    mrow = '0;
+    mset = '0;
     busy_mac_attempts = 0;
 
     init_rng_from_plusarg();
@@ -180,7 +180,7 @@ task automatic drive_defaults;
         b[col][lane] = '0;
       end
     end
-    for (int row = 0; row < NUM_ROWS; row++) begin
+    for (int row = 0; row < B_SETS; row++) begin
       for (int col = 0; col < B_COLS; col++) begin
         for (int chi = 0; chi < A_COLS; chi++) begin
           model_weights[row][col][chi] = '0;
@@ -200,8 +200,8 @@ endtask
 task automatic check_test_params;
   begin
     check_common_test_params();
-    if ((A_COLS % WRITE_BW) != 0) begin
-      $fatal(1, "%s: A_COLS must be divisible by WRITE_BW", CASE_NAME);
+    if ((A_COLS % WRITE_CH_IN) != 0) begin
+      $fatal(1, "%s: A_COLS must be divisible by WRITE_CH_IN", CASE_NAME);
     end
     if ((B_WIDTH % BASE_B_WIDTH) != 0) begin
       $fatal(1, "%s: B_WIDTH must be divisible by BASE_B_WIDTH", CASE_NAME);
@@ -241,11 +241,11 @@ task automatic apply_reset;
   end
 endtask
 
-// Drive one WRITE_BW-wide logical B write group for a row and base channel
+// Drive one WRITE_CH_IN-wide logical B write group for a row and base channel
 task automatic drive_random_weight_group(input int row, input int base);
   int unsigned value;
   begin
-    wrow = BITS_ROW'(row);
+    wset = BITS_SET'(row);
     widx = BITS_A_COLS'(base);
     for (int col = 0; col < B_COLS; col++) begin
       for (int lane = 0; lane < B_ROWS; lane++) begin
@@ -271,8 +271,8 @@ endtask
 // Load every logical B row before MAC checks begin
 task automatic load_all_weights;
   begin
-    for (int row = 0; row < NUM_ROWS; row++) begin
-      for (int base = 0; base < A_COLS; base += WRITE_BW) begin
+    for (int row = 0; row < B_SETS; row++) begin
+      for (int base = 0; base < A_COLS; base += WRITE_CH_IN) begin
         drive_random_weight_group(row, base);
         tick_wclk();
         commit_weight_group(row, base);
@@ -308,7 +308,7 @@ task automatic start_element_op(input int slot, input int row);
     end
 
     randomize_activation();
-    mrow = BITS_ROW'(row);
+    mset = BITS_SET'(row);
     record_expected(slot, row);
 
     mac_start = 1'b1;
@@ -396,7 +396,7 @@ task automatic run_normal_ops;
   begin
     busy_mac_attempts = 0;
     for (int op = 0; op < NUM_ITERS; op++) begin
-      run_one_op(op, op % NUM_ROWS);
+      run_one_op(op, op % B_SETS);
     end
     if (EXPECT_BUSY_MAC_ATTEMPT && (busy_mac_attempts == 0)) begin
       $fatal(1, "%s: no busy mac_start noise was injected", CASE_NAME);
@@ -412,7 +412,7 @@ task automatic reset_during_active_op;
     end
 
     randomize_activation();
-    mrow = '0;
+    mset = '0;
     mac_start = 1'b1;
     tick_mclk();
     mac_start = 1'b0;

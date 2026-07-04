@@ -9,16 +9,16 @@ module CIMIntMacroModel #(
     parameter int unsigned A_WIDTH = 4,              // Bit-width of A operand (the streaming operand)
     parameter int unsigned B_WIDTH = 4,              // Base bit-width of B operand (the stored operand)
     parameter int unsigned C_WIDTH = 20,             // Bit-width of the output result; This determines the max supported precision for A
-    parameter int unsigned WRITE_BW = 1,             // Number of input channels written per cycle when writing B
+    parameter int unsigned WRITE_CH_IN = 1,             // Number of input channels written per cycle when writing B
     parameter int unsigned MAC_LATENCY = 1,          // Latency to produce C; for bit-serial, this is the latency for a single bit's MAC, the total latency would be this plus A_WIDTH-1
     parameter cim_mode_t MODE = CIM_MODE_BIT_SERIAL, // Select bit-parallel or bit-serial MAC behavior
-    localparam int unsigned BITS_CH_IN = (CH_IN <= 1) ? 1 : $clog2(CH_IN),  // Number of bits needed to index the B operand when writing; note when CH_IN_WRITE_BW > 1, continguous addresses are written
+    localparam int unsigned BITS_CH_IN = (CH_IN <= 1) ? 1 : $clog2(CH_IN),  // Number of bits needed to index the B operand when writing; note when WRITE_CH_IN > 1, continguous addresses are written
     localparam int unsigned BITS_ROW  = (NUM_ROWS <= 1) ? 1 : $clog2(NUM_ROWS)               // Number of bits needed to address the rows
 ) (
     input  logic                  wclk,
     input  logic                  mclk,
     input  logic [A_WIDTH-1:0]    a [CH_IN],               // Activation operand sampled directly while mac is high
-    input  logic [B_WIDTH-1:0]    b [CH_OUT][WRITE_BW],    // Stored operand to be written
+    input  logic [B_WIDTH-1:0]    b [CH_OUT][WRITE_CH_IN],    // Stored operand to be written
     input  logic                  wen,
     input  logic                  mac,                     // Signals the start of an MAC op, no need to stay high for the mac pipeline; for bit-serial, this performs one-bit mac; for bit-parallel, this performs an A_WIDTHxB_WIDTH mac
     input  logic                  init,                    // Serial: marks the first partial result when mac is high; ignored by bit-parallel
@@ -40,7 +40,7 @@ module CIMIntMacroModel #(
   always_ff @(posedge wclk) begin
     if (wen) begin
       for (int cho = 0; cho < CH_OUT; cho++) begin : chan_out
-        for (int lane = 0; lane < WRITE_BW; lane++) begin : chan_in
+        for (int lane = 0; lane < WRITE_CH_IN; lane++) begin : chan_in
           b_mem[wrow][cho][widx + BITS_CH_IN'(lane)] <= b[cho][lane];
         end
       end
