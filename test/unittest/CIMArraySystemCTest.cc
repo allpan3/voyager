@@ -27,11 +27,13 @@ static constexpr long long mask_for_width(int width) {
 template <int CH_IN, int CH_OUT, int B_SETS, int BASE_A_WIDTH,
           int BASE_B_WIDTH, int BASE_C_WIDTH, int WRITE_CH_IN, int MAC_LATENCY,
           int MODE, int A_WIDTH, int B_WIDTH, bool IS_SIGNED, int INPUT_LANES,
-          int OUTPUT_LANES, int MULTICAST_GROUPS,
+          int OUTPUT_LANES, int MULTICAST_GROUPS, int REDUCTION_GROUPS = 1,
+          int A_PORTS = REDUCTION_GROUPS,
           typename DutType =
               CIMArray<CH_IN, CH_OUT, B_SETS, BASE_A_WIDTH, BASE_B_WIDTH,
                       BASE_C_WIDTH, WRITE_CH_IN, MAC_LATENCY, MODE, A_WIDTH,
-                      B_WIDTH, IS_SIGNED, INPUT_LANES, OUTPUT_LANES, MULTICAST_GROUPS>>
+                      B_WIDTH, IS_SIGNED, INPUT_LANES, OUTPUT_LANES,
+                      MULTICAST_GROUPS, REDUCTION_GROUPS, A_PORTS>>
 struct CIMArraySystemCTestCase : sc_module {
   using Dut = DutType;
   using CBeat = typename Dut::CBeat;
@@ -41,6 +43,8 @@ struct CIMArraySystemCTestCase : sc_module {
   using MulticastGroupIndex = typename Dut::MulticastGroupIndex;
 
   static constexpr int MULTICAST_GROUP_LANES = Dut::MULTICAST_GROUP_LANES;
+  // Input lanes summed into one tile result (one reduction group's depth)
+  static constexpr int TILE_INPUT_LANES = INPUT_LANES / REDUCTION_GROUPS;
 
   static_assert(A_WIDTH < 31, "A_WIDTH must fit this unit test golden model");
   static_assert(B_WIDTH < 31, "B_WIDTH must fit this unit test golden model");
@@ -57,9 +61,10 @@ struct CIMArraySystemCTestCase : sc_module {
   ac_int<B_WIDTH, false>
       expected_weights[B_SETS][Dut::ELEMENTS][Dut::ELEMENT_B_COLS][CH_IN];
 
-  // ExpectedBeat mirrors one per-group C beat in issue order
+  // ExpectedBeat mirrors one column C beat in issue order: outer index the
+  // reduction group (each an independent partial sum), inner the output lane
   struct ExpectedBeat {
-    long long value[MULTICAST_GROUP_LANES][Dut::ELEMENT_B_COLS];
+    long long value[REDUCTION_GROUPS][MULTICAST_GROUP_LANES][Dut::ELEMENT_B_COLS];
   };
   std::deque<ExpectedBeat> expected_beats;
 
@@ -305,21 +310,26 @@ struct CIMArraySystemCTestCase : sc_module {
                                    int phase) const {
     ExpectedBeat beat;
     const int set_idx = set.to_int();
-    for (int group_lane = 0; group_lane < MULTICAST_GROUP_LANES; group_lane++) {
-      const int output_lane_idx = group_idx * MULTICAST_GROUP_LANES + group_lane;
-      for (int col = 0; col < Dut::ELEMENT_B_COLS; col++) {
-        long long sum = 0;
-        for (int input_lane_idx = 0; input_lane_idx < INPUT_LANES; input_lane_idx++) {
-          const int element_idx = element_index(input_lane_idx, output_lane_idx);
-          for (int chi = 0; chi < CH_IN; chi++) {
-            const long long a_value = decode_value<A_WIDTH>(
-                activation_value(input_lane_idx, chi, phase));
-            const long long b_value = decode_value<B_WIDTH>(
-                expected_weights[set_idx][element_idx][col][chi]);
-            sum += a_value * b_value;
+    // Each reduction group sums only its own input-lane range -- a separate
+    // partial that rides beside the others in the beat, never summed across
+    for (int reduce_idx = 0; reduce_idx < REDUCTION_GROUPS; reduce_idx++) {
+      for (int group_lane = 0; group_lane < MULTICAST_GROUP_LANES; group_lane++) {
+        const int output_lane_idx = group_idx * MULTICAST_GROUP_LANES + group_lane;
+        for (int col = 0; col < Dut::ELEMENT_B_COLS; col++) {
+          long long sum = 0;
+          for (int til = 0; til < TILE_INPUT_LANES; til++) {
+            const int input_lane_idx = reduce_idx * TILE_INPUT_LANES + til;
+            const int element_idx = element_index(input_lane_idx, output_lane_idx);
+            for (int chi = 0; chi < CH_IN; chi++) {
+              const long long a_value = decode_value<A_WIDTH>(
+                  activation_value(input_lane_idx, chi, phase));
+              const long long b_value = decode_value<B_WIDTH>(
+                  expected_weights[set_idx][element_idx][col][chi]);
+              sum += a_value * b_value;
+            }
           }
+          beat.value[reduce_idx][group_lane][col] = sum;
         }
-        beat.value[group_lane][col] = sum;
       }
     }
     return beat;
@@ -373,19 +383,21 @@ struct CIMArraySystemCTestCase : sc_module {
     const ExpectedBeat expected = expected_beats.front();
     expected_beats.pop_front();
 
-    for (int group_lane = 0; group_lane < MULTICAST_GROUP_LANES; group_lane++) {
-      for (int col = 0; col < Dut::ELEMENT_B_COLS; col++) {
-        const ac_int<Dut::C_WIDTH, false> expected_bits =
-            encode_value<Dut::C_WIDTH>(expected.value[group_lane][col]);
-        if (actual[group_lane][col] == expected_bits) {
-          continue;
-        }
+    for (int reduce_idx = 0; reduce_idx < REDUCTION_GROUPS; reduce_idx++) {
+      for (int group_lane = 0; group_lane < MULTICAST_GROUP_LANES; group_lane++) {
+        for (int col = 0; col < Dut::ELEMENT_B_COLS; col++) {
+          const ac_int<Dut::C_WIDTH, false> expected_bits =
+              encode_value<Dut::C_WIDTH>(expected.value[reduce_idx][group_lane][col]);
+          if (actual[reduce_idx][group_lane][col] == expected_bits) {
+            continue;
+          }
 
-        std::ostringstream text;
-        text << "unexpected c beat[" << group_lane << "][" << col
-             << "] got " << actual[group_lane][col].to_int() << " expected "
-             << expected_bits.to_int();
-        require(false, text.str());
+          std::ostringstream text;
+          text << "unexpected c beat[" << reduce_idx << "][" << group_lane << "]["
+               << col << "] got " << actual[reduce_idx][group_lane][col].to_int()
+               << " expected " << expected_bits.to_int();
+          require(false, text.str());
+        }
       }
     }
     settle();
@@ -588,6 +600,16 @@ int sc_main(int argc, char** argv) {
   CIMArraySystemCTestCase<4, 2, 2, 4, 4, 12, 2, 2,
                          CIM_MODE_BIT_SERIAL_VALUE, 4, 4, false, 2, 2, 2>
       grouped_serial_unsigned("grouped_serial_unsigned");
+
+  // Reduction groups: INPUT_LANES = 4 split into 2 tiles per multicast-group
+  // column, MULTICAST_GROUPS = 2, A_PORTS = REDUCTION_GROUPS = 2
+  CIMArraySystemCTestCase<4, 2, 2, 4, 4, 12, 2, 2,
+                         CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, true, 4, 4, 2, 2>
+      segmented_parallel_signed("segmented_parallel_signed");
+
+  CIMArraySystemCTestCase<4, 2, 2, 4, 4, 12, 2, 2,
+                         CIM_MODE_BIT_SERIAL_VALUE, 4, 4, false, 4, 4, 2, 2>
+      segmented_serial_unsigned("segmented_serial_unsigned");
 
   sc_start();
   return g_cases_remaining;

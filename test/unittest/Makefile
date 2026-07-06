@@ -101,7 +101,7 @@ $(SYSTEMC_BUILD)/CIMElementSystemCTest.o: $(THIS_DIR)/CIMElementSystemCTest.cc $
 >mkdir -p $(SYSTEMC_BUILD)
 >$(SYSTEMC_CC) $(SYSTEMC_CXXFLAGS) -c -o $@ $<
 
-$(SYSTEMC_BUILD)/CIMArraySystemCTest.o: $(THIS_DIR)/CIMArraySystemCTest.cc $(REPO_ROOT)/src/CIMArray.h $(REPO_ROOT)/src/CIMElement.h $(REPO_ROOT)/src/ArchitectureParams.h | check-systemc-env
+$(SYSTEMC_BUILD)/CIMArraySystemCTest.o: $(THIS_DIR)/CIMArraySystemCTest.cc $(REPO_ROOT)/src/CIMArray.h $(REPO_ROOT)/src/CIMTile.h $(REPO_ROOT)/src/CIMElement.h $(REPO_ROOT)/src/ArchitectureParams.h | check-systemc-env
 >mkdir -p $(SYSTEMC_BUILD)
 >$(SYSTEMC_CC) $(SYSTEMC_CXXFLAGS) -c -o $@ $<
 
