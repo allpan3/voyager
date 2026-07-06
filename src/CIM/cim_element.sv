@@ -249,6 +249,16 @@ module CIMIntElement #(
   // Macro-Wrapper-Facing Data Buses
   // ---------------------------------------------------------------------------
 
+  // Repack A/B operands into the fixed macro wrapper shape. B signedness is also
+  // expanded here because only the MSB physical B slice should be signed. These
+  // are declared ahead of the functions/always_comb below because reduce_b_slices
+  // reads macro_wrapper_c; VCS rejects referencing a module variable declared
+  // later in the module (Verilator accepts the forward reference).
+  logic [BASE_A_WIDTH-1:0] macro_wrapper_a [A_COLS];
+  logic [BASE_B_WIDTH-1:0] macro_wrapper_b [CH_OUT][WRITE_CH_IN];
+  logic macro_wrapper_b_signed [CH_OUT];
+  logic [BASE_C_WIDTH-1:0] macro_wrapper_c [CH_OUT];
+
   // Select one macro-wrapper-width A window from a logical A slice
   function automatic logic [BASE_A_WIDTH-1:0] select_a_window(
       input logic [A_WIDTH-1:0] a,
@@ -321,13 +331,6 @@ module CIMIntElement #(
       end
     end
   endfunction
-
-  // Repack A/B operands into the fixed macro wrapper shape. B signedness is also
-  // expanded here because only the MSB physical B slice should be signed.
-  logic [BASE_A_WIDTH-1:0] macro_wrapper_a [A_COLS];
-  logic [BASE_B_WIDTH-1:0] macro_wrapper_b [CH_OUT][WRITE_CH_IN];
-  logic macro_wrapper_b_signed [CH_OUT];
-  logic [BASE_C_WIDTH-1:0] macro_wrapper_c [CH_OUT];
 
   always_comb begin
     for (int chi = 0; chi < A_COLS; chi++) begin
@@ -460,5 +463,108 @@ module CIMIntElement #(
       $fatal(1, "CIMIntElement: selected macro wrapper A slice width must be positive");
     end
   endgenerate
+
+endmodule
+
+// CIMIntElementPacked adapts Catapult-friendly packed buses to the native array RTL
+module CIMIntElementPacked #(
+    parameter int unsigned CH_IN = 64,
+    parameter int unsigned CH_OUT = 8,
+    parameter int unsigned B_SETS = 18,
+
+    // BASE_* parameters describe the base shape of the macro wrapper
+    parameter int unsigned BASE_A_WIDTH = 4,
+    parameter int unsigned BASE_B_WIDTH = 4,
+    parameter int unsigned BASE_C_WIDTH = 20,
+    parameter int unsigned WRITE_CH_IN = 1,
+    parameter int unsigned MAC_LATENCY = 1,
+    parameter cim_mode_t MODE = CIM_MODE_BIT_SERIAL,
+    parameter cim_macro_wrapper_impl_t MACRO_IMPL = CIM_MACRO_WRAPPER_IMPL_MODEL,
+
+    // A_WIDTH and B_WIDTH are the logical operand widths implemented by this element
+    parameter int unsigned A_WIDTH = 8,
+    parameter int unsigned B_WIDTH = 8,
+    parameter bit SIGNED = 1'b0,
+
+    localparam int unsigned A_COLS = CH_IN,
+    localparam int unsigned SUM_GUARD_WIDTH = (A_COLS <= 1) ? 1 : $clog2(A_COLS),
+    localparam int unsigned NUM_B_SLICES = B_WIDTH / BASE_B_WIDTH,
+    localparam int unsigned B_COLS = CH_OUT / NUM_B_SLICES,
+    localparam int unsigned B_ROWS = WRITE_CH_IN,
+    localparam int unsigned C_WIDTH = A_WIDTH + B_WIDTH + SUM_GUARD_WIDTH,
+    localparam int unsigned BITS_CH_IN = (CH_IN <= 1) ? 1 : $clog2(CH_IN),
+    localparam int unsigned BITS_SET = (B_SETS <= 1) ? 1 : $clog2(B_SETS),
+    localparam int unsigned A_BUS_WIDTH = A_COLS * A_WIDTH,
+    localparam int unsigned B_BUS_WIDTH = B_COLS * B_ROWS * B_WIDTH,
+    localparam int unsigned C_BUS_WIDTH = B_COLS * C_WIDTH
+) (
+    input  logic                         wclk,
+    input  logic                         mclk,
+    input  logic                         rstn,
+
+    input  logic [A_BUS_WIDTH-1:0]       a_bus,
+    input  logic [B_BUS_WIDTH-1:0]       b_bus,
+    input  logic                         wen,
+    input  logic [BITS_CH_IN-1:0]        waddr,
+    input  logic [BITS_SET-1:0]          wset,
+
+    input  logic                         mac_issue,
+    input  logic [BITS_SET-1:0]          mset,
+
+    output logic [C_BUS_WIDTH-1:0]       c_bus,
+    output logic                         c_retire,
+    output logic                         mac_ready
+);
+
+  logic [A_WIDTH-1:0] a [A_COLS];
+  logic [B_WIDTH-1:0] b [B_COLS][B_ROWS];
+  logic [C_WIDTH-1:0] c [B_COLS];
+
+  always_comb begin
+    for (int a_col = 0; a_col < A_COLS; a_col++) begin
+      a[a_col] = a_bus[a_col * A_WIDTH +: A_WIDTH];
+    end
+
+    for (int b_col = 0; b_col < B_COLS; b_col++) begin
+      for (int b_row = 0; b_row < B_ROWS; b_row++) begin
+        b[b_col][b_row] =
+            b_bus[((b_col * B_ROWS) + b_row) * B_WIDTH +: B_WIDTH];
+      end
+    end
+
+    for (int b_col = 0; b_col < B_COLS; b_col++) begin
+      c_bus[b_col * C_WIDTH +: C_WIDTH] = c[b_col];
+    end
+  end
+
+  CIMIntElement #(
+      .CH_IN(CH_IN),
+      .CH_OUT(CH_OUT),
+      .B_SETS(B_SETS),
+      .BASE_A_WIDTH(BASE_A_WIDTH),
+      .BASE_B_WIDTH(BASE_B_WIDTH),
+      .BASE_C_WIDTH(BASE_C_WIDTH),
+      .WRITE_CH_IN(WRITE_CH_IN),
+      .MAC_LATENCY(MAC_LATENCY),
+      .MODE(MODE),
+      .MACRO_IMPL(MACRO_IMPL),
+      .A_WIDTH(A_WIDTH),
+      .B_WIDTH(B_WIDTH),
+      .SIGNED(SIGNED)
+  ) core (
+      .wclk(wclk),
+      .mclk(mclk),
+      .rstn(rstn),
+      .a(a),
+      .b(b),
+      .wen(wen),
+      .waddr(waddr),
+      .wset(wset),
+      .mac_issue(mac_issue),
+      .mset(mset),
+      .c(c),
+      .c_retire(c_retire),
+      .mac_ready(mac_ready)
+  );
 
 endmodule

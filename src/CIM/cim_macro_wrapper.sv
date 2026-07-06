@@ -244,7 +244,7 @@ module CIMIntMacroWrapper #(
     serial_bits_seen = '0;
   end
 
-  always_ff @(posedge mclk) begin
+  always @(posedge mclk) begin
     if (mac) begin
       if (init || (serial_bits_seen == BITS_A_COUNT'(A_WIDTH))) begin
         serial_bits_seen <= BITS_A_COUNT'(1);
@@ -260,7 +260,7 @@ module CIMIntMacroWrapper #(
         c_valid = 1'b0;
       end
 
-      always_ff @(posedge mclk) begin
+      always @(posedge mclk) begin
         c_valid <= result_input_valid;
       end
     end else begin : gen_debug_valid_pipe
@@ -273,7 +273,7 @@ module CIMIntMacroWrapper #(
         end
       end
 
-      always_ff @(posedge mclk) begin
+      always @(posedge mclk) begin
         c_valid_pipe[0] <= result_input_valid;
         for (int stage = 1; stage < C_VALID_DELAY; stage++) begin
           c_valid_pipe[stage] <= c_valid_pipe[stage-1];

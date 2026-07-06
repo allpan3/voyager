@@ -1,5 +1,4 @@
 # Make targets for CIM unittest suites
-.RECIPEPREFIX := >
 THIS_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 REPO_ROOT := $(abspath $(THIS_DIR)/../..)
 CONDA_ENV ?= $(abspath $(REPO_ROOT)/../.conda-env)
@@ -18,14 +17,24 @@ ELEMENT_TEST_ARGS ?=
 JOBS_ARG := $(if $(JOBS),--jobs $(JOBS),)
 WAVEFORM_ARG := $(if $(WAVEFORM),--waveform,)
 
+# Default SystemC-sim configuration (selects the -D flags and the build subdir
+# DATATYPE_ICxOC). Override on the command line to sweep
+DATATYPE ?= INT8
+IC_DIMENSION ?= 4
+OC_DIMENSION ?= 2
+
 SYSTEMC_CC ?= $(CATAPULT_ROOT)/bin/g++
+ifneq ($(wildcard $(CONDA_ENV)/bin/verilator),)
+VERILATOR ?= $(CONDA_ENV)/bin/verilator
+else
 VERILATOR ?= verilator
+endif
 VERILATOR_ROOT ?= $(shell $(VERILATOR) -V 2>/dev/null | sed -n 's/.*VERILATOR_ROOT *= *//p' | head -1)
 
 SYSTEMC_BUILD := $(THIS_DIR)/build/systemc/$(DATATYPE)_$(IC_DIMENSION)x$(OC_DIMENSION)
 SYSTEMC_GENERATED := $(SYSTEMC_BUILD)/generated
 SYSTEMC_CASES := $(THIS_DIR)/systemc/cim_element_cosim_cases.py
-SYSTEMC_CASES_INC := $(SYSTEMC_GENERATED)/CIMElementSystemCTestCases.inc
+SYSTEMC_CASES_INC := $(SYSTEMC_GENERATED)/CIMElementTbCases.inc
 SYSTEMC_CASES_MK := $(SYSTEMC_GENERATED)/cim_element_cosim_cases.mk
 SYSTEMC_RUNNER := $(THIS_DIR)/systemc/run_systemc_test.py
 CIM_VERILATED_DIR := $(SYSTEMC_BUILD)/verilated
@@ -67,56 +76,188 @@ SYSTEMC_LDFLAGS := \
 	-lsystemc \
 	-lpthread
 
-.PHONY: test test-macro test-element test-array build-systemc build-systemc-element build-systemc-array test-systemc-element test-systemc-array check-systemc-env check-verilator-env clean
+###########################################################
+# Standalone Catapult HLS for CIMArray
+#
+# Synthesizes CIMArray in isolation (block header as the design source, no
+# Accelerator dependency). SCVerify is available through scverify-array. Run on
+# a machine with the Catapult environment loaded (see env.sh). Override any
+# CIM_* / CLOCK_PERIOD / TECHNOLOGY on the command line, e.g.:
+#   make hls-array CLOCK_PERIOD=1.25 CIM_CH_IN=64
+###########################################################
+CATAPULT ?= catapult
+HLS_DRIVER := $(THIS_DIR)/hls.tcl
+
+CLOCK_PERIOD ?= 1.0
+TECHNOLOGY ?= generic
+HLS_BUILD := $(THIS_DIR)/build/catapult/$(TECHNOLOGY)/clock_$(CLOCK_PERIOD)
+
+# Geometry pinned by CIMArrayTb.cc in SCVerify mode
+SCVERIFY_ARRAY_HLS_ARGS := \
+	CIM_CH_IN=4 CIM_CH_OUT=2 CIM_B_SETS=2 \
+	CIM_BASE_A_WIDTH=4 CIM_BASE_B_WIDTH=4 CIM_BASE_C_WIDTH=12 \
+	CIM_WRITE_CH_IN=2 CIM_MAC_LATENCY=2 CIM_MODE=0 \
+	CIM_A_WIDTH=4 CIM_B_WIDTH=4 CIM_SIGNED=false \
+	CIM_INPUT_LANES=2 CIM_OUTPUT_LANES=3 \
+	CIM_MULTICAST_GROUPS=1 CIM_REDUCTION_GROUPS=1 \
+	DATATYPE=INT8 IC_DIMENSION=4 OC_DIMENSION=2
+
+# CIM template parameters. Defaults match the production macro geometry in
+# scripts/architecture.tcl; override individually to sweep configurations.
+CIM_CH_IN ?= 64
+CIM_CH_OUT ?= 8
+CIM_B_SETS ?= 18
+CIM_BASE_A_WIDTH ?= 4
+CIM_BASE_B_WIDTH ?= 4
+CIM_BASE_C_WIDTH ?= 20
+CIM_WRITE_CH_IN ?= 1
+CIM_MAC_LATENCY ?= 1
+CIM_MODE ?= 1
+CIM_A_WIDTH ?= 8
+CIM_B_WIDTH ?= 8
+CIM_SIGNED ?= true
+
+# CIMArray-only lane/group geometry (the primary array QoR knobs). Constraints
+# enforced by static_asserts in CIMArray.h:
+#   OUTPUT_LANES % MULTICAST_GROUPS == 0, INPUT_LANES % REDUCTION_GROUPS == 0.
+CIM_INPUT_LANES ?= 2
+CIM_OUTPUT_LANES ?= 4
+CIM_MULTICAST_GROUPS ?= 1
+CIM_REDUCTION_GROUPS ?= 1
+# Transfer ports, in tiles per transfer. Each is pinned to "one beat per
+# transfer" today: A_PORT_TILES to REDUCTION_GROUPS (a full A column),
+# B_PORT_TILES to MULTICAST_GROUPS (a full B write-row), so both are derived from
+# the group counts. They decouple bandwidth from beat size for when the pins lift.
+CIM_A_PORT_TILES := $(CIM_REDUCTION_GROUPS)
+CIM_B_PORT_TILES := $(CIM_MULTICAST_GROUPS)
+
+# Base macro geometry arguments followed by the CIMArray lane/group arguments
+# Spelling (comma-space, `true`) must match how the compiler mangles the
+# specialization
+CIM_TPARAMS := $(CIM_CH_IN), $(CIM_CH_OUT), $(CIM_B_SETS), $(CIM_BASE_A_WIDTH), $(CIM_BASE_B_WIDTH), $(CIM_BASE_C_WIDTH), $(CIM_WRITE_CH_IN), $(CIM_MAC_LATENCY), $(CIM_MODE), $(CIM_A_WIDTH), $(CIM_B_WIDTH), $(CIM_SIGNED)
+CIM_ARRAY_TPARAMS := $(CIM_TPARAMS), $(CIM_INPUT_LANES), $(CIM_OUTPUT_LANES), $(CIM_MULTICAST_GROUPS), $(CIM_REDUCTION_GROUPS), $(CIM_A_PORT_TILES), $(CIM_B_PORT_TILES)
+HLS_TOP_ARRAY := CIMArray<$(CIM_ARRAY_TPARAMS)>
+CIM_ARRAY_CONFIG := ci$(CIM_CH_IN)_co$(CIM_CH_OUT)_bs$(CIM_B_SETS)_base$(CIM_BASE_A_WIDTH)x$(CIM_BASE_B_WIDTH)x$(CIM_BASE_C_WIDTH)_w$(CIM_WRITE_CH_IN)_lat$(CIM_MAC_LATENCY)_m$(CIM_MODE)_a$(CIM_A_WIDTH)_b$(CIM_B_WIDTH)_s$(CIM_SIGNED)_il$(CIM_INPUT_LANES)_ol$(CIM_OUTPUT_LANES)_mg$(CIM_MULTICAST_GROUPS)_rg$(CIM_REDUCTION_GROUPS)
+HLS_ARRAY_BUILD := $(HLS_BUILD)/CIMArray/$(CIM_ARRAY_CONFIG)
+HLS_ARRAY_PROJECT := $(HLS_ARRAY_BUILD)/CIMArray.v1
+HLS_ARRAY_RTL := $(HLS_ARRAY_PROJECT)/rtl.v
+SCVERIFY_ARRAY_PROJECT := $(HLS_ARRAY_PROJECT)
+SCVERIFY_ARRAY_MK := $(SCVERIFY_ARRAY_PROJECT)/scverify/Verify_rtl_v_vcs.mk
+SCVERIFY_ARRAY_TB := $(THIS_DIR)/systemc/CIMArrayTb.cc
+
+# Shared environment forwarded into the driver
+HLS_FORCE_REBUILD ?= 0
+HLS_FORCE_PREREQ := $(if $(filter 1,$(HLS_FORCE_REBUILD)),FORCE)
+HLS_ARRAY_DEPS := \
+	$(THIS_DIR)/Makefile \
+	$(HLS_DRIVER) \
+	$(REPO_ROOT)/src/CIMArray.h \
+	$(REPO_ROOT)/src/CIMTile.h \
+	$(REPO_ROOT)/src/CIMElement.h
+SCVERIFY_ARRAY_DEPS := \
+	$(HLS_ARRAY_DEPS) \
+	$(SCVERIFY_ARRAY_TB)
+
+HLS_ENV = \
+	REPO_ROOT=$(REPO_ROOT) \
+	CLOCK_PERIOD=$(CLOCK_PERIOD) \
+	TECHNOLOGY=$(TECHNOLOGY) \
+	DATATYPE=$(DATATYPE) \
+	IC_DIMENSION=$(IC_DIMENSION) \
+	OC_DIMENSION=$(OC_DIMENSION) \
+	HLS_RESET_NAME=rstn \
+	$(if $(HLS_SCVERIFY),HLS_SCVERIFY=$(HLS_SCVERIFY))
+
+.PHONY: test test-macro test-element build-systemc build-systemc-element build-systemc-array test-systemc-element test-systemc-array check-systemc-env check-verilator-env clean hls hls-array hls-array-fresh scverify-array scverify-array-run scverify-array-fresh check-catapult-root check-catapult-env FORCE
 
 test: test-macro test-element test-systemc-element test-systemc-array
 
 test-macro:
->$(PYTHON) $(THIS_DIR)/verilog/test_cim_macro.py $(JOBS_ARG) $(WAVEFORM_ARG) $(TEST_ARGS) $(MODEL_TEST_ARGS)
+	$(PYTHON) $(THIS_DIR)/verilog/test_cim_macro.py $(JOBS_ARG) $(WAVEFORM_ARG) $(TEST_ARGS) $(MODEL_TEST_ARGS)
 
 test-element:
->$(PYTHON) $(THIS_DIR)/verilog/test_cim_element.py $(JOBS_ARG) $(WAVEFORM_ARG) $(TEST_ARGS) $(ELEMENT_TEST_ARGS)
+	$(PYTHON) $(THIS_DIR)/verilog/test_cim_element.py $(JOBS_ARG) $(WAVEFORM_ARG) $(TEST_ARGS) $(ELEMENT_TEST_ARGS)
 
-test-array: test-systemc-array
+build-systemc: $(SYSTEMC_BUILD)/CIMElementTb $(SYSTEMC_BUILD)/CIMArrayTb
 
-build-systemc: $(SYSTEMC_BUILD)/CIMElementSystemCTest $(SYSTEMC_BUILD)/CIMArraySystemCTest
+build-systemc-element: $(SYSTEMC_BUILD)/CIMElementTb
 
-build-systemc-element: $(SYSTEMC_BUILD)/CIMElementSystemCTest
-
-build-systemc-array: $(SYSTEMC_BUILD)/CIMArraySystemCTest
+build-systemc-array: $(SYSTEMC_BUILD)/CIMArrayTb
 
 test-systemc-element: check-systemc-env
->@$(PYTHON) $(SYSTEMC_RUNNER) --suite cim_element_systemc --build-target build-systemc-element --binary $(SYSTEMC_BUILD)/CIMElementSystemCTest --log-dir $(SYSTEMC_BUILD)/logs/cim_element --makefile $(THIS_DIR)/Makefile --datatype $(DATATYPE) --ic-dimension $(IC_DIMENSION) --oc-dimension $(OC_DIMENSION)
+	@$(PYTHON) $(SYSTEMC_RUNNER) --suite cim_element_systemc --build-target build-systemc-element --binary $(SYSTEMC_BUILD)/CIMElementTb --log-dir $(SYSTEMC_BUILD)/logs/cim_element --makefile $(THIS_DIR)/Makefile --datatype $(DATATYPE) --ic-dimension $(IC_DIMENSION) --oc-dimension $(OC_DIMENSION)
 
 test-systemc-array: check-systemc-env
->@$(PYTHON) $(SYSTEMC_RUNNER) --suite cim_array_systemc --build-target build-systemc-array --binary $(SYSTEMC_BUILD)/CIMArraySystemCTest --log-dir $(SYSTEMC_BUILD)/logs/cim_array --makefile $(THIS_DIR)/Makefile --datatype $(DATATYPE) --ic-dimension $(IC_DIMENSION) --oc-dimension $(OC_DIMENSION)
+	@$(PYTHON) $(SYSTEMC_RUNNER) --suite cim_array_systemc --build-target build-systemc-array --binary $(SYSTEMC_BUILD)/CIMArrayTb --log-dir $(SYSTEMC_BUILD)/logs/cim_array --makefile $(THIS_DIR)/Makefile --datatype $(DATATYPE) --ic-dimension $(IC_DIMENSION) --oc-dimension $(OC_DIMENSION)
 
-$(SYSTEMC_BUILD)/CIMElementSystemCTest: $(SYSTEMC_BUILD)/CIMElementSystemCTest.o $(CIM_ELEMENT_VERILATED_LIBS)
->$(SYSTEMC_CC) -o $@ $< $(CIM_ELEMENT_VERILATED_LIBS) $(CIM_ELEMENT_VERILATED_RUNTIME_LIB) $(SYSTEMC_LDFLAGS)
+$(SYSTEMC_BUILD)/CIMElementTb: $(SYSTEMC_BUILD)/CIMElementTb.o $(CIM_ELEMENT_VERILATED_LIBS)
+	$(SYSTEMC_CC) -o $@ $< $(CIM_ELEMENT_VERILATED_LIBS) $(CIM_ELEMENT_VERILATED_RUNTIME_LIB) $(SYSTEMC_LDFLAGS)
 
-$(SYSTEMC_BUILD)/CIMArraySystemCTest: $(SYSTEMC_BUILD)/CIMArraySystemCTest.o
->$(SYSTEMC_CC) -o $@ $^ $(SYSTEMC_LDFLAGS)
+$(SYSTEMC_BUILD)/CIMArrayTb: $(SYSTEMC_BUILD)/CIMArrayTb.o
+	$(SYSTEMC_CC) -o $@ $^ $(SYSTEMC_LDFLAGS)
 
-$(SYSTEMC_BUILD)/CIMElementSystemCTest.o: $(THIS_DIR)/CIMElementSystemCTest.cc $(REPO_ROOT)/src/CIMElement.h $(REPO_ROOT)/src/ArchitectureParams.h $(SYSTEMC_CASES_INC) $(CIM_ELEMENT_VERILATED_LIBS) | check-systemc-env check-verilator-env
->mkdir -p $(SYSTEMC_BUILD)
->$(SYSTEMC_CC) $(SYSTEMC_CXXFLAGS) -c -o $@ $<
+$(SYSTEMC_BUILD)/CIMElementTb.o: $(THIS_DIR)/systemc/CIMElementTb.cc $(REPO_ROOT)/src/CIMElement.h $(REPO_ROOT)/src/ArchitectureParams.h $(SYSTEMC_CASES_INC) $(CIM_ELEMENT_VERILATED_LIBS) | check-systemc-env check-verilator-env
+	mkdir -p $(SYSTEMC_BUILD)
+	$(SYSTEMC_CC) $(SYSTEMC_CXXFLAGS) -c -o $@ $<
 
-$(SYSTEMC_BUILD)/CIMArraySystemCTest.o: $(THIS_DIR)/CIMArraySystemCTest.cc $(REPO_ROOT)/src/CIMArray.h $(REPO_ROOT)/src/CIMTile.h $(REPO_ROOT)/src/CIMElement.h $(REPO_ROOT)/src/ArchitectureParams.h | check-systemc-env
->mkdir -p $(SYSTEMC_BUILD)
->$(SYSTEMC_CC) $(SYSTEMC_CXXFLAGS) -c -o $@ $<
+$(SYSTEMC_BUILD)/CIMArrayTb.o: $(THIS_DIR)/systemc/CIMArrayTb.cc $(REPO_ROOT)/src/CIMArray.h $(REPO_ROOT)/src/CIMTile.h $(REPO_ROOT)/src/CIMElement.h $(REPO_ROOT)/src/ArchitectureParams.h | check-systemc-env
+	mkdir -p $(SYSTEMC_BUILD)
+	$(SYSTEMC_CC) $(SYSTEMC_CXXFLAGS) -c -o $@ $<
 
 $(SYSTEMC_CASES_MK): $(SYSTEMC_CASES)
->mkdir -p $(SYSTEMC_GENERATED)
->$(PYTHON) $(SYSTEMC_CASES) --makefile $@
+	mkdir -p $(SYSTEMC_GENERATED)
+	$(PYTHON) $(SYSTEMC_CASES) --makefile $@
 
-check-systemc-env:
->@test -n "$(DATATYPE)" || { echo "DATATYPE environment variable is not set"; exit 2; }
->@test -n "$(IC_DIMENSION)" || { echo "IC_DIMENSION environment variable is not set"; exit 2; }
->@test -n "$(OC_DIMENSION)" || { echo "OC_DIMENSION environment variable is not set"; exit 2; }
->@test -n "$(CATAPULT_ROOT)" || { echo "CATAPULT_ROOT environment variable is not set"; exit 2; }
+# CATAPULT_ROOT locates the toolchain shared by both flows: the SystemC/AC/
+# Connections headers and g++ for the cosim build, and the HLS tool for synthesis.
+check-catapult-root:
+	@test -n "$(CATAPULT_ROOT)" || { echo "CATAPULT_ROOT is not set (source env.sh)"; exit 2; }
+
+# SystemC cosim env: test-config vars plus the shared toolchain root (no HLS tool).
+check-systemc-env: check-catapult-root
+	@test -n "$(DATATYPE)" || { echo "DATATYPE environment variable is not set"; exit 2; }
+	@test -n "$(IC_DIMENSION)" || { echo "IC_DIMENSION environment variable is not set"; exit 2; }
+	@test -n "$(OC_DIMENSION)" || { echo "OC_DIMENSION environment variable is not set"; exit 2; }
 
 check-verilator-env:
->@test -n "$(VERILATOR_ROOT)" || { echo "VERILATOR_ROOT could not be detected"; exit 2; }
+	@test -n "$(VERILATOR_ROOT)" || { echo "VERILATOR_ROOT could not be detected"; exit 2; }
+
+# --- Catapult HLS ------------------------------------------------------------
+hls: hls-array
+
+hls-array: $(HLS_ARRAY_RTL)
+
+hls-array-fresh:
+	$(MAKE) -C $(THIS_DIR) hls-array HLS_FORCE_REBUILD=1
+
+$(HLS_ARRAY_RTL): $(HLS_FORCE_PREREQ) $(HLS_ARRAY_DEPS) | check-catapult-env
+	mkdir -p $(HLS_ARRAY_BUILD)
+	$(HLS_ENV) BLOCK=CIMArray HLS_TOP='$(HLS_TOP_ARRAY)' \
+	DESIGN_HEADER=$(REPO_ROOT)/src/CIMArray.h \
+	HLS_PROJECT_DIR=$(HLS_ARRAY_BUILD) HLS_CLOCKS='clk' \
+	$(CATAPULT) -shell -file $(HLS_DRIVER) -logfile $(HLS_ARRAY_BUILD).log
+
+scverify-array:
+	$(MAKE) -C $(THIS_DIR) scverify-array-run HLS_SCVERIFY=1 HLS_SCVERIFY_TB=$(SCVERIFY_ARRAY_TB) $(SCVERIFY_ARRAY_HLS_ARGS)
+
+scverify-array-run: $(SCVERIFY_ARRAY_MK)
+	$(MAKE) -C $(SCVERIFY_ARRAY_PROJECT) -f ./scverify/Verify_rtl_v_vcs.mk SIMTOOL=vcs build
+	$(MAKE) -C $(SCVERIFY_ARRAY_PROJECT) -f ./scverify/Verify_rtl_v_vcs.mk SIMTOOL=vcs sim
+
+scverify-array-fresh:
+	$(MAKE) -C $(THIS_DIR) scverify-array HLS_FORCE_REBUILD=1
+
+$(SCVERIFY_ARRAY_MK): $(HLS_FORCE_PREREQ) $(SCVERIFY_ARRAY_DEPS) | check-catapult-env
+	mkdir -p $(HLS_ARRAY_BUILD)
+	$(HLS_ENV) HLS_SCVERIFY_TB=$(SCVERIFY_ARRAY_TB) \
+	BLOCK=CIMArray HLS_TOP='$(HLS_TOP_ARRAY)' \
+	DESIGN_HEADER=$(REPO_ROOT)/src/CIMArray.h \
+	HLS_PROJECT_DIR=$(HLS_ARRAY_BUILD) HLS_CLOCKS='clk' \
+	$(CATAPULT) -shell -file $(HLS_DRIVER) -logfile $(HLS_ARRAY_BUILD).log
+
+# HLS env: the shared toolchain root plus the catapult binary (no test-config vars).
+check-catapult-env: check-catapult-root
+	@command -v $(CATAPULT) >/dev/null 2>&1 || { echo "'$(CATAPULT)' not found in PATH (source env.sh)"; exit 2; }
 
 clean:
->rm -rf $(THIS_DIR)/build
+	rm -rf $(THIS_DIR)/build

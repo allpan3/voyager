@@ -11,14 +11,6 @@
 #include "CIMElement.h"
 #include "CIMTile.h"
 
-// ZeroInitializedSignal gives ac_int-backed SystemC signals deterministic startup values
-template <typename T>
-class ZeroInitializedSignal : public sc_signal<T> {
- public:
-  ZeroInitializedSignal()
-      : sc_signal<T>(sc_gen_unique_name("zero_initialized_signal"), T(0)) {}
-};
-
 // Default CIMArray lane counts for local CIMElement composition
 constexpr int CIM_DEFAULT_INPUT_LANES = 2;
 constexpr int CIM_DEFAULT_OUTPUT_LANES = 4;
@@ -54,16 +46,44 @@ template <int CH_IN = CIM_CH_IN, int CH_OUT = CIM_CH_OUT,
           // holds REDUCTION_GROUPS tiles, each a shorter-contraction vector-matrix
           // MAC with its own result. No datapath sums across a tile boundary
           int REDUCTION_GROUPS = 1,
-          // Streamed-side transfer multiplicity in tile payloads per transfer:
-          // one MAC transfer delivers the full column (all REDUCTION_GROUPS tiles),
-          // so A_PORTS is pinned to REDUCTION_GROUPS today (active tiles <=
-          // A_PORTS x II)
-          int A_PORTS = 1,
-          // Resident-side transfer multiplicity: store beats delivered per
-          // transfer to distinct input lanes, set by the upstream B buffer
-          // bandwidth (WRITE_CH_IN is the macro's own write-port geometry and
-          // is not a free knob)
-          int B_PORTS = 1>
+          // --- Transfer ports (beat vs port) --------------------------------
+          // A *beat* is the operand data a tile op consumes/commits atomically;
+          // the array fires only once a beat is fully assembled. A *port* is the
+          // per-transfer channel width, in tiles. The two are decoupled: a beat
+          // assembles over ceil(beat / port) transfers. Each port is pinned to
+          // "one beat per transfer" today, but that is the temporary limit.
+          //
+          // Future direction (not yet implemented): rename these to
+          // A_PORT_BEATS / B_PORT_BEATS once a "beat" is the finer, macro-aligned
+          // granule instead of a whole column/row. For B a beat becomes the macro
+          // CH_OUT width times the number of macros in a tile; that finer granule
+          // lets a transfer carry offset/stride-addressed beats -- e.g. writing
+          // only the first CH_IN of each tile (partial/strided weight writes) --
+          // which a full-column/row beat cannot express.
+          //
+          // A_PORT_TILES: reduction-group tiles of A per transfer. An A beat is a
+          // full multicast-group column (REDUCTION_GROUPS tiles), so pinned to
+          // REDUCTION_GROUPS (sustained-rate law: active tiles <= A_PORT_TILES x
+          // II).
+          int A_PORT_TILES = REDUCTION_GROUPS,
+          // B_PORT_TILES: multicast-group tiles of B per transfer. A B beat is a
+          // full input-lane write-row across the output axis (MULTICAST_GROUPS
+          // tiles), so pinned to MULTICAST_GROUPS. Counted in tiles, not lanes,
+          // so the port width is decoupled from the lane geometry.
+          //
+          // Store-path layout note: weights sit in the buffer in natural
+          // row-major order (rows consecutive, possibly several packed in one
+          // SRAM word), but a macro needs *its own* rows contiguous. Prefer to
+          // resolve this at load time -- have the weight DMA write the buffer in
+          // macro-consumption order via address generation -- since weights are
+          // resident and the repack amortizes over every reuse, keeping
+          // steady-state reads contiguous with no read-side crossbar. The
+          // decoupled port is the fallback: a per-tile assembly register, fed by
+          // strided/gather addressing, collects the row-beat over several
+          // B_PORT_TILES transfers (temporal repack) instead of a wide
+          // single-cycle read crossbar. Weights load ahead of compute, so that
+          // assembly latency hides.
+          int B_PORT_TILES = MULTICAST_GROUPS>
 SC_MODULE(CIMArray) {
  private:
   // Return the ceil log2 used for static port widths
@@ -98,10 +118,10 @@ SC_MODULE(CIMArray) {
                 "REDUCTION_GROUPS must partition the input lanes");
   static_assert((INPUT_LANES % REDUCTION_GROUPS) == 0,
                 "INPUT_LANES must be divisible by REDUCTION_GROUPS");
-  static_assert(A_PORTS == REDUCTION_GROUPS,
-                "CIMArray currently delivers one full column per transfer");
-  static_assert(B_PORTS == 1,
-                "CIMArray currently accepts one store beat per transfer");
+  static_assert(A_PORT_TILES == REDUCTION_GROUPS,
+                "CIMArray currently delivers one full column per A transfer");
+  static_assert(B_PORT_TILES == MULTICAST_GROUPS,
+                "CIMArray currently delivers one full write-row per B transfer");
 
   static constexpr int ELEMENTS = INPUT_LANES * OUTPUT_LANES;
   static constexpr int ELEMENT_A_COLS = Element::A_COLS;
@@ -271,19 +291,19 @@ SC_MODULE(CIMArray) {
   // T+2, and by then this column's pulse is already deasserted (held exactly one
   // observed cycle). sc_signal read-before-update semantics make the pulse, not
   // the bus, the selector, so no tile can latch a payload not meant for it.
-  ZeroInitializedSignal<ElementAValue> bus_a[INPUT_LANES][ELEMENT_A_COLS];
-  ZeroInitializedSignal<ElementSet> bus_mset;
+  sc_signal<ElementAValue> bus_a[INPUT_LANES][ELEMENT_A_COLS];
+  sc_signal<ElementSet> bus_mset;
   sc_signal<bool> col_start[MULTICAST_GROUPS];
 
   // Store-side control is shared per input lane; only the B payload differs per element
   sc_signal<bool> store_wen[INPUT_LANES];
-  ZeroInitializedSignal<ElementAddr> store_waddr[INPUT_LANES];
-  ZeroInitializedSignal<ElementSet> store_wset[INPUT_LANES];
-  ZeroInitializedSignal<ElementBValue> element_b[INPUT_LANES][OUTPUT_LANES][ELEMENT_B_COLS][ELEMENT_B_WRITE_ROWS];
+  sc_signal<ElementAddr> store_waddr[INPUT_LANES];
+  sc_signal<ElementSet> store_wset[INPUT_LANES];
+  sc_signal<ElementBValue> element_b[INPUT_LANES][OUTPUT_LANES][ELEMENT_B_COLS][ELEMENT_B_WRITE_ROWS];
 
   // Per-tile registered results: each tile reduces its input lanes and drives
   // one result row per output lane plus a per-retirement toggle
-  ZeroInitializedSignal<CValue> tile_c[REDUCTION_GROUPS][MULTICAST_GROUPS][MULTICAST_GROUP_LANES][ELEMENT_B_COLS];
+  sc_signal<CValue> tile_c[REDUCTION_GROUPS][MULTICAST_GROUPS][MULTICAST_GROUP_LANES][ELEMENT_B_COLS];
   sc_signal<bool> tile_c_retire[REDUCTION_GROUPS][MULTICAST_GROUPS];
   sc_signal<bool> tile_mac_ready[REDUCTION_GROUPS][MULTICAST_GROUPS];
 
@@ -295,7 +315,7 @@ SC_MODULE(CIMArray) {
   static constexpr int GROUP_CREDITS = 2;
   static constexpr int CREDIT_COUNT_WIDTH = log2_ceil(GROUP_CREDITS + 1);
   using CreditCount = ac_int<CREDIT_COUNT_WIDTH, false>;
-  ZeroInitializedSignal<CreditCount> collected_count[MULTICAST_GROUPS];
+  sc_signal<CreditCount> collected_count[MULTICAST_GROUPS];
 
   // InflightToken records {bcast, group} of one accepted request in issue order
   using InflightToken = ac_int<MULTICAST_GROUP_INDEX_WIDTH + 1, false>;
@@ -411,7 +431,6 @@ SC_MODULE(CIMArray) {
 
   // Drive one store request into the covered input lanes and all output lanes
   void drive_store_request(const StoreRequest& request) {
-#pragma hls_unroll yes
     const bool fanout_write = request.fanout != 0;
 #pragma hls_unroll yes
     for (int input_lane_idx = 0; input_lane_idx < INPUT_LANES; input_lane_idx++) {

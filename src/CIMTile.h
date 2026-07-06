@@ -9,14 +9,6 @@
 #include "ArchitectureParams.h"
 #include "CIMElement.h"
 
-// ZeroInitializedTileSignal gives ac_int-backed SystemC signals deterministic startup values
-template <typename T>
-class ZeroInitializedTileSignal : public sc_signal<T> {
- public:
-  ZeroInitializedTileSignal()
-      : sc_signal<T>(sc_gen_unique_name("zero_initialized_tile_signal"), T(0)) {}
-};
-
 // CIMTile is the intersection of one multicast group and one reduction group:
 // a TILE_INPUT_LANES x TILE_OUTPUT_LANES grid of CIMElements that reduces one
 // streamed A section against the resident B tile and emits one registered
@@ -111,14 +103,21 @@ SC_MODULE(CIMTile) {
  private:
   Element* elements[TILE_INPUT_LANES][TILE_OUTPUT_LANES];
 
-  // Station registers hold the latched A section and set select for the window
-  ZeroInitializedTileSignal<ElementAValue> station_a[TILE_INPUT_LANES][ELEMENT_A_COLS];
-  ZeroInitializedTileSignal<ElementSet> station_mset;
+  // Station registers hold the latched A section and set select for the window.
+  // Plain sc_signal (not the ZeroInitializedTileSignal subclass) so Catapult
+  // recognizes them as channels when bound to the element a/mset ports (CIN-216);
+  // they are latched before the elements consume them, so no forced zero start.
+  sc_signal<ElementAValue> station_a[TILE_INPUT_LANES][ELEMENT_A_COLS];
+  sc_signal<ElementSet> station_mset;
   // Registered issue pulse fed to the elements one cycle after the tile issue
   sc_signal<bool> element_mac_issue;
 
-  // Per-element outputs
-  ZeroInitializedTileSignal<ElementCValue> element_c[TILE_INPUT_LANES][TILE_OUTPUT_LANES][ELEMENT_B_COLS];
+  // Per-element outputs. element_c must be a plain sc_signal (not the
+  // ZeroInitializedTileSignal subclass): Catapult only models sc_signal<T> as a
+  // synthesizable channel, so reading a subclass in run_collect's reduction
+  // aborts go compile (CIN-242). It is read only after the element has driven it
+  // (guarded by tile_retired), so it needs no forced zero startup value.
+  sc_signal<ElementCValue> element_c[TILE_INPUT_LANES][TILE_OUTPUT_LANES][ELEMENT_B_COLS];
   sc_signal<bool> element_c_retire[TILE_INPUT_LANES][TILE_OUTPUT_LANES];
   sc_signal<bool> element_mac_ready[TILE_INPUT_LANES][TILE_OUTPUT_LANES];
 
@@ -184,7 +183,9 @@ SC_MODULE(CIMTile) {
     int window_remaining = 0;
     element_mac_issue.write(false);
     station_mset.write(0);
+#pragma hls_unroll yes
     for (int til = 0; til < TILE_INPUT_LANES; til++) {
+#pragma hls_unroll yes
       for (int a_col = 0; a_col < ELEMENT_A_COLS; a_col++) {
         station_a[til][a_col].write(0);
       }
@@ -201,7 +202,9 @@ SC_MODULE(CIMTile) {
       }
 
       if (mac_issue.read() && ready_now) {
+#pragma hls_unroll yes
         for (int til = 0; til < TILE_INPUT_LANES; til++) {
+#pragma hls_unroll yes
           for (int a_col = 0; a_col < ELEMENT_A_COLS; a_col++) {
             station_a[til][a_col].write(a[til][a_col].read());
           }
@@ -236,16 +239,6 @@ SC_MODULE(CIMTile) {
     return widened;
   }
 
-  // Reduce one output column across the tile's input lanes
-  CValue reduce_input_lanes(int tol, int b_col) const {
-    CValue sum = 0;
-#pragma hls_unroll yes
-    for (int til = 0; til < TILE_INPUT_LANES; til++) {
-      sum += widen_element_c(element_c[til][tol][b_col].read());
-    }
-    return sum;
-  }
-
   // Return whether every element in the tile has flipped past the seen toggle.
   // All of a tile's elements retire in the same cycle by construction
   bool tile_retired(bool seen_retire) const {
@@ -277,9 +270,21 @@ SC_MODULE(CIMTile) {
 
     while (true) {
       if (tile_retired(seen_retire)) {
+        // Reduce inline so element_c is indexed only by loop variables, like
+        // tile_retired. Catapult's front end statically enumerates these loops
+        // to resolve each element_c signal object; passing tol/b_col as function
+        // arguments (the old reduce_input_lanes helper) left the signal lvalue
+        // unresolved and aborted go compile (CIN-242, NULL pointer for lvalue).
+#pragma hls_unroll yes
         for (int tol = 0; tol < TILE_OUTPUT_LANES; tol++) {
+#pragma hls_unroll yes
           for (int b_col = 0; b_col < ELEMENT_B_COLS; b_col++) {
-            c[tol][b_col].write(reduce_input_lanes(tol, b_col));
+            CValue sum = 0;
+#pragma hls_unroll yes
+            for (int til = 0; til < TILE_INPUT_LANES; til++) {
+              sum += widen_element_c(element_c[til][tol][b_col].read());
+            }
+            c[tol][b_col].write(sum);
           }
         }
         seen_retire = !seen_retire;

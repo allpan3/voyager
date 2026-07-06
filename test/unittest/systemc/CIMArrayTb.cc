@@ -1,7 +1,15 @@
-// SystemC behavioral tests for the standalone CIMArray lane protocol
+// Combined SystemC and Catapult SCVerify tests for the standalone CIMArray
 //
-// These tests stream MAC and store requests through the CIMArray Connections
-// interface and compare per-group C beats against an independent delivery model
+// Normal builds elaborate all deterministic SystemC cases. SCVerify builds
+// define SCVERIFY, wrap the DUT with CCS_DESIGN(), and elaborate only
+// the geometry synthesized by scverify-array
+
+#ifdef SCVERIFY
+#include <mc_scverify.h>
+#define CIMARRAY_DUT_TYPE(T) CCS_DESIGN(T)
+#else
+#define CIMARRAY_DUT_TYPE(T) T
+#endif
 
 #include <ac_int.h>
 #include <systemc.h>
@@ -28,13 +36,13 @@ template <int CH_IN, int CH_OUT, int B_SETS, int BASE_A_WIDTH,
           int BASE_B_WIDTH, int BASE_C_WIDTH, int WRITE_CH_IN, int MAC_LATENCY,
           int MODE, int A_WIDTH, int B_WIDTH, bool IS_SIGNED, int INPUT_LANES,
           int OUTPUT_LANES, int MULTICAST_GROUPS, int REDUCTION_GROUPS = 1,
-          int A_PORTS = REDUCTION_GROUPS,
+          int A_PORT_TILES = REDUCTION_GROUPS,
           typename DutType =
               CIMArray<CH_IN, CH_OUT, B_SETS, BASE_A_WIDTH, BASE_B_WIDTH,
                       BASE_C_WIDTH, WRITE_CH_IN, MAC_LATENCY, MODE, A_WIDTH,
                       B_WIDTH, IS_SIGNED, INPUT_LANES, OUTPUT_LANES,
-                      MULTICAST_GROUPS, REDUCTION_GROUPS, A_PORTS>>
-struct CIMArraySystemCTestCase : sc_module {
+                      MULTICAST_GROUPS, REDUCTION_GROUPS, A_PORT_TILES>>
+struct CIMArrayTbCase : sc_module {
   using Dut = DutType;
   using CBeat = typename Dut::CBeat;
   using MACRequest = typename Dut::MACRequest;
@@ -51,7 +59,7 @@ struct CIMArraySystemCTestCase : sc_module {
   static_assert(Dut::C_WIDTH < 62,
                 "C_WIDTH must fit this unit test golden model");
 
-  Dut dut;
+  CIMARRAY_DUT_TYPE(Dut) dut;
   sc_clock clk;
   sc_signal<bool> rstn;
   Connections::Combinational<MACRequest> mac_channel;
@@ -68,10 +76,10 @@ struct CIMArraySystemCTestCase : sc_module {
   };
   std::deque<ExpectedBeat> expected_beats;
 
-  SC_HAS_PROCESS(CIMArraySystemCTestCase);
+  SC_HAS_PROCESS(CIMArrayTbCase);
 
   // Construct one case and bind the standalone CIMArray ports
-  explicit CIMArraySystemCTestCase(sc_module_name name)
+  explicit CIMArrayTbCase(sc_module_name name)
       : sc_module(name), dut("dut"), clk("clk", 10, SC_NS) {
     g_cases_remaining++;
 
@@ -96,7 +104,7 @@ struct CIMArraySystemCTestCase : sc_module {
     std::ostringstream text;
     text << name() << ": " << message;
     const std::string report = text.str();
-    SC_REPORT_FATAL("CIMArraySystemCTest", report.c_str());
+    SC_REPORT_FATAL("CIMArrayTb", report.c_str());
   }
 
   // Wait enough delta cycles for combinational output methods to settle
@@ -576,40 +584,46 @@ struct CIMArraySystemCTestCase : sc_module {
   }
 };
 
-// Elaborate all deterministic CIMArray SystemC cases
+// Elaborate deterministic CIMArray cases
 int sc_main(int argc, char** argv) {
   (void)argc;
   (void)argv;
 
-  CIMArraySystemCTestCase<4, 2, 2, 4, 4, 12, 2, 2,
+#ifndef SCVERIFY
+  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2,
                          CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, false, 2, 3, 1>
       bcast_dense_unsigned("bcast_dense_unsigned");
 
-  CIMArraySystemCTestCase<5, 2, 3, 4, 4, 16, 1, 4,
+  CIMArrayTbCase<5, 2, 3, 4, 4, 16, 1, 4,
                          CIM_MODE_BIT_PARALLEL_VALUE, 5, 4, true, 3, 2, 1>
       reduce_input_lanes_signed("reduce_input_lanes_signed");
 
-  CIMArraySystemCTestCase<4, 4, 2, 4, 4, 12, 2, 2,
+  CIMArrayTbCase<4, 4, 2, 4, 4, 12, 2, 2,
                          CIM_MODE_BIT_PARALLEL_VALUE, 4, 8, true, 2, 2, 1>
       wider_b_width_signed("wider_b_width_signed");
 
-  CIMArraySystemCTestCase<4, 2, 2, 4, 4, 12, 2, 2,
+  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2,
                          CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, true, 2, 4, 2>
       grouped_parallel_signed("grouped_parallel_signed");
 
-  CIMArraySystemCTestCase<4, 2, 2, 4, 4, 12, 2, 2,
+  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2,
                          CIM_MODE_BIT_SERIAL_VALUE, 4, 4, false, 2, 2, 2>
       grouped_serial_unsigned("grouped_serial_unsigned");
 
   // Reduction groups: INPUT_LANES = 4 split into 2 tiles per multicast-group
-  // column, MULTICAST_GROUPS = 2, A_PORTS = REDUCTION_GROUPS = 2
-  CIMArraySystemCTestCase<4, 2, 2, 4, 4, 12, 2, 2,
+  // column, MULTICAST_GROUPS = 2, A_PORT_TILES = REDUCTION_GROUPS = 2
+  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2,
                          CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, true, 4, 4, 2, 2>
       segmented_parallel_signed("segmented_parallel_signed");
 
-  CIMArraySystemCTestCase<4, 2, 2, 4, 4, 12, 2, 2,
+  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2,
                          CIM_MODE_BIT_SERIAL_VALUE, 4, 4, false, 4, 4, 2, 2>
       segmented_serial_unsigned("segmented_serial_unsigned");
+#else
+  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2,
+                         CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, false, 2, 3, 1>
+      cim_array_scverify("cim_array_scverify");
+#endif
 
   sc_start();
   return g_cases_remaining;

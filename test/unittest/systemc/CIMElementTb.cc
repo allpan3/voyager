@@ -1,8 +1,8 @@
 // SystemC/RTL co-simulation tests for the PE-level CIMElement adapter
 //
 // These tests drive the fast SystemC CIMElement model and a Verilated
-// CIMIntElement RTL model with the same native CIM interface, then compare the
-// observable issue/ready contract, retire toggles, and result payloads cycle by cycle
+// CIMIntElementPacked RTL model through the Catapult blackbox ABI, then compare
+// the observable issue/ready contract, retire toggles, and result payloads cycle by cycle
 
 #include <ac_int.h>
 #include <systemc.h>
@@ -22,7 +22,7 @@ static constexpr int CIM_MODE_BIT_SERIAL_VALUE = 1;
 static int g_cases_remaining = 0;
 
 // One generated co-simulation case descriptor
-struct CIMElementSystemCTestCaseDescriptor {
+struct CIMElementTbCaseDescriptor {
   const char* name;
   void (*instantiate)();
 };
@@ -49,10 +49,14 @@ static constexpr std::uint64_t mask_for_width(int width) {
 template <typename RtlModel, int A_COLS, int CH_OUT, int B_SETS,
           int BASE_A_WIDTH, int BASE_B_WIDTH, int BASE_C_WIDTH, int WRITE_CH_IN,
           int MAC_LATENCY, int MODE, int A_WIDTH, int B_WIDTH, bool IS_SIGNED>
-struct CIMElementSystemCTestCase : sc_module {
+struct CIMElementTbCase : sc_module {
   using Dut = CIMElement<A_COLS, CH_OUT, B_SETS, BASE_A_WIDTH, BASE_B_WIDTH,
                          BASE_C_WIDTH, WRITE_CH_IN, MAC_LATENCY, MODE, A_WIDTH,
                          B_WIDTH, IS_SIGNED>;
+
+  static_assert(Dut::A_BUS_WIDTH <= 64, "Verilated packed a_bus must fit uint64_t");
+  static_assert(Dut::B_BUS_WIDTH <= 64, "Verilated packed b_bus must fit uint64_t");
+  static_assert(Dut::C_BUS_WIDTH <= 64, "Verilated packed c_bus must fit uint64_t");
 
   Dut dut;
   RtlModel rtl;
@@ -71,10 +75,10 @@ struct CIMElementSystemCTestCase : sc_module {
 
   bool last_retire_ = false;
 
-  SC_HAS_PROCESS(CIMElementSystemCTestCase);
+  SC_HAS_PROCESS(CIMElementTbCase);
 
   // Construct one case and bind all native CIMElement ports
-  explicit CIMElementSystemCTestCase(sc_module_name name)
+  explicit CIMElementTbCase(sc_module_name name)
       : sc_module(name), dut("dut"), rtl(name) {
     g_cases_remaining++;
 
@@ -111,7 +115,7 @@ struct CIMElementSystemCTestCase : sc_module {
     std::ostringstream text;
     text << name() << ": " << message;
     const std::string report = text.str();
-    SC_REPORT_FATAL("CIMElementSystemCTest", report.c_str());
+    SC_REPORT_FATAL("CIMElementTb", report.c_str());
   }
 
   // Return one unsigned SystemC signal value as a masked integer
@@ -145,6 +149,33 @@ struct CIMElementSystemCTestCase : sc_module {
     return encode_value<B_WIDTH>(((row + 1) * (col + 2) + chi + 1) & 0x1f);
   }
 
+  // Pack native activation lanes into the blackbox ABI order
+  std::uint64_t pack_a_bus() {
+    std::uint64_t packed = 0;
+    for (int chi = 0; chi < A_COLS; chi++) {
+      packed |= signal_value(a[chi]) << (chi * A_WIDTH);
+    }
+    return packed;
+  }
+
+  // Pack native weight lanes into the blackbox ABI order
+  std::uint64_t pack_b_bus() {
+    std::uint64_t packed = 0;
+    for (int col = 0; col < Dut::B_COLS; col++) {
+      for (int lane = 0; lane < Dut::B_ROWS; lane++) {
+        const int bit_offset = ((col * Dut::B_ROWS) + lane) * B_WIDTH;
+        packed |= signal_value(b[col][lane]) << bit_offset;
+      }
+    }
+    return packed;
+  }
+
+  // Unpack one result column from the blackbox ABI order
+  std::uint64_t rtl_c_value(int col) const {
+    const std::uint64_t packed = static_cast<std::uint64_t>(rtl.c_bus);
+    return (packed >> (col * Dut::C_WIDTH)) & mask_for_width(Dut::C_WIDTH);
+  }
+
   // Copy current SystemC inputs into the Verilated RTL model
   void drive_rtl_inputs() {
     rtl.wclk = clk.read();
@@ -155,15 +186,8 @@ struct CIMElementSystemCTestCase : sc_module {
     rtl.wset = signal_value(wset);
     rtl.mac_issue = mac_issue.read();
     rtl.mset = signal_value(mset);
-
-    for (int chi = 0; chi < A_COLS; chi++) {
-      rtl.a[chi] = signal_value(a[chi]);
-    }
-    for (int col = 0; col < Dut::B_COLS; col++) {
-      for (int lane = 0; lane < Dut::B_ROWS; lane++) {
-        rtl.b[col][lane] = signal_value(b[col][lane]);
-      }
-    }
+    rtl.a_bus = pack_a_bus();
+    rtl.b_bus = pack_b_bus();
   }
 
   // Evaluate RTL, settle SystemC deltas, and compare observable outputs
@@ -198,8 +222,7 @@ struct CIMElementSystemCTestCase : sc_module {
 
     for (int col = 0; col < Dut::B_COLS; col++) {
       const std::uint64_t sysc_value = signal_value(c[col]);
-      const std::uint64_t rtl_value =
-          static_cast<std::uint64_t>(rtl.c[col]) & mask_for_width(Dut::C_WIDTH);
+      const std::uint64_t rtl_value = rtl_c_value(col);
       if (sysc_value == rtl_value) {
         continue;
       }
@@ -419,14 +442,14 @@ struct CIMElementSystemCTestCase : sc_module {
   }
 };
 
-#include "CIMElementSystemCTestCases.inc"
+#include "CIMElementTbCases.inc"
 
 // Elaborate all deterministic CIMElement co-simulation cases
 int sc_main(int argc, char** argv) {
   Verilated::commandArgs(argc, argv);
 
-  for (int index = 0; index < kCIMElementSystemCTestCaseCount; index++) {
-    kCIMElementSystemCTestCases[index].instantiate();
+  for (int index = 0; index < kCIMElementTbCaseCount; index++) {
+    kCIMElementTbCases[index].instantiate();
   }
 
   sc_start();
