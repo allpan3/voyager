@@ -77,12 +77,11 @@ SYSTEMC_LDFLAGS := \
 	-lpthread
 
 ###########################################################
-# Standalone Catapult HLS for CIMArray
+# Standalone Catapult HLS for CIMTile and CIMArray
 #
-# Synthesizes CIMArray in isolation (block header as the design source, no
-# Accelerator dependency). SCVerify is available through scverify-array. Run on
-# a machine with the Catapult environment loaded (see env.sh). Override any
-# CIM_* / CLOCK_PERIOD / TECHNOLOGY on the command line, e.g.:
+# Synthesizes either enclosing block in isolation.
+# Override any CIM_* / CLOCK_PERIOD / TECHNOLOGY
+# on the command line, e.g.:
 #   make hls-array CLOCK_PERIOD=1.25 CIM_CH_IN=64
 ###########################################################
 CATAPULT ?= catapult
@@ -98,8 +97,8 @@ SCVERIFY_ARRAY_HLS_ARGS := \
 	CIM_BASE_A_WIDTH=4 CIM_BASE_B_WIDTH=4 CIM_BASE_C_WIDTH=12 \
 	CIM_WRITE_CH_IN=2 CIM_MAC_LATENCY=2 CIM_MODE=0 \
 	CIM_A_WIDTH=4 CIM_B_WIDTH=4 CIM_SIGNED=false \
-	CIM_INPUT_LANES=2 CIM_OUTPUT_LANES=3 \
-	CIM_MULTICAST_GROUPS=1 CIM_REDUCTION_GROUPS=1 \
+	CIM_TILE_INPUT_LANES=2 CIM_TILE_OUTPUT_LANES=3 \
+	CIM_REDUCTION_GROUPS=1 CIM_MULTICAST_GROUPS=1 \
 	DATATYPE=INT8 IC_DIMENSION=4 OC_DIMENSION=2
 
 # CIM template parameters. Defaults match the production macro geometry in
@@ -117,13 +116,12 @@ CIM_A_WIDTH ?= 8
 CIM_B_WIDTH ?= 8
 CIM_SIGNED ?= true
 
-# CIMArray-only lane/group geometry (the primary array QoR knobs). Constraints
-# enforced by static_asserts in CIMArray.h:
-#   OUTPUT_LANES % MULTICAST_GROUPS == 0, INPUT_LANES % REDUCTION_GROUPS == 0.
-CIM_INPUT_LANES ?= 2
-CIM_OUTPUT_LANES ?= 4
-CIM_MULTICAST_GROUPS ?= 1
+# Shared tile geometry plus CIMArray tile-grid dimensions
+CIM_TILE_INPUT_LANES ?= 2
+CIM_TILE_OUTPUT_LANES ?= 4
 CIM_REDUCTION_GROUPS ?= 1
+CIM_MULTICAST_GROUPS ?= 1
+
 # Transfer ports, in tiles per transfer. Each is pinned to "one beat per
 # transfer" today: A_PORT_TILES to REDUCTION_GROUPS (a full A column),
 # B_PORT_TILES to MULTICAST_GROUPS (a full B write-row), so both are derived from
@@ -131,13 +129,19 @@ CIM_REDUCTION_GROUPS ?= 1
 CIM_A_PORT_TILES := $(CIM_REDUCTION_GROUPS)
 CIM_B_PORT_TILES := $(CIM_MULTICAST_GROUPS)
 
-# Base macro geometry arguments followed by the CIMArray lane/group arguments
+# Base macro geometry arguments followed by tile and array-grid geometry
 # Spelling (comma-space, `true`) must match how the compiler mangles the
 # specialization
 CIM_TPARAMS := $(CIM_CH_IN), $(CIM_CH_OUT), $(CIM_B_SETS), $(CIM_BASE_A_WIDTH), $(CIM_BASE_B_WIDTH), $(CIM_BASE_C_WIDTH), $(CIM_WRITE_CH_IN), $(CIM_MAC_LATENCY), $(CIM_MODE), $(CIM_A_WIDTH), $(CIM_B_WIDTH), $(CIM_SIGNED)
-CIM_ARRAY_TPARAMS := $(CIM_TPARAMS), $(CIM_INPUT_LANES), $(CIM_OUTPUT_LANES), $(CIM_MULTICAST_GROUPS), $(CIM_REDUCTION_GROUPS), $(CIM_A_PORT_TILES), $(CIM_B_PORT_TILES)
+CIM_TILE_TPARAMS := $(CIM_TPARAMS), $(CIM_TILE_INPUT_LANES), $(CIM_TILE_OUTPUT_LANES)
+CIM_ARRAY_TPARAMS := $(CIM_TPARAMS), $(CIM_TILE_INPUT_LANES), $(CIM_TILE_OUTPUT_LANES), $(CIM_REDUCTION_GROUPS), $(CIM_MULTICAST_GROUPS), $(CIM_A_PORT_TILES), $(CIM_B_PORT_TILES)
+HLS_TOP_TILE := CIMTile<$(CIM_TILE_TPARAMS)>
 HLS_TOP_ARRAY := CIMArray<$(CIM_ARRAY_TPARAMS)>
-CIM_ARRAY_CONFIG := ci$(CIM_CH_IN)_co$(CIM_CH_OUT)_bs$(CIM_B_SETS)_base$(CIM_BASE_A_WIDTH)x$(CIM_BASE_B_WIDTH)x$(CIM_BASE_C_WIDTH)_w$(CIM_WRITE_CH_IN)_lat$(CIM_MAC_LATENCY)_m$(CIM_MODE)_a$(CIM_A_WIDTH)_b$(CIM_B_WIDTH)_s$(CIM_SIGNED)_il$(CIM_INPUT_LANES)_ol$(CIM_OUTPUT_LANES)_mg$(CIM_MULTICAST_GROUPS)_rg$(CIM_REDUCTION_GROUPS)
+CIM_TILE_CONFIG := ci$(CIM_CH_IN)_co$(CIM_CH_OUT)_bs$(CIM_B_SETS)_base$(CIM_BASE_A_WIDTH)x$(CIM_BASE_B_WIDTH)x$(CIM_BASE_C_WIDTH)_w$(CIM_WRITE_CH_IN)_lat$(CIM_MAC_LATENCY)_m$(CIM_MODE)_a$(CIM_A_WIDTH)_b$(CIM_B_WIDTH)_s$(CIM_SIGNED)_til$(CIM_TILE_INPUT_LANES)_tol$(CIM_TILE_OUTPUT_LANES)
+CIM_ARRAY_CONFIG := ci$(CIM_CH_IN)_co$(CIM_CH_OUT)_bs$(CIM_B_SETS)_base$(CIM_BASE_A_WIDTH)x$(CIM_BASE_B_WIDTH)x$(CIM_BASE_C_WIDTH)_w$(CIM_WRITE_CH_IN)_lat$(CIM_MAC_LATENCY)_m$(CIM_MODE)_a$(CIM_A_WIDTH)_b$(CIM_B_WIDTH)_s$(CIM_SIGNED)_til$(CIM_TILE_INPUT_LANES)_tol$(CIM_TILE_OUTPUT_LANES)_rg$(CIM_REDUCTION_GROUPS)_mg$(CIM_MULTICAST_GROUPS)
+HLS_TILE_BUILD := $(HLS_BUILD)/CIMTile/$(CIM_TILE_CONFIG)
+HLS_TILE_PROJECT := $(HLS_TILE_BUILD)/CIMTile.v1
+HLS_TILE_RTL := $(HLS_TILE_PROJECT)/rtl.v
 HLS_ARRAY_BUILD := $(HLS_BUILD)/CIMArray/$(CIM_ARRAY_CONFIG)
 HLS_ARRAY_PROJECT := $(HLS_ARRAY_BUILD)/CIMArray.v1
 HLS_ARRAY_RTL := $(HLS_ARRAY_PROJECT)/rtl.v
@@ -146,8 +150,11 @@ SCVERIFY_ARRAY_MK := $(SCVERIFY_ARRAY_PROJECT)/scverify/Verify_rtl_v_vcs.mk
 SCVERIFY_ARRAY_TB := $(THIS_DIR)/systemc/CIMArrayTb.cc
 
 # Shared environment forwarded into the driver
-HLS_FORCE_REBUILD ?= 0
-HLS_FORCE_PREREQ := $(if $(filter 1,$(HLS_FORCE_REBUILD)),FORCE)
+HLS_TILE_DEPS := \
+	$(THIS_DIR)/Makefile \
+	$(HLS_DRIVER) \
+	$(REPO_ROOT)/src/CIMTile.h \
+	$(REPO_ROOT)/src/CIMElement.h
 HLS_ARRAY_DEPS := \
 	$(THIS_DIR)/Makefile \
 	$(HLS_DRIVER) \
@@ -168,9 +175,9 @@ HLS_ENV = \
 	HLS_RESET_NAME=rstn \
 	$(if $(HLS_SCVERIFY),HLS_SCVERIFY=$(HLS_SCVERIFY))
 
-.PHONY: test test-macro test-element build-systemc build-systemc-element build-systemc-array test-systemc-element test-systemc-array check-systemc-env check-verilator-env clean hls hls-array hls-array-fresh scverify-array scverify-array-run scverify-array-fresh check-catapult-root check-catapult-env FORCE
+.PHONY: test test-macro test-element build-systemc build-systemc-element build-systemc-tile build-systemc-array test-systemc-element test-systemc-tile test-systemc-array check-systemc-env check-verilator-env clean hls hls-tile hls-array scverify-array scverify-array-run check-catapult-root check-catapult-env FORCE
 
-test: test-macro test-element test-systemc-element test-systemc-array
+test: test-macro test-element test-systemc-element test-systemc-tile test-systemc-array
 
 test-macro:
 	$(PYTHON) $(THIS_DIR)/verilog/test_cim_macro.py $(JOBS_ARG) $(WAVEFORM_ARG) $(TEST_ARGS) $(MODEL_TEST_ARGS)
@@ -178,14 +185,19 @@ test-macro:
 test-element:
 	$(PYTHON) $(THIS_DIR)/verilog/test_cim_element.py $(JOBS_ARG) $(WAVEFORM_ARG) $(TEST_ARGS) $(ELEMENT_TEST_ARGS)
 
-build-systemc: $(SYSTEMC_BUILD)/CIMElementTb $(SYSTEMC_BUILD)/CIMArrayTb
+build-systemc: $(SYSTEMC_BUILD)/CIMElementTb $(SYSTEMC_BUILD)/CIMTileTb $(SYSTEMC_BUILD)/CIMArrayTb
 
 build-systemc-element: $(SYSTEMC_BUILD)/CIMElementTb
+
+build-systemc-tile: $(SYSTEMC_BUILD)/CIMTileTb
 
 build-systemc-array: $(SYSTEMC_BUILD)/CIMArrayTb
 
 test-systemc-element: check-systemc-env
 	@$(PYTHON) $(SYSTEMC_RUNNER) --suite cim_element_systemc --build-target build-systemc-element --binary $(SYSTEMC_BUILD)/CIMElementTb --log-dir $(SYSTEMC_BUILD)/logs/cim_element --makefile $(THIS_DIR)/Makefile --datatype $(DATATYPE) --ic-dimension $(IC_DIMENSION) --oc-dimension $(OC_DIMENSION)
+
+test-systemc-tile: check-systemc-env
+	@$(PYTHON) $(SYSTEMC_RUNNER) --suite cim_tile_systemc --build-target build-systemc-tile --binary $(SYSTEMC_BUILD)/CIMTileTb --log-dir $(SYSTEMC_BUILD)/logs/cim_tile --makefile $(THIS_DIR)/Makefile --datatype $(DATATYPE) --ic-dimension $(IC_DIMENSION) --oc-dimension $(OC_DIMENSION)
 
 test-systemc-array: check-systemc-env
 	@$(PYTHON) $(SYSTEMC_RUNNER) --suite cim_array_systemc --build-target build-systemc-array --binary $(SYSTEMC_BUILD)/CIMArrayTb --log-dir $(SYSTEMC_BUILD)/logs/cim_array --makefile $(THIS_DIR)/Makefile --datatype $(DATATYPE) --ic-dimension $(IC_DIMENSION) --oc-dimension $(OC_DIMENSION)
@@ -193,10 +205,17 @@ test-systemc-array: check-systemc-env
 $(SYSTEMC_BUILD)/CIMElementTb: $(SYSTEMC_BUILD)/CIMElementTb.o $(CIM_ELEMENT_VERILATED_LIBS)
 	$(SYSTEMC_CC) -o $@ $< $(CIM_ELEMENT_VERILATED_LIBS) $(CIM_ELEMENT_VERILATED_RUNTIME_LIB) $(SYSTEMC_LDFLAGS)
 
+$(SYSTEMC_BUILD)/CIMTileTb: $(SYSTEMC_BUILD)/CIMTileTb.o
+	$(SYSTEMC_CC) -o $@ $^ $(SYSTEMC_LDFLAGS)
+
 $(SYSTEMC_BUILD)/CIMArrayTb: $(SYSTEMC_BUILD)/CIMArrayTb.o
 	$(SYSTEMC_CC) -o $@ $^ $(SYSTEMC_LDFLAGS)
 
 $(SYSTEMC_BUILD)/CIMElementTb.o: $(THIS_DIR)/systemc/CIMElementTb.cc $(REPO_ROOT)/src/CIMElement.h $(REPO_ROOT)/src/ArchitectureParams.h $(SYSTEMC_CASES_INC) $(CIM_ELEMENT_VERILATED_LIBS) | check-systemc-env check-verilator-env
+	mkdir -p $(SYSTEMC_BUILD)
+	$(SYSTEMC_CC) $(SYSTEMC_CXXFLAGS) -c -o $@ $<
+
+$(SYSTEMC_BUILD)/CIMTileTb.o: $(THIS_DIR)/systemc/CIMTileTb.cc $(REPO_ROOT)/src/CIMTile.h $(REPO_ROOT)/src/CIMElement.h $(REPO_ROOT)/src/ArchitectureParams.h | check-systemc-env
 	mkdir -p $(SYSTEMC_BUILD)
 	$(SYSTEMC_CC) $(SYSTEMC_CXXFLAGS) -c -o $@ $<
 
@@ -223,14 +242,20 @@ check-verilator-env:
 	@test -n "$(VERILATOR_ROOT)" || { echo "VERILATOR_ROOT could not be detected"; exit 2; }
 
 # --- Catapult HLS ------------------------------------------------------------
-hls: hls-array
+hls: hls-tile hls-array
+
+hls-tile: $(HLS_TILE_RTL)
+
+$(HLS_TILE_RTL): $(HLS_TILE_DEPS) | check-catapult-env
+	mkdir -p $(HLS_TILE_BUILD)
+	$(HLS_ENV) BLOCK=CIMTile HLS_TOP='$(HLS_TOP_TILE)' \
+	DESIGN_HEADER=$(REPO_ROOT)/src/CIMTile.h \
+	HLS_PROJECT_DIR=$(HLS_TILE_BUILD) HLS_CLOCKS='wclk mclk' \
+	$(CATAPULT) -shell -file $(HLS_DRIVER) -logfile $(HLS_TILE_BUILD).log
 
 hls-array: $(HLS_ARRAY_RTL)
 
-hls-array-fresh:
-	$(MAKE) -C $(THIS_DIR) hls-array HLS_FORCE_REBUILD=1
-
-$(HLS_ARRAY_RTL): $(HLS_FORCE_PREREQ) $(HLS_ARRAY_DEPS) | check-catapult-env
+$(HLS_ARRAY_RTL): $(HLS_ARRAY_DEPS) | check-catapult-env
 	mkdir -p $(HLS_ARRAY_BUILD)
 	$(HLS_ENV) BLOCK=CIMArray HLS_TOP='$(HLS_TOP_ARRAY)' \
 	DESIGN_HEADER=$(REPO_ROOT)/src/CIMArray.h \
@@ -244,10 +269,7 @@ scverify-array-run: $(SCVERIFY_ARRAY_MK)
 	$(MAKE) -C $(SCVERIFY_ARRAY_PROJECT) -f ./scverify/Verify_rtl_v_vcs.mk SIMTOOL=vcs build
 	$(MAKE) -C $(SCVERIFY_ARRAY_PROJECT) -f ./scverify/Verify_rtl_v_vcs.mk SIMTOOL=vcs sim
 
-scverify-array-fresh:
-	$(MAKE) -C $(THIS_DIR) scverify-array HLS_FORCE_REBUILD=1
-
-$(SCVERIFY_ARRAY_MK): $(HLS_FORCE_PREREQ) $(SCVERIFY_ARRAY_DEPS) | check-catapult-env
+$(SCVERIFY_ARRAY_MK): $(SCVERIFY_ARRAY_DEPS) | check-catapult-env
 	mkdir -p $(HLS_ARRAY_BUILD)
 	$(HLS_ENV) HLS_SCVERIFY_TB=$(SCVERIFY_ARRAY_TB) \
 	BLOCK=CIMArray HLS_TOP='$(HLS_TOP_ARRAY)' \

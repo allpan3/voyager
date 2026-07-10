@@ -12,6 +12,7 @@
 #endif
 
 #include <ac_int.h>
+#include <mc_connections.h>
 #include <systemc.h>
 
 #include <deque>
@@ -34,14 +35,17 @@ static constexpr long long mask_for_width(int width) {
 // One parameterized CIMArray SystemC test case
 template <int CH_IN, int CH_OUT, int B_SETS, int BASE_A_WIDTH,
           int BASE_B_WIDTH, int BASE_C_WIDTH, int WRITE_CH_IN, int MAC_LATENCY,
-          int MODE, int A_WIDTH, int B_WIDTH, bool IS_SIGNED, int INPUT_LANES,
-          int OUTPUT_LANES, int MULTICAST_GROUPS, int REDUCTION_GROUPS = 1,
+          int MODE, int A_WIDTH, int B_WIDTH, bool IS_SIGNED,
+          int TILE_INPUT_LANES, int TILE_OUTPUT_LANES,
+          int REDUCTION_GROUPS = 1, int MULTICAST_GROUPS = 1,
           int A_PORT_TILES = REDUCTION_GROUPS,
+          int B_PORT_TILES = MULTICAST_GROUPS,
           typename DutType =
               CIMArray<CH_IN, CH_OUT, B_SETS, BASE_A_WIDTH, BASE_B_WIDTH,
                       BASE_C_WIDTH, WRITE_CH_IN, MAC_LATENCY, MODE, A_WIDTH,
-                      B_WIDTH, IS_SIGNED, INPUT_LANES, OUTPUT_LANES,
-                      MULTICAST_GROUPS, REDUCTION_GROUPS, A_PORT_TILES>>
+                      B_WIDTH, IS_SIGNED, TILE_INPUT_LANES, TILE_OUTPUT_LANES,
+                      REDUCTION_GROUPS, MULTICAST_GROUPS, A_PORT_TILES,
+                      B_PORT_TILES>>
 struct CIMArrayTbCase : sc_module {
   using Dut = DutType;
   using CBeat = typename Dut::CBeat;
@@ -50,9 +54,9 @@ struct CIMArrayTbCase : sc_module {
   using ElementSet = typename Dut::ElementSet;
   using MulticastGroupIndex = typename Dut::MulticastGroupIndex;
 
+  static constexpr int INPUT_LANES = TILE_INPUT_LANES * REDUCTION_GROUPS;
+  static constexpr int OUTPUT_LANES = TILE_OUTPUT_LANES * MULTICAST_GROUPS;
   static constexpr int MULTICAST_GROUP_LANES = Dut::MULTICAST_GROUP_LANES;
-  // Input lanes summed into one tile result (one reduction group's depth)
-  static constexpr int TILE_INPUT_LANES = INPUT_LANES / REDUCTION_GROUPS;
 
   static_assert(A_WIDTH < 31, "A_WIDTH must fit this unit test golden model");
   static_assert(B_WIDTH < 31, "B_WIDTH must fit this unit test golden model");
@@ -258,6 +262,18 @@ struct CIMArrayTbCase : sc_module {
         drive_store(set, input_lane_idx, chunk, phase);
       }
     }
+    tick();  // commit the final write before a same-row MAC can be issued
+  }
+
+  // Load B operands with an empty cycle after every store request
+  void load_b_operands_with_idle(ElementSet set, int phase) {
+    for (int chunk = 0; chunk < Dut::ELEMENT_B_BEATS; chunk++) {
+      for (int input_lane_idx = 0; input_lane_idx < INPUT_LANES; input_lane_idx++) {
+        drive_store(set, input_lane_idx, chunk, phase);
+        tick();  // allow the pushed request to be accepted
+        tick();  // leave the following empty cycle visible to the DUT
+      }
+    }
   }
 
   // Drive one fanout store and mirror the replicated tile into every multicast group
@@ -309,6 +325,18 @@ struct CIMArrayTbCase : sc_module {
     for (int chunk = 0; chunk < Dut::ELEMENT_B_BEATS; chunk++) {
       for (int base_lane = 0; base_lane < INPUT_LANES; base_lane += MULTICAST_GROUPS) {
         drive_store_fanout(set, base_lane, chunk, phase);
+      }
+    }
+    tick();  // commit the final write before a same-row MAC can be issued
+  }
+
+  // Load fanout B operands with an empty cycle after every store request
+  void load_b_operands_fanout_with_idle(ElementSet set, int phase) {
+    for (int chunk = 0; chunk < Dut::ELEMENT_B_BEATS; chunk++) {
+      for (int base_lane = 0; base_lane < INPUT_LANES; base_lane += MULTICAST_GROUPS) {
+        drive_store_fanout(set, base_lane, chunk, phase);
+        tick();  // allow the pushed request to be accepted
+        tick();  // leave the following empty cycle visible to the DUT
       }
     }
   }
@@ -452,6 +480,21 @@ struct CIMArrayTbCase : sc_module {
     run_bcast_transaction(13, false, 3);
   }
 
+  // Check B loads across explicit idle gaps between store requests
+  void run_gapped_store_check() {
+    const ElementSet direct_set = transaction_set(117);
+    load_b_operands_with_idle(direct_set, 117);
+    drive_mac_bcast(direct_set, 121);
+    drain_expected_beats();
+
+    if constexpr ((INPUT_LANES % MULTICAST_GROUPS) == 0) {
+      const ElementSet fanout_set = transaction_set(127);
+      load_b_operands_fanout_with_idle(fanout_set, 127);
+      drive_mac_bcast(fanout_set, 131);
+      drain_expected_beats();
+    }
+  }
+
   // Check that loaded rows remain independently addressable across later loads
   void run_set_retention_check() {
     const ElementSet first_set = ElementSet(0);
@@ -568,6 +611,7 @@ struct CIMArrayTbCase : sc_module {
     clear_expected_state();
 
     run_basic_transaction_checks();
+    run_gapped_store_check();
     run_set_retention_check();
     run_group_issue_check();
     run_same_group_reissue_check();
@@ -591,37 +635,36 @@ int sc_main(int argc, char** argv) {
 
 #ifndef SCVERIFY
   CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2,
-                         CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, false, 2, 3, 1>
+                         CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, false, 2, 3, 1, 1>
       bcast_dense_unsigned("bcast_dense_unsigned");
 
   CIMArrayTbCase<5, 2, 3, 4, 4, 16, 1, 4,
-                         CIM_MODE_BIT_PARALLEL_VALUE, 5, 4, true, 3, 2, 1>
+                         CIM_MODE_BIT_PARALLEL_VALUE, 5, 4, true, 3, 2, 1, 1>
       reduce_input_lanes_signed("reduce_input_lanes_signed");
 
   CIMArrayTbCase<4, 4, 2, 4, 4, 12, 2, 2,
-                         CIM_MODE_BIT_PARALLEL_VALUE, 4, 8, true, 2, 2, 1>
+                         CIM_MODE_BIT_PARALLEL_VALUE, 4, 8, true, 2, 2, 1, 1>
       wider_b_width_signed("wider_b_width_signed");
 
   CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2,
-                         CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, true, 2, 4, 2>
+                         CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, true, 2, 2, 1, 2>
       grouped_parallel_signed("grouped_parallel_signed");
 
   CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2,
-                         CIM_MODE_BIT_SERIAL_VALUE, 4, 4, false, 2, 2, 2>
+                         CIM_MODE_BIT_SERIAL_VALUE, 4, 4, false, 2, 1, 1, 2>
       grouped_serial_unsigned("grouped_serial_unsigned");
 
-  // Reduction groups: INPUT_LANES = 4 split into 2 tiles per multicast-group
-  // column, MULTICAST_GROUPS = 2, A_PORT_TILES = REDUCTION_GROUPS = 2
+  // Two reduction-group rows by two multicast-group columns of 2 x 2 tiles
   CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2,
-                         CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, true, 4, 4, 2, 2>
+                         CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, true, 2, 2, 2, 2>
       segmented_parallel_signed("segmented_parallel_signed");
 
   CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2,
-                         CIM_MODE_BIT_SERIAL_VALUE, 4, 4, false, 4, 4, 2, 2>
+                         CIM_MODE_BIT_SERIAL_VALUE, 4, 4, false, 2, 2, 2, 2>
       segmented_serial_unsigned("segmented_serial_unsigned");
 #else
   CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2,
-                         CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, false, 2, 3, 1>
+                         CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, false, 2, 3, 1, 1>
       cim_array_scverify("cim_array_scverify");
 #endif
 

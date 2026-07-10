@@ -11,6 +11,8 @@
 #include <ac_int.h>
 #include <systemc.h>
 
+#include <sstream>
+
 #include <ac_blackbox.h>
 
 #include "ArchitectureParams.h"
@@ -200,6 +202,12 @@ SC_MODULE(CIMElementPacked) {
     SC_METHOD(drive_mac_ready);
     sensitive << rstn << window_idle_state;
 
+#ifndef __SYNTHESIS__
+    SC_METHOD(check_write_mac_collision);
+    sensitive << wclk.pos();
+    dont_initialize();
+#endif
+
     ac_blackbox()
         .entity("CIMIntElementPacked")
         .verilog_files("CIM/cim_macro_wrapper.sv CIM/cim_macro_model.sv "
@@ -360,6 +368,18 @@ SC_MODULE(CIMElementPacked) {
   void drive_mac_ready() {
     mac_ready.write(rstn.read() && window_idle_state.read());
   }
+
+#ifndef __SYNTHESIS__
+  // Report an illegal same-row write and MAC without changing model behavior
+  void check_write_mac_collision() {
+    if (wen.read() && mac_issue.read() && wset.read() == mset.read()) {
+      std::ostringstream message;
+      message << "write and MAC target row " << wset.read().to_int()
+              << " while both enables are high";
+      SC_REPORT_ERROR("CIMIntMacroModel row protocol violation", message.str().c_str());
+    }
+  }
+#endif
 };
 
 // CIMElement keeps the native array-port interface and adapts it to packed ABI

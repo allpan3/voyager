@@ -313,6 +313,30 @@ if {![info exists CIM_SIGNED]} {
   set CIM_SIGNED true
 }
 
+if {![info exists CIM_TILE_INPUT_LANES]} {
+  set CIM_TILE_INPUT_LANES 2
+}
+
+if {![info exists CIM_TILE_OUTPUT_LANES]} {
+  set CIM_TILE_OUTPUT_LANES 4
+}
+
+if {![info exists CIM_REDUCTION_GROUPS]} {
+  set CIM_REDUCTION_GROUPS 1
+}
+
+if {![info exists CIM_MULTICAST_GROUPS]} {
+  set CIM_MULTICAST_GROUPS 1
+}
+
+if {![info exists CIM_A_PORT_TILES]} {
+  set CIM_A_PORT_TILES $CIM_REDUCTION_GROUPS
+}
+
+if {![info exists CIM_B_PORT_TILES]} {
+  set CIM_B_PORT_TILES $CIM_MULTICAST_GROUPS
+}
+
 # ================================================================
 # Port Width Definitions
 # ================================================================

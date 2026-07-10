@@ -20,8 +20,9 @@
 // Relative to a bare element the tile adds two registered stages: it latches the
 // A section and set select on the issue pulse (so the delivered wires need only
 // be stable for that one cycle) and pulses the elements one cycle later, and it
-// registers the reduced result one cycle after the elements retire. issue_window
-// therefore grows by one cycle and operation_latency by two.
+// registers the reduced result one cycle after the elements retire. These
+// pipeline stages preserve the element issue window and add two cycles to
+// operation_latency.
 template <int CH_IN = CIM_CH_IN, int CH_OUT = CIM_CH_OUT,
           int B_SETS = CIM_B_SETS, int BASE_A_WIDTH = CIM_BASE_A_WIDTH,
           int BASE_B_WIDTH = CIM_BASE_B_WIDTH,
@@ -65,10 +66,9 @@ SC_MODULE(CIMTile) {
   // Tile-level result scalar type (widened for the input-lane reduction)
   using CValue = ac_int<C_WIDTH, false>;
 
-  // Return the number of mclk cycles an accepted issue keeps the tile not ready.
-  // One more than the element window: the tile spends the issue cycle latching
-  // the A section before the elements consume it
-  static constexpr int issue_window() { return Element::issue_window() + 1; }
+  // Return the number of mclk cycles an accepted issue keeps the tile not ready
+  // The station can capture the next operand as the element consumes the old one
+  static constexpr int issue_window() { return Element::issue_window(); }
 
   // Return the number of mclk cycles from an accepted issue to its retirement.
   // Two more than the element: one latch stage in and one result-register stage
