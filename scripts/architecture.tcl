@@ -337,6 +337,22 @@ if {![info exists CIM_B_PORT_TILES]} {
   set CIM_B_PORT_TILES $CIM_MULTICAST_GROUPS
 }
 
+if {![info exists CIM_C_PORT_ORIENTATION]} {
+  set CIM_C_PORT_ORIENTATION 0
+}
+
+if {$CIM_C_PORT_ORIENTATION != 0 && $CIM_C_PORT_ORIENTATION != 1} {
+  error "CIM_C_PORT_ORIENTATION must be 0 (reduction-major) or 1 (multicast-major)"
+}
+
+if {![info exists CIM_C_PORT_TILES]} {
+  if {$CIM_C_PORT_ORIENTATION == 0} {
+    set CIM_C_PORT_TILES $CIM_REDUCTION_GROUPS
+  } else {
+    set CIM_C_PORT_TILES $CIM_MULTICAST_GROUPS
+  }
+}
+
 # ================================================================
 # Port Width Definitions
 # ================================================================

@@ -10,62 +10,15 @@
 
 #include <ac_int.h>
 #include <systemc.h>
-
 #include <sstream>
-
 #include <ac_blackbox.h>
-
+#include "AccelTypes.h"
 #include "ArchitectureParams.h"
 
-// Provide standalone lint/test defaults when generated CIM macro wrappers are absent
-#ifndef CIM_CH_IN
-#define CIM_CH_IN 4
-#endif
-
-#ifndef CIM_CH_OUT
-#define CIM_CH_OUT 2
-#endif
-
-#ifndef CIM_B_SETS
-#define CIM_B_SETS 2
-#endif
-
-#ifndef CIM_BASE_A_WIDTH
-#define CIM_BASE_A_WIDTH 4
-#endif
-
-#ifndef CIM_BASE_B_WIDTH
-#define CIM_BASE_B_WIDTH 4
-#endif
-
-#ifndef CIM_BASE_C_WIDTH
-#define CIM_BASE_C_WIDTH 12
-#endif
-
-#ifndef CIM_WRITE_CH_IN
-#define CIM_WRITE_CH_IN 2
-#endif
-
-#ifndef CIM_MAC_LATENCY
-#define CIM_MAC_LATENCY 2
-#endif
-
-#ifndef CIM_MODE
-#define CIM_MODE 0
-#endif
-
-#ifndef CIM_SIGNED
-#define CIM_SIGNED false
-#endif
-
 // CIMElementPacked owns the Catapult blackbox ABI with packed vector ports
-template <int CH_IN = CIM_CH_IN, int CH_OUT = CIM_CH_OUT,
-          int B_SETS = CIM_B_SETS, int BASE_A_WIDTH = CIM_BASE_A_WIDTH,
-          int BASE_B_WIDTH = CIM_BASE_B_WIDTH,
-          int BASE_C_WIDTH = CIM_BASE_C_WIDTH, int WRITE_CH_IN = CIM_WRITE_CH_IN,
-          int MAC_LATENCY = CIM_MAC_LATENCY, int MODE = CIM_MODE,
-          int A_WIDTH = INPUT_DTYPE_WIDTH, int B_WIDTH = WEIGHT_DTYPE_WIDTH,
-          bool SIGNED = CIM_SIGNED>
+template <int CH_IN, int CH_OUT, int B_SETS, int BASE_A_WIDTH,
+          int BASE_B_WIDTH, int BASE_C_WIDTH, int WRITE_CH_IN,
+          int MAC_LATENCY, int MODE, int A_WIDTH, int B_WIDTH, bool SIGNED>
 SC_MODULE(CIMElementPacked) {
  private:
   // Return the ceil log2 used for static port widths
@@ -164,8 +117,9 @@ SC_MODULE(CIMElementPacked) {
   sc_out<bool> CCS_INIT_S1(mac_ready);
 
  private:
-  // Resetless weight storage matching the RTL CIM macro wrapper memory
-  ac_int<B_WIDTH, false> weight_mem[B_SETS][B_COLS][A_COLS];
+  // Resetless B storage matching the RTL CIM macro wrapper memory. B_ROWS is
+  // the number of rows written per cycle; the resident contraction depth is A_COLS
+  ac_int<B_WIDTH, false> b_mem[B_SETS][B_COLS][A_COLS];
 
   // PendingResult carries one computed result through the fixed retire latency
   struct PendingResult {
@@ -268,7 +222,7 @@ SC_MODULE(CIMElementPacked) {
       for (int b_row_idx = 0; b_row_idx < B_ROWS; b_row_idx++) {
         const int a_col_idx = base_a_col + b_row_idx;
         if (a_col_idx < A_COLS) {
-          weight_mem[macro_row_idx][b_col_idx][a_col_idx] =
+          b_mem[macro_row_idx][b_col_idx][a_col_idx] =
               b_value.template slc<B_WIDTH>(b_bus_offset(b_col_idx, b_row_idx));
         }
       }
@@ -292,7 +246,7 @@ SC_MODULE(CIMElementPacked) {
                   a_value_bus.template slc<A_WIDTH>(a_col_idx * A_WIDTH));
           const ac_int<B_WIDTH, SIGNED> b_value =
               decode_operand<B_WIDTH>(
-                  weight_mem[b_set_idx][b_col_idx][a_col_idx]);
+                  b_mem[b_set_idx][b_col_idx][a_col_idx]);
           acc += a_value * b_value;
         }
       }
@@ -383,13 +337,9 @@ SC_MODULE(CIMElementPacked) {
 };
 
 // CIMElement keeps the native array-port interface and adapts it to packed ABI
-template <int CH_IN = CIM_CH_IN, int CH_OUT = CIM_CH_OUT,
-          int B_SETS = CIM_B_SETS, int BASE_A_WIDTH = CIM_BASE_A_WIDTH,
-          int BASE_B_WIDTH = CIM_BASE_B_WIDTH,
-          int BASE_C_WIDTH = CIM_BASE_C_WIDTH, int WRITE_CH_IN = CIM_WRITE_CH_IN,
-          int MAC_LATENCY = CIM_MAC_LATENCY, int MODE = CIM_MODE,
-          int A_WIDTH = INPUT_DTYPE_WIDTH, int B_WIDTH = WEIGHT_DTYPE_WIDTH,
-          bool SIGNED = CIM_SIGNED>
+template <int CH_IN, int CH_OUT, int B_SETS, int BASE_A_WIDTH,
+          int BASE_B_WIDTH, int BASE_C_WIDTH, int WRITE_CH_IN,
+          int MAC_LATENCY, int MODE, int A_WIDTH, int B_WIDTH, bool SIGNED>
 SC_MODULE(CIMElement) {
  private:
   using PackedElement =
@@ -412,6 +362,12 @@ SC_MODULE(CIMElement) {
   static constexpr int B_BUS_WIDTH = PackedElement::B_BUS_WIDTH;
   static constexpr int C_BUS_WIDTH = PackedElement::C_BUS_WIDTH;
 
+  // Grouped CIMElement data-port types
+  using AInput = Pack1D<ac_int<A_WIDTH, false>, A_COLS>;
+  using BInput =
+      Pack1D<Pack1D<ac_int<B_WIDTH, false>, B_ROWS>, B_COLS>;
+  using COutput = Pack1D<ac_int<C_WIDTH, false>, B_COLS>;
+
   // Return the number of mclk cycles an accepted issue keeps the element not ready
   static constexpr int issue_window() { return PackedElement::issue_window(); }
 
@@ -426,8 +382,8 @@ SC_MODULE(CIMElement) {
   sc_in<bool> CCS_INIT_S1(rstn);
 
   // CIMElement weight-write interface
-  sc_in<ac_int<A_WIDTH, false>> a[A_COLS];
-  sc_in<ac_int<B_WIDTH, false>> b[B_COLS][B_ROWS];
+  sc_in<AInput> CCS_INIT_S1(a);
+  sc_in<BInput> CCS_INIT_S1(b);
   sc_in<bool> CCS_INIT_S1(wen);
   sc_in<ac_int<BITS_CH_IN, false>> CCS_INIT_S1(waddr);
   sc_in<ac_int<BITS_SET, false>> CCS_INIT_S1(wset);
@@ -437,7 +393,7 @@ SC_MODULE(CIMElement) {
   sc_in<ac_int<BITS_SET, false>> CCS_INIT_S1(mset);
 
   // CIMElement result interface
-  sc_out<ac_int<C_WIDTH, false>> c[B_COLS];
+  sc_out<COutput> CCS_INIT_S1(c);
   sc_out<bool> CCS_INIT_S1(c_retire);
   sc_out<bool> CCS_INIT_S1(mac_ready);
 
@@ -465,14 +421,7 @@ SC_MODULE(CIMElement) {
     packed.mac_ready(mac_ready);
 
     SC_METHOD(pack_inputs);
-    for (int a_col_idx = 0; a_col_idx < A_COLS; a_col_idx++) {
-      sensitive << a[a_col_idx];
-    }
-    for (int b_col_idx = 0; b_col_idx < B_COLS; b_col_idx++) {
-      for (int b_row_idx = 0; b_row_idx < B_ROWS; b_row_idx++) {
-        sensitive << b[b_col_idx][b_row_idx];
-      }
-    }
+    sensitive << a << b;
 
     SC_METHOD(unpack_outputs);
     sensitive << c_bus;
@@ -488,15 +437,17 @@ SC_MODULE(CIMElement) {
   void pack_inputs() {
     ac_int<A_BUS_WIDTH, false> packed_a = 0;
     ac_int<B_BUS_WIDTH, false> packed_b = 0;
+    const AInput a_input = a.read();
+    const BInput b_input = b.read();
 
     for (int a_col_idx = 0; a_col_idx < A_COLS; a_col_idx++) {
-      packed_a.set_slc(a_col_idx * A_WIDTH, a[a_col_idx].read());
+      packed_a.set_slc(a_col_idx * A_WIDTH, a_input[a_col_idx]);
     }
 
     for (int b_col_idx = 0; b_col_idx < B_COLS; b_col_idx++) {
       for (int b_row_idx = 0; b_row_idx < B_ROWS; b_row_idx++) {
         packed_b.set_slc(b_bus_offset(b_col_idx, b_row_idx),
-                         b[b_col_idx][b_row_idx].read());
+                         b_input[b_col_idx][b_row_idx]);
       }
     }
 
@@ -507,9 +458,11 @@ SC_MODULE(CIMElement) {
   // Unpack the packed result bus back into the native CIMElement result ports
   void unpack_outputs() {
     const ac_int<C_BUS_WIDTH, false> packed_c = c_bus.read();
+    COutput c_output;
     for (int b_col_idx = 0; b_col_idx < B_COLS; b_col_idx++) {
-      c[b_col_idx].write(
-          packed_c.template slc<C_WIDTH>(b_col_idx * C_WIDTH));
+      c_output[b_col_idx] =
+          packed_c.template slc<C_WIDTH>(b_col_idx * C_WIDTH);
     }
+    c.write(c_output);
   }
 };

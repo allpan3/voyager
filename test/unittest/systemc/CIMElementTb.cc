@@ -62,14 +62,14 @@ struct CIMElementTbCase : sc_module {
   RtlModel rtl;
   sc_signal<bool> clk;
   sc_signal<bool> rstn;
-  ZeroSignal<ac_int<A_WIDTH, false>> a[A_COLS];
-  ZeroSignal<ac_int<B_WIDTH, false>> b[Dut::B_COLS][Dut::B_ROWS];
+  sc_signal<typename Dut::AInput> a;
+  sc_signal<typename Dut::BInput> b;
   sc_signal<bool> wen;
   ZeroSignal<ac_int<Dut::BITS_CH_IN, false>> waddr;
   ZeroSignal<ac_int<Dut::BITS_SET, false>> wset;
   sc_signal<bool> mac_issue;
   ZeroSignal<ac_int<Dut::BITS_SET, false>> mset;
-  ZeroSignal<ac_int<Dut::C_WIDTH, false>> c[Dut::B_COLS];
+  sc_signal<typename Dut::COutput> c;
   sc_signal<bool> c_retire;
   sc_signal<bool> mac_ready;
 
@@ -92,16 +92,9 @@ struct CIMElementTbCase : sc_module {
     dut.mset(mset);
     dut.c_retire(c_retire);
     dut.mac_ready(mac_ready);
-
-    for (int chi = 0; chi < A_COLS; chi++) {
-      dut.a[chi](a[chi]);
-    }
-    for (int col = 0; col < Dut::B_COLS; col++) {
-      dut.c[col](c[col]);
-      for (int lane = 0; lane < Dut::B_ROWS; lane++) {
-        dut.b[col][lane](b[col][lane]);
-      }
-    }
+    dut.a(a);
+    dut.b(b);
+    dut.c(c);
 
     SC_THREAD(run);
   }
@@ -152,8 +145,10 @@ struct CIMElementTbCase : sc_module {
   // Pack native activation lanes into the blackbox ABI order
   std::uint64_t pack_a_bus() {
     std::uint64_t packed = 0;
+    const typename Dut::AInput a_input = a.read();
     for (int chi = 0; chi < A_COLS; chi++) {
-      packed |= signal_value(a[chi]) << (chi * A_WIDTH);
+      packed |= static_cast<std::uint64_t>(a_input[chi].to_uint64())
+                << (chi * A_WIDTH);
     }
     return packed;
   }
@@ -161,10 +156,13 @@ struct CIMElementTbCase : sc_module {
   // Pack native weight lanes into the blackbox ABI order
   std::uint64_t pack_b_bus() {
     std::uint64_t packed = 0;
+    const typename Dut::BInput b_input = b.read();
     for (int col = 0; col < Dut::B_COLS; col++) {
       for (int lane = 0; lane < Dut::B_ROWS; lane++) {
         const int bit_offset = ((col * Dut::B_ROWS) + lane) * B_WIDTH;
-        packed |= signal_value(b[col][lane]) << bit_offset;
+        packed |= static_cast<std::uint64_t>(
+                      b_input[col][lane].to_uint64())
+                  << bit_offset;
       }
     }
     return packed;
@@ -220,8 +218,10 @@ struct CIMElementTbCase : sc_module {
       require(false, text.str());
     }
 
+    const typename Dut::COutput c_output = c.read();
     for (int col = 0; col < Dut::B_COLS; col++) {
-      const std::uint64_t sysc_value = signal_value(c[col]);
+      const std::uint64_t sysc_value =
+          static_cast<std::uint64_t>(c_output[col].to_uint64());
       const std::uint64_t rtl_value = rtl_c_value(col);
       if (sysc_value == rtl_value) {
         continue;
@@ -255,14 +255,18 @@ struct CIMElementTbCase : sc_module {
     wset.write(0);
     mac_issue.write(false);
     mset.write(0);
+    typename Dut::AInput a_input;
     for (int chi = 0; chi < A_COLS; chi++) {
-      a[chi].write(0);
+      a_input[chi] = 0;
     }
+    a.write(a_input);
+    typename Dut::BInput b_input;
     for (int col = 0; col < Dut::B_COLS; col++) {
       for (int lane = 0; lane < Dut::B_ROWS; lane++) {
-        b[col][lane].write(0);
+        b_input[col][lane] = 0;
       }
     }
+    b.write(b_input);
     settle_and_compare("initialize");
   }
 
@@ -283,9 +287,11 @@ struct CIMElementTbCase : sc_module {
 
   // Drive one activation vector
   void drive_activation(int phase) {
+    typename Dut::AInput a_input;
     for (int chi = 0; chi < A_COLS; chi++) {
-      a[chi].write(activation_value(chi, phase));
+      a_input[chi] = activation_value(chi, phase);
     }
+    a.write(a_input);
   }
 
   // Write one WRITE_CH_IN group into both models
@@ -294,12 +300,14 @@ struct CIMElementTbCase : sc_module {
     wset.write(row);
     waddr.write(base);
 
+    typename Dut::BInput b_input;
     for (int col = 0; col < Dut::B_COLS; col++) {
       for (int lane = 0; lane < Dut::B_ROWS; lane++) {
         const int chi = base + lane;
-        b[col][lane].write(weight_value(row, col, chi));
+        b_input[col][lane] = weight_value(row, col, chi);
       }
     }
+    b.write(b_input);
 
     tick("write weight");
     wen.write(false);

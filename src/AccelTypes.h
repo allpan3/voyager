@@ -153,7 +153,22 @@ class Pack1D {
   }
 };
 
-// TODO: is there a way to make this more generic?
+// Zero a scalar or recursively zero every scalar in a nested Pack1D
+template <typename T>
+void clear_pack(T& value) {
+  value = 0;
+}
+
+// Zero every element while keeping the assignments visible for HLS unrolling
+template <typename T, size_t pack_width>
+void clear_pack(Pack1D<T, pack_width>& pack) {
+#pragma hls_unroll yes
+  for (unsigned int i = 0; i < pack_width; i++) {
+    clear_pack(pack[i]);
+  }
+}
+
+// Datatype-specific specializations preserve their required field-wise marshalling
 
 template <size_t pack_width, int W, int es>
 class Pack1D<PEInput<Posit<W, es>>, pack_width> {

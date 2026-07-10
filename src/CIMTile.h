@@ -12,25 +12,17 @@
 // CIMTile is the intersection of one multicast group and one reduction group:
 // a TILE_INPUT_LANES x TILE_OUTPUT_LANES grid of CIMElements that reduces one
 // streamed A section against the resident B tile and emits one registered
-// result row per tile output lane. It exposes the CIMElement contract one level
-// up -- VG issue side (a/mset/mac_issue in, mac_ready out), registered result
-// (c/c_retire out), SC write side (wen/waddr/wset/b in) -- and is timing-pure:
-// no Connections, no protocol state, only plain signals inside.
+// result row per tile output lane. It exposes a self-contained issue station
+// (a/mset/mac_issue in, mac_ready out), registered result (c/c_retire out), and
+// SC write side (wen/waddr/wset/b in), with no Connections protocol at this level.
 //
-// Relative to a bare element the tile adds two registered stages: it latches the
-// A section and set select on the issue pulse (so the delivered wires need only
-// be stable for that one cycle) and pulses the elements one cycle later, and it
-// registers the reduced result one cycle after the elements retire. These
-// pipeline stages preserve the element issue window and add two cycles to
-// operation_latency.
-template <int CH_IN = CIM_CH_IN, int CH_OUT = CIM_CH_OUT,
-          int B_SETS = CIM_B_SETS, int BASE_A_WIDTH = CIM_BASE_A_WIDTH,
-          int BASE_B_WIDTH = CIM_BASE_B_WIDTH,
-          int BASE_C_WIDTH = CIM_BASE_C_WIDTH, int WRITE_CH_IN = CIM_WRITE_CH_IN,
-          int MAC_LATENCY = CIM_MAC_LATENCY, int MODE = CIM_MODE,
-          int A_WIDTH = INPUT_DTYPE_WIDTH, int B_WIDTH = WEIGHT_DTYPE_WIDTH,
-          bool SIGNED = CIM_SIGNED, int TILE_INPUT_LANES = 1,
-          int TILE_OUTPUT_LANES = 1>
+// Relative to a bare element the tile adds two registered stages: the input
+// station captures A/mset on an accepted issue and pulses the elements on the
+// following cycle, then the result stage registers the reduced element outputs.
+template <int CH_IN, int CH_OUT, int B_SETS, int BASE_A_WIDTH,
+          int BASE_B_WIDTH, int BASE_C_WIDTH, int WRITE_CH_IN,
+          int MAC_LATENCY, int MODE, int A_WIDTH, int B_WIDTH, bool SIGNED,
+          int TILE_INPUT_LANES, int TILE_OUTPUT_LANES>
 SC_MODULE(CIMTile) {
  private:
   // Return the ceil log2 used for static port widths
@@ -63,19 +55,27 @@ SC_MODULE(CIMTile) {
   using ElementSet = ac_int<Element::BITS_SET, false>;
   using ElementAddr = ac_int<Element::BITS_CH_IN, false>;
 
+  // Grouped CIMElement data-port types
+  using ElementAInput = typename Element::AInput;
+  using ElementBInput = typename Element::BInput;
+  using ElementCOutput = typename Element::COutput;
+
   // Tile-level result scalar type (widened for the input-lane reduction)
   using CValue = ac_int<C_WIDTH, false>;
+  using COutput = Pack1D<CValue, ELEMENT_B_COLS>;
 
   // Return the number of mclk cycles an accepted issue keeps the tile not ready
-  // The station can capture the next operand as the element consumes the old one
   static constexpr int issue_window() { return Element::issue_window(); }
 
-  // Return the number of mclk cycles from an accepted issue to its retirement.
-  // Two more than the element: one latch stage in and one result-register stage
-  // out
+  // Return the number of mclk cycles from an accepted tile issue to retirement
   static constexpr int operation_latency() {
     return Element::operation_latency() + 2;
   }
+
+  // One logical operation result is retained across all c output lanes. The
+  // next retirement overwrites those same registers and there is no result
+  // FIFO, so the implemented completed-result capacity is exactly one
+  static constexpr int RESULT_CAPACITY = 1;
 
   // Tile clock and reset interface
   sc_in<bool> CCS_INIT_S1(wclk);
@@ -86,47 +86,38 @@ SC_MODULE(CIMTile) {
   sc_in<bool> wen[TILE_INPUT_LANES];
   sc_in<ElementAddr> waddr[TILE_INPUT_LANES];
   sc_in<ElementSet> wset[TILE_INPUT_LANES];
-  sc_in<ElementBValue> b[TILE_INPUT_LANES][TILE_OUTPUT_LANES][ELEMENT_B_COLS][ELEMENT_B_WRITE_ROWS];
+  sc_in<ElementBInput> b[TILE_INPUT_LANES][TILE_OUTPUT_LANES];
 
-  // MAC issue interface (VG): one A section shared across the tile's output
-  // lanes, latched on the issue pulse. mac_ready is exposed for completeness;
-  // the producer must not read it combinationally into its issue decision
-  sc_in<ElementAValue> a[TILE_INPUT_LANES][ELEMENT_A_COLS];
+  // MAC issue interface: one A section captured by the tile station
+  sc_in<ElementAInput> a[TILE_INPUT_LANES];
   sc_in<ElementSet> CCS_INIT_S1(mset);
   sc_in<bool> CCS_INIT_S1(mac_issue);
   sc_out<bool> CCS_INIT_S1(mac_ready);
 
   // Result interface: registered reduced result plus a per-retirement toggle
-  sc_out<CValue> c[TILE_OUTPUT_LANES][ELEMENT_B_COLS];
+  sc_out<COutput> c[TILE_OUTPUT_LANES];
   sc_out<bool> CCS_INIT_S1(c_retire);
 
  private:
   Element* elements[TILE_INPUT_LANES][TILE_OUTPUT_LANES];
 
-  // Station registers hold the latched A section and set select for the window.
-  // Plain sc_signal (not the ZeroInitializedTileSignal subclass) so Catapult
-  // recognizes them as channels when bound to the element a/mset ports (CIN-216);
-  // they are latched before the elements consume them, so no forced zero start.
-  sc_signal<ElementAValue> station_a[TILE_INPUT_LANES][ELEMENT_A_COLS];
+  // Input station held while the elements consume one issued operand
+  sc_signal<ElementAInput> station_a[TILE_INPUT_LANES];
   sc_signal<ElementSet> station_mset;
-  // Registered issue pulse fed to the elements one cycle after the tile issue
   sc_signal<bool> element_mac_issue;
+  sc_signal<bool> window_idle_state;
 
   // Per-element outputs. element_c must be a plain sc_signal (not the
   // ZeroInitializedTileSignal subclass): Catapult only models sc_signal<T> as a
   // synthesizable channel, so reading a subclass in run_collect's reduction
   // aborts go compile (CIN-242). It is read only after the element has driven it
   // (guarded by tile_retired), so it needs no forced zero startup value.
-  sc_signal<ElementCValue> element_c[TILE_INPUT_LANES][TILE_OUTPUT_LANES][ELEMENT_B_COLS];
+  sc_signal<ElementCOutput> element_c[TILE_INPUT_LANES][TILE_OUTPUT_LANES];
   sc_signal<bool> element_c_retire[TILE_INPUT_LANES][TILE_OUTPUT_LANES];
   sc_signal<bool> element_mac_ready[TILE_INPUT_LANES][TILE_OUTPUT_LANES];
 
-  // Combinational ready state published by the issue thread; the issue-window
-  // countdown and retire tracking are thread-local (see run_issue/run_collect)
-  sc_signal<bool> window_idle_state;
-
  public:
-  // Construct the element grid and bind it to the tile's station and result wires
+  // Construct the element grid and bind it to the tile ports and result wires
   SC_CTOR(CIMTile) {
     window_idle_state.write(true);
 
@@ -144,17 +135,9 @@ SC_MODULE(CIMTile) {
         elements[til][tol]->mset(station_mset);
         elements[til][tol]->c_retire(element_c_retire[til][tol]);
         elements[til][tol]->mac_ready(element_mac_ready[til][tol]);
-
-        for (int a_col = 0; a_col < ELEMENT_A_COLS; a_col++) {
-          elements[til][tol]->a[a_col](station_a[til][a_col]);
-        }
-
-        for (int b_col = 0; b_col < ELEMENT_B_COLS; b_col++) {
-          elements[til][tol]->c[b_col](element_c[til][tol][b_col]);
-          for (int b_row = 0; b_row < ELEMENT_B_WRITE_ROWS; b_row++) {
-            elements[til][tol]->b[b_col][b_row](b[til][tol][b_col][b_row]);
-          }
-        }
+        elements[til][tol]->a(station_a[til]);
+        elements[til][tol]->b(b[til][tol]);
+        elements[til][tol]->c(element_c[til][tol]);
       }
     }
 
@@ -171,32 +154,26 @@ SC_MODULE(CIMTile) {
   }
 
  private:
-  // Latch the A section on an accepted issue and pulse the elements next cycle.
-  // The tile tracks its own issue window statically, mirroring the element, so
-  // it never depends on the element mac_ready combinationally. Clocked SC_THREAD
-  // with async reset (Catapult wants sequential logic in a thread with reset);
-  // the window countdown is thread-local. Work-then-wait keeps the same edge
-  // ordering as the former SC_METHOD: reads return pre-edge values, and the one
-  // wait() per loop places all writes on this edge (visible next edge)
+  // Capture one tile operand and issue it to the elements on the next cycle.
+  // Clocked sc_signal writes become visible after the edge like RTL nonblocking
+  // assignments, so this station is a real pipeline register, not a simulator delay
   void run_issue() {
-    // Reset section: clear the station, the element pulse, and the window
     int window_remaining = 0;
+    ElementAInput zero_a;
+    clear_pack(zero_a);
+
     element_mac_issue.write(false);
     station_mset.write(0);
 #pragma hls_unroll yes
     for (int til = 0; til < TILE_INPUT_LANES; til++) {
-#pragma hls_unroll yes
-      for (int a_col = 0; a_col < ELEMENT_A_COLS; a_col++) {
-        station_a[til][a_col].write(0);
-      }
+      station_a[til].write(zero_a);
     }
     window_idle_state.write(true);
 
     wait();
 
     while (true) {
-      // Sample readiness before this edge's updates, mirroring the element window
-      const bool ready_now = (window_remaining == 0);
+      const bool ready_now = window_remaining == 0;
       if (window_remaining > 0) {
         window_remaining--;
       }
@@ -204,14 +181,9 @@ SC_MODULE(CIMTile) {
       if (mac_issue.read() && ready_now) {
 #pragma hls_unroll yes
         for (int til = 0; til < TILE_INPUT_LANES; til++) {
-#pragma hls_unroll yes
-          for (int a_col = 0; a_col < ELEMENT_A_COLS; a_col++) {
-            station_a[til][a_col].write(a[til][a_col].read());
-          }
+          station_a[til].write(a[til].read());
         }
         station_mset.write(mset.read());
-        // Registered pulse: the elements observe it, with the latched station,
-        // on the following edge
         element_mac_issue.write(true);
         window_remaining = issue_window() - 1;
       } else {
@@ -260,9 +232,9 @@ SC_MODULE(CIMTile) {
     bool seen_retire = false;
     bool tile_retire_state = false;
     for (int tol = 0; tol < TILE_OUTPUT_LANES; tol++) {
-      for (int b_col = 0; b_col < ELEMENT_B_COLS; b_col++) {
-        c[tol][b_col].write(0);
-      }
+      COutput reset_output;
+      clear_pack(reset_output);
+      c[tol].write(reset_output);
     }
     c_retire.write(false);
 
@@ -277,15 +249,19 @@ SC_MODULE(CIMTile) {
         // unresolved and aborted go compile (CIN-242, NULL pointer for lvalue).
 #pragma hls_unroll yes
         for (int tol = 0; tol < TILE_OUTPUT_LANES; tol++) {
+          COutput reduced_output;
 #pragma hls_unroll yes
           for (int b_col = 0; b_col < ELEMENT_B_COLS; b_col++) {
+            // The unroll exposes every lane in parallel, but this recurrence does
+            // not require a balanced adder tree; Catapult chooses the reduction topology
             CValue sum = 0;
 #pragma hls_unroll yes
             for (int til = 0; til < TILE_INPUT_LANES; til++) {
-              sum += widen_element_c(element_c[til][tol][b_col].read());
+              sum += widen_element_c(element_c[til][tol].read()[b_col]);
             }
-            c[tol][b_col].write(sum);
+            reduced_output[b_col] = sum;
           }
+          c[tol].write(reduced_output);
         }
         seen_retire = !seen_retire;
         tile_retire_state = !tile_retire_state;
@@ -295,7 +271,7 @@ SC_MODULE(CIMTile) {
     }
   }
 
-  // Drive combinational ready state from reset and the issue-window state
+  // Drive ready when the tile input station can accept an issue
   void drive_mac_ready() {
     mac_ready.write(rstn.read() && window_idle_state.read());
   }

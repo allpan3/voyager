@@ -62,6 +62,9 @@ solution options set Input/CppStandard c++17
 # path leaves the blackbox external and the sim concat Verilog (matching the
 # global scripts/utils/setup_project.tcl flow).
 set compiler_flags "-D$DATATYPE -DIC_DIMENSION=$IC_DIMENSION -DOC_DIMENSION=$OC_DIMENSION -I$ROOT/src -I$ROOT/lib -I$ROOT"
+if {[info exists ::env(CIM_C_PORT_ORIENTATION)]} {
+  append compiler_flags " -DCIM_TEST_C_PORT_ORIENTATION=$::env(CIM_C_PORT_ORIENTATION)"
+}
 solution options set Input/CompilerFlags $compiler_flags
 
 solution options set Input/SearchPath "$ROOT/lib" -append
@@ -86,7 +89,7 @@ if {$SCVERIFY} {
     "+v2k -timescale=1ns/10ps +notimingcheck +define+UNIT_DELAY +incdir+$ROOT/src/CIM"
   solution options set Flows/VCS/VCSSIM_OPTS {+vcs+lic+wait}
   solution options set Flows/VCS/COMP_FLAGS \
-    "-O3 -Wall -Wno-unknown-pragmas -Wno-deprecated-declarations -I$ROOT/src -I$ROOT/lib -I$ROOT -I$ROOT/test/unittest -D$DATATYPE -DIC_DIMENSION=$IC_DIMENSION -DOC_DIMENSION=$OC_DIMENSION -DSCVERIFY -std=c++17"
+    "-O3 -Wall -Wno-unknown-pragmas -Wno-deprecated-declarations -I$ROOT/src -I$ROOT/lib -I$ROOT -I$ROOT/test/unittest -D$DATATYPE -DIC_DIMENSION=$IC_DIMENSION -DOC_DIMENSION=$OC_DIMENSION -DCIM_TEST_C_PORT_ORIENTATION=$::env(CIM_C_PORT_ORIENTATION) -DSCVERIFY -std=c++17"
   solution options set Flows/VCS/VCSELAB_OPTS \
     "-timescale=1ns/1ps -sysc=blocksync -lstdc++fs -lpthread"
   flow package require /SCVerify
@@ -140,6 +143,13 @@ directive set -CLOCK_OVERHEAD 0
 
 # --- Schedule / extract RTL --------------------------------------------------
 go assembly
+
+# Match the production CIMArray resource mapping for the wide A receive beat
+if {$BLOCK eq "CIMArray"} {
+  set top_stripped [string map {" " ""} $TOP]
+  directive set /$top_stripped/issue_mac/while:a_beat.value.value:rsc -MAP_TO_MODULE {[Register]}
+}
+
 go architect
 go extract
 project save

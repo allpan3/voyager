@@ -25,6 +25,10 @@
 static constexpr int CIM_MODE_BIT_PARALLEL_VALUE = 0;
 static constexpr int CIM_MODE_BIT_SERIAL_VALUE = 1;
 
+#ifndef CIM_TEST_C_PORT_ORIENTATION
+#define CIM_TEST_C_PORT_ORIENTATION CIM_C_PORT_REDUCTION_MAJOR
+#endif
+
 static int g_cases_remaining = 0;
 
 // Return a mask covering the requested bit width
@@ -40,14 +44,17 @@ template <int CH_IN, int CH_OUT, int B_SETS, int BASE_A_WIDTH,
           int REDUCTION_GROUPS = 1, int MULTICAST_GROUPS = 1,
           int A_PORT_TILES = REDUCTION_GROUPS,
           int B_PORT_TILES = MULTICAST_GROUPS,
+          int C_PORT_TILES = REDUCTION_GROUPS,
+          int C_PORT_ORIENTATION = CIM_C_PORT_REDUCTION_MAJOR,
           typename DutType =
               CIMArray<CH_IN, CH_OUT, B_SETS, BASE_A_WIDTH, BASE_B_WIDTH,
                       BASE_C_WIDTH, WRITE_CH_IN, MAC_LATENCY, MODE, A_WIDTH,
                       B_WIDTH, IS_SIGNED, TILE_INPUT_LANES, TILE_OUTPUT_LANES,
                       REDUCTION_GROUPS, MULTICAST_GROUPS, A_PORT_TILES,
-                      B_PORT_TILES>>
+                      B_PORT_TILES, C_PORT_TILES, C_PORT_ORIENTATION>>
 struct CIMArrayTbCase : sc_module {
   using Dut = DutType;
+  using ABeat = typename Dut::ABeat;
   using CBeat = typename Dut::CBeat;
   using MACRequest = typename Dut::MACRequest;
   using StoreRequest = typename Dut::StoreRequest;
@@ -66,17 +73,17 @@ struct CIMArrayTbCase : sc_module {
   CIMARRAY_DUT_TYPE(Dut) dut;
   sc_clock clk;
   sc_signal<bool> rstn;
-  Connections::Combinational<MACRequest> mac_channel;
+  Connections::Combinational<MACRequest> mac_request_channel;
+  Connections::Combinational<ABeat> a_channel;
   Connections::Combinational<StoreRequest> store_channel;
   Connections::Combinational<CBeat> result_channel;
 
   ac_int<B_WIDTH, false>
       expected_weights[B_SETS][Dut::ELEMENTS][Dut::ELEMENT_B_COLS][CH_IN];
 
-  // ExpectedBeat mirrors one column C beat in issue order: outer index the
-  // reduction group (each an independent partial sum), inner the output lane
+  // ExpectedBeat mirrors the selected C-port tile axis in issue order
   struct ExpectedBeat {
-    long long value[REDUCTION_GROUPS][MULTICAST_GROUP_LANES][Dut::ELEMENT_B_COLS];
+    long long value[C_PORT_TILES][MULTICAST_GROUP_LANES][Dut::ELEMENT_B_COLS];
   };
   std::deque<ExpectedBeat> expected_beats;
 
@@ -89,7 +96,8 @@ struct CIMArrayTbCase : sc_module {
 
     dut.clk(clk);
     dut.rstn(rstn);
-    dut.mac_channel(mac_channel);
+    dut.mac_request_channel(mac_request_channel);
+    dut.a_channel(a_channel);
     dut.store_channel(store_channel);
     dut.result_channel(result_channel);
 
@@ -126,7 +134,8 @@ struct CIMArrayTbCase : sc_module {
 
   // Reset the testbench-side Connections endpoints
   void reset_channels() {
-    mac_channel.ResetWrite();
+    mac_request_channel.ResetWrite();
+    a_channel.ResetWrite();
     store_channel.ResetWrite();
     result_channel.ResetRead();
   }
@@ -341,73 +350,101 @@ struct CIMArrayTbCase : sc_module {
     }
   }
 
-  // Compute one multicast group's expected C beat for one MAC request
-  ExpectedBeat expected_group_beat(ElementSet set, int group_idx,
-                                   int phase) const {
-    ExpectedBeat beat;
+  // Compute one tile's expected result for one MAC request
+  void compute_expected_tile(ExpectedBeat& beat, int port_tile_idx,
+                             ElementSet set, int reduce_idx, int group_idx,
+                             int phase) const {
     const int set_idx = set.to_int();
-    // Each reduction group sums only its own input-lane range -- a separate
-    // partial that rides beside the others in the beat, never summed across
-    for (int reduce_idx = 0; reduce_idx < REDUCTION_GROUPS; reduce_idx++) {
-      for (int group_lane = 0; group_lane < MULTICAST_GROUP_LANES; group_lane++) {
-        const int output_lane_idx = group_idx * MULTICAST_GROUP_LANES + group_lane;
-        for (int col = 0; col < Dut::ELEMENT_B_COLS; col++) {
-          long long sum = 0;
-          for (int til = 0; til < TILE_INPUT_LANES; til++) {
-            const int input_lane_idx = reduce_idx * TILE_INPUT_LANES + til;
-            const int element_idx = element_index(input_lane_idx, output_lane_idx);
-            for (int chi = 0; chi < CH_IN; chi++) {
-              const long long a_value = decode_value<A_WIDTH>(
-                  activation_value(input_lane_idx, chi, phase));
-              const long long b_value = decode_value<B_WIDTH>(
-                  expected_weights[set_idx][element_idx][col][chi]);
-              sum += a_value * b_value;
-            }
+    for (int group_lane = 0; group_lane < MULTICAST_GROUP_LANES; group_lane++) {
+      const int output_lane_idx = group_idx * MULTICAST_GROUP_LANES + group_lane;
+      for (int col = 0; col < Dut::ELEMENT_B_COLS; col++) {
+        long long sum = 0;
+        for (int til = 0; til < TILE_INPUT_LANES; til++) {
+          const int input_lane_idx = reduce_idx * TILE_INPUT_LANES + til;
+          const int element_idx = element_index(input_lane_idx, output_lane_idx);
+          for (int chi = 0; chi < CH_IN; chi++) {
+            const long long a_value = decode_value<A_WIDTH>(
+                activation_value(input_lane_idx, chi, phase));
+            const long long b_value = decode_value<B_WIDTH>(
+                expected_weights[set_idx][element_idx][col][chi]);
+            sum += a_value * b_value;
           }
-          beat.value[reduce_idx][group_lane][col] = sum;
         }
+        beat.value[port_tile_idx][group_lane][col] = sum;
       }
     }
-    return beat;
   }
 
-  // Build the shared MAC payload for one deterministic phase
-  MACRequest build_mac_request(ElementSet set, int phase) const {
+  // Queue the C beats produced by one targeted or broadcast request
+  void queue_expected_beats(ElementSet set, bool bcast, int target_group,
+                            int phase) {
+    if constexpr (C_PORT_ORIENTATION == CIM_C_PORT_REDUCTION_MAJOR) {
+      for (int group_idx = 0; group_idx < MULTICAST_GROUPS; group_idx++) {
+        if (bcast || group_idx == target_group) {
+          ExpectedBeat beat = {};
+          for (int reduce_idx = 0; reduce_idx < REDUCTION_GROUPS; reduce_idx++) {
+            compute_expected_tile(beat, reduce_idx, set, reduce_idx, group_idx,
+                                  phase);
+          }
+          expected_beats.push_back(beat);
+        }
+      }
+    } else {
+      for (int reduce_idx = 0; reduce_idx < REDUCTION_GROUPS; reduce_idx++) {
+        ExpectedBeat beat = {};
+        for (int group_idx = 0; group_idx < MULTICAST_GROUPS; group_idx++) {
+          if (bcast || group_idx == target_group) {
+            compute_expected_tile(beat, group_idx, set, reduce_idx, group_idx,
+                                  phase);
+          }
+        }
+        expected_beats.push_back(beat);
+      }
+    }
+  }
+
+  // Build narrow MAC metadata for one request
+  MACRequest build_mac_request(ElementSet set) const {
     MACRequest request;
     request.set = set;
     request.group = 0;
     request.bcast = 0;
+    return request;
+  }
 
+  // Build the shared A beat for one deterministic phase
+  ABeat build_a_beat(int phase) const {
+    ABeat a_beat;
     for (int input_lane_idx = 0; input_lane_idx < INPUT_LANES; input_lane_idx++) {
       for (int chi = 0; chi < CH_IN; chi++) {
-        request.data[input_lane_idx][chi] =
+        a_beat[input_lane_idx][chi] =
             activation_value(input_lane_idx, chi, phase);
       }
     }
-    return request;
+    return a_beat;
   }
 
   // Drive one group-addressed MAC request and queue its expected beat
   void drive_mac_group(ElementSet set, int group_idx, int phase) {
-    MACRequest request = build_mac_request(set, phase);
+    MACRequest request = build_mac_request(set);
     request.group = group_idx;
 
-    expected_beats.push_back(expected_group_beat(set, group_idx, phase));
+    queue_expected_beats(set, false, group_idx, phase);
 
-    mac_channel.Push(request);
+    mac_request_channel.Push(request);
+    a_channel.Push(build_a_beat(phase));
     settle();
   }
 
   // Drive one broadcast MAC request and queue expected beats for every group
   void drive_mac_bcast(ElementSet set, int phase) {
-    MACRequest request = build_mac_request(set, phase);
+    MACRequest request = build_mac_request(set);
     request.bcast = 1;
 
-    for (int group_idx = 0; group_idx < MULTICAST_GROUPS; group_idx++) {
-      expected_beats.push_back(expected_group_beat(set, group_idx, phase));
-    }
+    queue_expected_beats(set, true, 0, phase);
 
-    mac_channel.Push(request);
+    mac_request_channel.Push(request);
+    a_channel.Push(build_a_beat(phase));
     settle();
   }
 
@@ -419,18 +456,18 @@ struct CIMArrayTbCase : sc_module {
     const ExpectedBeat expected = expected_beats.front();
     expected_beats.pop_front();
 
-    for (int reduce_idx = 0; reduce_idx < REDUCTION_GROUPS; reduce_idx++) {
+    for (int port_tile_idx = 0; port_tile_idx < C_PORT_TILES; port_tile_idx++) {
       for (int group_lane = 0; group_lane < MULTICAST_GROUP_LANES; group_lane++) {
         for (int col = 0; col < Dut::ELEMENT_B_COLS; col++) {
           const ac_int<Dut::C_WIDTH, false> expected_bits =
-              encode_value<Dut::C_WIDTH>(expected.value[reduce_idx][group_lane][col]);
-          if (actual[reduce_idx][group_lane][col] == expected_bits) {
+              encode_value<Dut::C_WIDTH>(expected.value[port_tile_idx][group_lane][col]);
+          if (actual[port_tile_idx][group_lane][col] == expected_bits) {
             continue;
           }
 
           std::ostringstream text;
-          text << "unexpected c beat[" << reduce_idx << "][" << group_lane << "]["
-               << col << "] got " << actual[reduce_idx][group_lane][col].to_int()
+          text << "unexpected c beat[" << port_tile_idx << "][" << group_lane << "]["
+               << col << "] got " << actual[port_tile_idx][group_lane][col].to_int()
                << " expected " << expected_bits.to_int();
           require(false, text.str());
         }
@@ -662,9 +699,18 @@ int sc_main(int argc, char** argv) {
   CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2,
                          CIM_MODE_BIT_SERIAL_VALUE, 4, 4, false, 2, 2, 2, 2>
       segmented_serial_unsigned("segmented_serial_unsigned");
+
+  // Multicast-major C beats span three groups and stream two reduction rows
+  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2,
+                         CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, true, 2, 2, 2, 3,
+                         2, 3, 3, CIM_C_PORT_MULTICAST_MAJOR>
+      multicast_major_signed("multicast_major_signed");
 #else
   CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2,
-                         CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, false, 2, 3, 1, 1>
+                         CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, false, 2, 2, 2, 3,
+                         2, 3,
+                         (CIM_TEST_C_PORT_ORIENTATION == CIM_C_PORT_REDUCTION_MAJOR) ? 2 : 3,
+                         CIM_TEST_C_PORT_ORIENTATION>
       cim_array_scverify("cim_array_scverify");
 #endif
 

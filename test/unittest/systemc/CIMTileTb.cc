@@ -35,6 +35,9 @@ struct CIMTileTb : sc_module {
   using ElementSet = typename Dut::ElementSet;
   using ElementAValue = typename Dut::ElementAValue;
   using ElementBValue = typename Dut::ElementBValue;
+  using ElementAInput = typename Dut::ElementAInput;
+  using ElementBInput = typename Dut::ElementBInput;
+  using COutput = typename Dut::COutput;
   using CValue = typename Dut::CValue;
 
   // ExpectedResult holds one reduced tile result
@@ -48,13 +51,12 @@ struct CIMTileTb : sc_module {
   sc_signal<bool> wen[TILE_INPUT_LANES];
   sc_signal<ElementAddr> waddr[TILE_INPUT_LANES];
   sc_signal<ElementSet> wset[TILE_INPUT_LANES];
-  sc_signal<ElementBValue> b[TILE_INPUT_LANES][TILE_OUTPUT_LANES]
-                            [Dut::ELEMENT_B_COLS][Dut::ELEMENT_B_WRITE_ROWS];
-  sc_signal<ElementAValue> a[TILE_INPUT_LANES][Dut::ELEMENT_A_COLS];
+  sc_signal<ElementBInput> b[TILE_INPUT_LANES][TILE_OUTPUT_LANES];
+  sc_signal<ElementAInput> a[TILE_INPUT_LANES];
   sc_signal<ElementSet> mset;
   sc_signal<bool> mac_issue;
   sc_signal<bool> mac_ready;
-  sc_signal<CValue> c[TILE_OUTPUT_LANES][Dut::ELEMENT_B_COLS];
+  sc_signal<COutput> c[TILE_OUTPUT_LANES];
   sc_signal<bool> c_retire;
 
   std::deque<ExpectedResult> expected_results;
@@ -86,22 +88,14 @@ struct CIMTileTb : sc_module {
       dut.wen[til](wen[til]);
       dut.waddr[til](waddr[til]);
       dut.wset[til](wset[til]);
-      for (int a_col = 0; a_col < Dut::ELEMENT_A_COLS; a_col++) {
-        dut.a[til][a_col](a[til][a_col]);
-      }
+      dut.a[til](a[til]);
       for (int tol = 0; tol < TILE_OUTPUT_LANES; tol++) {
-        for (int b_col = 0; b_col < Dut::ELEMENT_B_COLS; b_col++) {
-          for (int b_row = 0; b_row < Dut::ELEMENT_B_WRITE_ROWS; b_row++) {
-            dut.b[til][tol][b_col][b_row](b[til][tol][b_col][b_row]);
-          }
-        }
+        dut.b[til][tol](b[til][tol]);
       }
     }
 
     for (int tol = 0; tol < TILE_OUTPUT_LANES; tol++) {
-      for (int b_col = 0; b_col < Dut::ELEMENT_B_COLS; b_col++) {
-        dut.c[tol][b_col](c[tol][b_col]);
-      }
+      dut.c[tol](c[tol]);
     }
 
     SC_THREAD(run);
@@ -166,11 +160,12 @@ struct CIMTileTb : sc_module {
     require(!expected_results.empty(), "unexpected tile retirement");
     const ExpectedResult& expected = expected_results.front();
     for (int tol = 0; tol < TILE_OUTPUT_LANES; tol++) {
+      const COutput c_output = c[tol].read();
       for (int b_col = 0; b_col < Dut::ELEMENT_B_COLS; b_col++) {
         std::ostringstream context;
         context << "result " << retirements << " lane " << tol << " column "
                 << b_col;
-        require(c[tol][b_col].read().to_int64() == expected.value[tol][b_col],
+        require(c_output[b_col].to_int64() == expected.value[tol][b_col],
                 context.str());
       }
     }
@@ -202,15 +197,19 @@ struct CIMTileTb : sc_module {
       wen[til].write(false);
       waddr[til].write(0);
       wset[til].write(0);
+      ElementAInput a_input;
       for (int a_col = 0; a_col < Dut::ELEMENT_A_COLS; a_col++) {
-        a[til][a_col].write(0);
+        a_input[a_col] = 0;
       }
+      a[til].write(a_input);
       for (int tol = 0; tol < TILE_OUTPUT_LANES; tol++) {
+        ElementBInput b_input;
         for (int b_col = 0; b_col < Dut::ELEMENT_B_COLS; b_col++) {
           for (int b_row = 0; b_row < Dut::ELEMENT_B_WRITE_ROWS; b_row++) {
-            b[til][tol][b_col][b_row].write(0);
+            b_input[b_col][b_row] = 0;
           }
         }
+        b[til][tol].write(b_input);
       }
     }
     settle();
@@ -235,12 +234,14 @@ struct CIMTileTb : sc_module {
           waddr[til].write(base_chi);
           wset[til].write(set_idx);
           for (int tol = 0; tol < TILE_OUTPUT_LANES; tol++) {
+            ElementBInput b_input;
             for (int b_col = 0; b_col < Dut::ELEMENT_B_COLS; b_col++) {
               for (int b_row = 0; b_row < Dut::ELEMENT_B_WRITE_ROWS; b_row++) {
-                b[til][tol][b_col][b_row].write(
-                    weight_value(set_idx, til, tol, b_col, base_chi + b_row));
+                b_input[b_col][b_row] =
+                    weight_value(set_idx, til, tol, b_col, base_chi + b_row);
               }
             }
+            b[til][tol].write(b_input);
           }
           tick();
           wen[til].write(false);
@@ -257,9 +258,11 @@ struct CIMTileTb : sc_module {
       mset.write(operation % B_SETS);
       mac_issue.write(true);
       for (int til = 0; til < TILE_INPUT_LANES; til++) {
+        ElementAInput a_input;
         for (int a_col = 0; a_col < Dut::ELEMENT_A_COLS; a_col++) {
-          a[til][a_col].write(activation_value(operation, til, a_col));
+          a_input[a_col] = activation_value(operation, til, a_col);
         }
+        a[til].write(a_input);
       }
       expected_results.push_back(expected_result(operation));
       tick();
