@@ -32,33 +32,25 @@ static constexpr int CIM_MODE_BIT_SERIAL_VALUE = 1;
 static int g_cases_remaining = 0;
 
 // Return a mask covering the requested bit width
-static constexpr long long mask_for_width(int width) {
-  return (1LL << width) - 1;
-}
+static constexpr long long mask_for_width(int width) { return (1LL << width) - 1; }
 
 // One parameterized CIMArray SystemC test case
-template <int CH_IN, int CH_OUT, int B_SETS, int BASE_A_WIDTH,
-          int BASE_B_WIDTH, int BASE_C_WIDTH, int WRITE_CH_IN, int MAC_LATENCY,
-          int MODE, int A_WIDTH, int B_WIDTH, bool IS_SIGNED,
-          int TILE_INPUT_LANES, int TILE_OUTPUT_LANES,
-          int REDUCTION_GROUPS = 1, int MULTICAST_GROUPS = 1,
-          int A_PORT_TILES = REDUCTION_GROUPS,
-          int B_PORT_TILES = MULTICAST_GROUPS,
-          int C_PORT_TILES = REDUCTION_GROUPS,
+template <int CH_IN, int CH_OUT, int B_SETS, int BASE_A_WIDTH, int BASE_B_WIDTH, int BASE_C_WIDTH, int WRITE_CH_IN,
+          int MAC_LATENCY, int MODE, int A_WIDTH, int B_WIDTH, bool IS_SIGNED, int TILE_INPUT_LANES,
+          int TILE_OUTPUT_LANES, int REDUCTION_GROUPS = 1, int MULTICAST_GROUPS = 1,
+          int A_PORT_TILES = REDUCTION_GROUPS, int B_PORT_TILES = MULTICAST_GROUPS, int C_PORT_TILES = REDUCTION_GROUPS,
           int C_PORT_ORIENTATION = CIM_C_PORT_REDUCTION_MAJOR,
           typename DutType =
-              CIMArray<CH_IN, CH_OUT, B_SETS, BASE_A_WIDTH, BASE_B_WIDTH,
-                      BASE_C_WIDTH, WRITE_CH_IN, MAC_LATENCY, MODE, A_WIDTH,
-                      B_WIDTH, IS_SIGNED, TILE_INPUT_LANES, TILE_OUTPUT_LANES,
-                      REDUCTION_GROUPS, MULTICAST_GROUPS, A_PORT_TILES,
-                      B_PORT_TILES, C_PORT_TILES, C_PORT_ORIENTATION>>
+              CIMArray<CH_IN, CH_OUT, B_SETS, BASE_A_WIDTH, BASE_B_WIDTH, BASE_C_WIDTH, WRITE_CH_IN, MAC_LATENCY, MODE,
+                       A_WIDTH, B_WIDTH, IS_SIGNED, TILE_INPUT_LANES, TILE_OUTPUT_LANES, REDUCTION_GROUPS,
+                       MULTICAST_GROUPS, A_PORT_TILES, B_PORT_TILES, C_PORT_TILES, C_PORT_ORIENTATION>>
 struct CIMArrayTbCase : sc_module {
   using Dut = DutType;
   using ABeat = typename Dut::ABeat;
   using CBeat = typename Dut::CBeat;
   using MACRequest = typename Dut::MACRequest;
   using StoreRequest = typename Dut::StoreRequest;
-  using ElementSet = typename Dut::ElementSet;
+  using BSet = typename Dut::BSet;
   using MulticastGroupIndex = typename Dut::MulticastGroupIndex;
 
   static constexpr int INPUT_LANES = TILE_INPUT_LANES * REDUCTION_GROUPS;
@@ -67,19 +59,19 @@ struct CIMArrayTbCase : sc_module {
 
   static_assert(A_WIDTH < 31, "A_WIDTH must fit this unit test golden model");
   static_assert(B_WIDTH < 31, "B_WIDTH must fit this unit test golden model");
-  static_assert(Dut::C_WIDTH < 62,
-                "C_WIDTH must fit this unit test golden model");
+  static_assert(Dut::RESULT_WIDTH < 62, "RESULT_WIDTH must fit this unit test golden model");
 
   CIMARRAY_DUT_TYPE(Dut) dut;
   sc_clock clk;
   sc_signal<bool> rstn;
   Connections::Combinational<MACRequest> mac_request_channel;
   Connections::Combinational<ABeat> a_channel;
+  Connections::Combinational<ABeat> pending_a_channel;
+  Connections::SyncChannel a_transfer_done;
   Connections::Combinational<StoreRequest> store_channel;
   Connections::Combinational<CBeat> result_channel;
 
-  ac_int<B_WIDTH, false>
-      expected_weights[B_SETS][Dut::ELEMENTS][Dut::ELEMENT_B_COLS][CH_IN];
+  ac_int<B_WIDTH, false> expected_weights[B_SETS][Dut::ELEMENTS][Dut::ELEMENT_B_COLS][CH_IN];
 
   // ExpectedBeat mirrors the selected C-port tile axis in issue order
   struct ExpectedBeat {
@@ -91,7 +83,7 @@ struct CIMArrayTbCase : sc_module {
 
   // Construct one case and bind the standalone CIMArray ports
   explicit CIMArrayTbCase(sc_module_name name)
-      : sc_module(name), dut("dut"), clk("clk", 10, SC_NS) {
+      : sc_module(name), dut("dut"), clk("clk", 10, SC_NS), a_transfer_done("a_transfer_done") {
     g_cases_remaining++;
 
     dut.clk(clk);
@@ -105,6 +97,12 @@ struct CIMArrayTbCase : sc_module {
 
     SC_THREAD(run);
     sensitive << clk.posedge_event();
+
+    SC_THREAD(drive_a);
+    sensitive << clk.posedge_event();
+    async_reset_signal_is(rstn, false);
+
+    SC_THREAD(watchdog);
   }
 
   // Fail this case with a contextual SystemC report
@@ -117,6 +115,12 @@ struct CIMArrayTbCase : sc_module {
     text << name() << ": " << message;
     const std::string report = text.str();
     SC_REPORT_FATAL("CIMArrayTb", report.c_str());
+  }
+
+  // Stop a lost request or A transfer with a bounded simulation failure
+  void watchdog() {
+    wait(100, SC_US);
+    require(false, "timed out waiting for CIMArray completion");
   }
 
   // Wait enough delta cycles for combinational output methods to settle
@@ -135,9 +139,30 @@ struct CIMArrayTbCase : sc_module {
   // Reset the testbench-side Connections endpoints
   void reset_channels() {
     mac_request_channel.ResetWrite();
-    a_channel.ResetWrite();
+    pending_a_channel.ResetWrite();
+    a_transfer_done.ResetRead();
     store_channel.ResetWrite();
     result_channel.ResetRead();
+  }
+
+  // Serialize every testbench A transfer through one Connections writer
+  void drive_a() {
+    pending_a_channel.ResetRead();
+    a_channel.ResetWrite();
+    a_transfer_done.ResetWrite();
+
+    wait();
+
+    while (true) {
+      a_channel.Push(pending_a_channel.Pop());
+      a_transfer_done.SyncPush();
+    }
+  }
+
+  // Send one A beat and wait until the array accepts its issue transfer
+  void push_a_beat(const ABeat& beat) {
+    pending_a_channel.Push(beat);
+    a_transfer_done.SyncPop();
   }
 
   // Encode one integer as an unsigned ac_int bit pattern
@@ -170,30 +195,21 @@ struct CIMArrayTbCase : sc_module {
   }
 
   // Create deterministic activation data for one MAC request
-  ac_int<A_WIDTH, false> activation_value(int input_lane_idx, int chi,
-                                          int phase) const {
+  ac_int<A_WIDTH, false> activation_value(int input_lane_idx, int chi, int phase) const {
     if (IS_SIGNED) {
-      return encode_value<A_WIDTH>(
-          ((input_lane_idx * 5 + chi * 3 + phase) % 13) - 6);
+      return encode_value<A_WIDTH>(((input_lane_idx * 5 + chi * 3 + phase) % 13) - 6);
     }
     return encode_value<A_WIDTH>((input_lane_idx + 2) * (chi + 1) + phase);
   }
 
   // Create deterministic weight data for one B write request
-  ac_int<B_WIDTH, false> weight_value(int input_lane_idx, int chunk,
-                                      int output_lane_idx, int col, int lane,
+  ac_int<B_WIDTH, false> weight_value(int input_lane_idx, int chunk, int output_lane_idx, int col, int lane,
                                       int phase) const {
     if (IS_SIGNED) {
-      const int value =
-          ((input_lane_idx * 13 + chunk * 7 + output_lane_idx * 5 + col * 3 + lane +
-            phase) %
-           11) -
-          5;
+      const int value = ((input_lane_idx * 13 + chunk * 7 + output_lane_idx * 5 + col * 3 + lane + phase) % 11) - 5;
       return encode_value<B_WIDTH>(value);
     }
-    return encode_value<B_WIDTH>(
-        (input_lane_idx + 1) * (chunk + 2) + (output_lane_idx * 5) + (col * 3) +
-        lane + phase);
+    return encode_value<B_WIDTH>((input_lane_idx + 1) * (chunk + 2) + (output_lane_idx * 5) + (col * 3) + lane + phase);
   }
 
   // Clear independent B storage and pending expected beats
@@ -229,7 +245,7 @@ struct CIMArrayTbCase : sc_module {
   }
 
   // Drive one store request and mirror it into the expected weight model
-  void drive_store(ElementSet set, int input_lane_idx, int chunk, int phase) {
+  void drive_store(BSet set, int input_lane_idx, int chunk, int phase) {
     StoreRequest request;
     request.set = set;
     request.lane = input_lane_idx;
@@ -253,8 +269,7 @@ struct CIMArrayTbCase : sc_module {
         for (int lane = 0; lane < Dut::ELEMENT_B_WRITE_ROWS; lane++) {
           const int chi = base_chi + lane;
           if (chi < CH_IN) {
-            expected_weights[set_idx][element_idx][col][chi] =
-                request.data[output_lane_idx][col][lane];
+            expected_weights[set_idx][element_idx][col][chi] = request.data[output_lane_idx][col][lane];
           }
         }
       }
@@ -265,7 +280,7 @@ struct CIMArrayTbCase : sc_module {
   }
 
   // Load every B transfer required for one CIMArray transaction
-  void load_b_operands(ElementSet set, int phase) {
+  void load_b_operands(BSet set, int phase) {
     for (int chunk = 0; chunk < Dut::ELEMENT_B_BEATS; chunk++) {
       for (int input_lane_idx = 0; input_lane_idx < INPUT_LANES; input_lane_idx++) {
         drive_store(set, input_lane_idx, chunk, phase);
@@ -275,7 +290,7 @@ struct CIMArrayTbCase : sc_module {
   }
 
   // Load B operands with an empty cycle after every store request
-  void load_b_operands_with_idle(ElementSet set, int phase) {
+  void load_b_operands_with_idle(BSet set, int phase) {
     for (int chunk = 0; chunk < Dut::ELEMENT_B_BEATS; chunk++) {
       for (int input_lane_idx = 0; input_lane_idx < INPUT_LANES; input_lane_idx++) {
         drive_store(set, input_lane_idx, chunk, phase);
@@ -286,7 +301,7 @@ struct CIMArrayTbCase : sc_module {
   }
 
   // Drive one fanout store and mirror the replicated tile into every multicast group
-  void drive_store_fanout(ElementSet set, int base_lane, int chunk, int phase) {
+  void drive_store_fanout(BSet set, int base_lane, int chunk, int phase) {
     StoreRequest request;
     request.set = set;
     request.lane = base_lane;
@@ -330,7 +345,7 @@ struct CIMArrayTbCase : sc_module {
   }
 
   // Load a replicated tile through fanout writes covering all input lanes
-  void load_b_operands_fanout(ElementSet set, int phase) {
+  void load_b_operands_fanout(BSet set, int phase) {
     for (int chunk = 0; chunk < Dut::ELEMENT_B_BEATS; chunk++) {
       for (int base_lane = 0; base_lane < INPUT_LANES; base_lane += MULTICAST_GROUPS) {
         drive_store_fanout(set, base_lane, chunk, phase);
@@ -340,7 +355,7 @@ struct CIMArrayTbCase : sc_module {
   }
 
   // Load fanout B operands with an empty cycle after every store request
-  void load_b_operands_fanout_with_idle(ElementSet set, int phase) {
+  void load_b_operands_fanout_with_idle(BSet set, int phase) {
     for (int chunk = 0; chunk < Dut::ELEMENT_B_BEATS; chunk++) {
       for (int base_lane = 0; base_lane < INPUT_LANES; base_lane += MULTICAST_GROUPS) {
         drive_store_fanout(set, base_lane, chunk, phase);
@@ -351,8 +366,7 @@ struct CIMArrayTbCase : sc_module {
   }
 
   // Compute one tile's expected result for one MAC request
-  void compute_expected_tile(ExpectedBeat& beat, int port_tile_idx,
-                             ElementSet set, int reduce_idx, int group_idx,
+  void compute_expected_tile(ExpectedBeat& beat, int port_tile_idx, BSet set, int reduce_idx, int group_idx,
                              int phase) const {
     const int set_idx = set.to_int();
     for (int group_lane = 0; group_lane < MULTICAST_GROUP_LANES; group_lane++) {
@@ -363,39 +377,45 @@ struct CIMArrayTbCase : sc_module {
           const int input_lane_idx = reduce_idx * TILE_INPUT_LANES + til;
           const int element_idx = element_index(input_lane_idx, output_lane_idx);
           for (int chi = 0; chi < CH_IN; chi++) {
-            const long long a_value = decode_value<A_WIDTH>(
-                activation_value(input_lane_idx, chi, phase));
-            const long long b_value = decode_value<B_WIDTH>(
-                expected_weights[set_idx][element_idx][col][chi]);
+            const long long a_value = decode_value<A_WIDTH>(activation_value(input_lane_idx, chi, phase));
+            const long long b_value = decode_value<B_WIDTH>(expected_weights[set_idx][element_idx][col][chi]);
             sum += a_value * b_value;
           }
         }
-        beat.value[port_tile_idx][group_lane][col] = sum;
+        beat.value[port_tile_idx][group_lane][col] += sum;
       }
     }
   }
 
   // Queue the C beats produced by one targeted or broadcast request
-  void queue_expected_beats(ElementSet set, bool bcast, int target_group,
-                            int phase) {
+  void queue_expected_beats(BSet set, bool bcast, int target_group, bool reduce_groups, int phase) {
     if constexpr (C_PORT_ORIENTATION == CIM_C_PORT_REDUCTION_MAJOR) {
       for (int group_idx = 0; group_idx < MULTICAST_GROUPS; group_idx++) {
         if (bcast || group_idx == target_group) {
           ExpectedBeat beat = {};
           for (int reduce_idx = 0; reduce_idx < REDUCTION_GROUPS; reduce_idx++) {
-            compute_expected_tile(beat, reduce_idx, set, reduce_idx, group_idx,
-                                  phase);
+            const int port_tile_idx = reduce_groups ? 0 : reduce_idx;
+            compute_expected_tile(beat, port_tile_idx, set, reduce_idx, group_idx, phase);
           }
           expected_beats.push_back(beat);
         }
       }
+    } else if (reduce_groups) {
+      ExpectedBeat beat = {};
+      for (int group_idx = 0; group_idx < MULTICAST_GROUPS; group_idx++) {
+        if (bcast || group_idx == target_group) {
+          for (int reduce_idx = 0; reduce_idx < REDUCTION_GROUPS; reduce_idx++) {
+            compute_expected_tile(beat, group_idx, set, reduce_idx, group_idx, phase);
+          }
+        }
+      }
+      expected_beats.push_back(beat);
     } else {
       for (int reduce_idx = 0; reduce_idx < REDUCTION_GROUPS; reduce_idx++) {
         ExpectedBeat beat = {};
         for (int group_idx = 0; group_idx < MULTICAST_GROUPS; group_idx++) {
           if (bcast || group_idx == target_group) {
-            compute_expected_tile(beat, group_idx, set, reduce_idx, group_idx,
-                                  phase);
+            compute_expected_tile(beat, group_idx, set, reduce_idx, group_idx, phase);
           }
         }
         expected_beats.push_back(beat);
@@ -404,11 +424,12 @@ struct CIMArrayTbCase : sc_module {
   }
 
   // Build narrow MAC metadata for one request
-  MACRequest build_mac_request(ElementSet set) const {
+  MACRequest build_mac_request(BSet set) const {
     MACRequest request;
     request.set = set;
     request.group = 0;
     request.bcast = 0;
+    request.reduce_groups = 0;
     return request;
   }
 
@@ -417,34 +438,35 @@ struct CIMArrayTbCase : sc_module {
     ABeat a_beat;
     for (int input_lane_idx = 0; input_lane_idx < INPUT_LANES; input_lane_idx++) {
       for (int chi = 0; chi < CH_IN; chi++) {
-        a_beat[input_lane_idx][chi] =
-            activation_value(input_lane_idx, chi, phase);
+        a_beat[input_lane_idx][chi] = activation_value(input_lane_idx, chi, phase);
       }
     }
     return a_beat;
   }
 
   // Drive one group-addressed MAC request and queue its expected beat
-  void drive_mac_group(ElementSet set, int group_idx, int phase) {
+  void drive_mac_group(BSet set, int group_idx, int phase, bool reduce_groups = false) {
     MACRequest request = build_mac_request(set);
     request.group = group_idx;
+    request.reduce_groups = reduce_groups;
 
-    queue_expected_beats(set, false, group_idx, phase);
+    queue_expected_beats(set, false, group_idx, reduce_groups, phase);
 
     mac_request_channel.Push(request);
-    a_channel.Push(build_a_beat(phase));
+    push_a_beat(build_a_beat(phase));
     settle();
   }
 
   // Drive one broadcast MAC request and queue expected beats for every group
-  void drive_mac_bcast(ElementSet set, int phase) {
+  void drive_mac_bcast(BSet set, int phase, bool reduce_groups = false) {
     MACRequest request = build_mac_request(set);
     request.bcast = 1;
+    request.reduce_groups = reduce_groups;
 
-    queue_expected_beats(set, true, 0, phase);
+    queue_expected_beats(set, true, 0, reduce_groups, phase);
 
     mac_request_channel.Push(request);
-    a_channel.Push(build_a_beat(phase));
+    push_a_beat(build_a_beat(phase));
     settle();
   }
 
@@ -459,16 +481,15 @@ struct CIMArrayTbCase : sc_module {
     for (int port_tile_idx = 0; port_tile_idx < C_PORT_TILES; port_tile_idx++) {
       for (int group_lane = 0; group_lane < MULTICAST_GROUP_LANES; group_lane++) {
         for (int col = 0; col < Dut::ELEMENT_B_COLS; col++) {
-          const ac_int<Dut::C_WIDTH, false> expected_bits =
-              encode_value<Dut::C_WIDTH>(expected.value[port_tile_idx][group_lane][col]);
+          const ac_int<Dut::RESULT_WIDTH, false> expected_bits =
+              encode_value<Dut::RESULT_WIDTH>(expected.value[port_tile_idx][group_lane][col]);
           if (actual[port_tile_idx][group_lane][col] == expected_bits) {
             continue;
           }
 
           std::ostringstream text;
-          text << "unexpected c beat[" << port_tile_idx << "][" << group_lane << "]["
-               << col << "] got " << actual[port_tile_idx][group_lane][col].to_int()
-               << " expected " << expected_bits.to_int();
+          text << "unexpected c beat[" << port_tile_idx << "][" << group_lane << "][" << col << "] got "
+               << actual[port_tile_idx][group_lane][col].to_int() << " expected " << expected_bits.to_int();
           require(false, text.str());
         }
       }
@@ -484,14 +505,11 @@ struct CIMArrayTbCase : sc_module {
   }
 
   // Return a valid B set for one deterministic transaction phase
-  ElementSet transaction_set(int phase) const {
-    return ElementSet(phase % B_SETS);
-  }
+  BSet transaction_set(int phase) const { return BSet(phase % B_SETS); }
 
   // Run one broadcast transaction with optional idle and backpressure cycles
-  void run_bcast_transaction(int phase, bool insert_idle_cycles,
-                             int c_backpressure_cycles) {
-    const ElementSet set = transaction_set(phase);
+  void run_bcast_transaction(int phase, bool insert_idle_cycles, int c_backpressure_cycles) {
+    const BSet set = transaction_set(phase);
     load_b_operands(set, phase);
 
     if (insert_idle_cycles) {
@@ -517,15 +535,27 @@ struct CIMArrayTbCase : sc_module {
     run_bcast_transaction(13, false, 3);
   }
 
+  // Check optional array-boundary reduction for broadcast and targeted requests
+  void run_reduced_result_check() {
+    const BSet set = transaction_set(17);
+    load_b_operands(set, 17);
+
+    drive_mac_bcast(set, 19, true);
+    drain_expected_beats();
+
+    drive_mac_group(set, MULTICAST_GROUPS - 1, 23, true);
+    drain_expected_beats();
+  }
+
   // Check B loads across explicit idle gaps between store requests
   void run_gapped_store_check() {
-    const ElementSet direct_set = transaction_set(117);
+    const BSet direct_set = transaction_set(117);
     load_b_operands_with_idle(direct_set, 117);
     drive_mac_bcast(direct_set, 121);
     drain_expected_beats();
 
     if constexpr ((INPUT_LANES % MULTICAST_GROUPS) == 0) {
-      const ElementSet fanout_set = transaction_set(127);
+      const BSet fanout_set = transaction_set(127);
       load_b_operands_fanout_with_idle(fanout_set, 127);
       drive_mac_bcast(fanout_set, 131);
       drain_expected_beats();
@@ -534,8 +564,8 @@ struct CIMArrayTbCase : sc_module {
 
   // Check that loaded rows remain independently addressable across later loads
   void run_set_retention_check() {
-    const ElementSet first_set = ElementSet(0);
-    const ElementSet second_set = ElementSet((B_SETS > 1) ? 1 : 0);
+    const BSet first_set = BSet(0);
+    const BSet second_set = BSet((B_SETS > 1) ? 1 : 0);
 
     load_b_operands(first_set, 21);
     load_b_operands(second_set, 29);
@@ -552,7 +582,7 @@ struct CIMArrayTbCase : sc_module {
 
   // Check per-group issue of distinct phases to every group back to back
   void run_group_issue_check() {
-    const ElementSet set = transaction_set(47);
+    const BSet set = transaction_set(47);
     load_b_operands(set, 47);
 
     // Issue one request per chunk without collecting in between
@@ -563,17 +593,38 @@ struct CIMArrayTbCase : sc_module {
     drain_expected_beats();
   }
 
-  // Check that reissuing a busy group serializes on the collected result
-  void run_same_group_reissue_check() {
-    const ElementSet set = transaction_set(53);
-
+  // Check request and A backpressure around one retained request
+  void run_issue_handshake_check() {
+    const BSet set = transaction_set(53);
     load_b_operands(set, 53);
-    drive_mac_group(set, 0, 59);
-    drive_mac_group(set, 0, 61);
-    drain_expected_beats();
 
-    drive_mac_bcast(set, 63);
-    drain_expected_beats();
+    MACRequest first_request = build_mac_request(set);
+    first_request.group = 0;
+    queue_expected_beats(set, false, 0, false, 59);
+    mac_request_channel.Push(first_request);
+
+    MACRequest blocked_request = build_mac_request(set);
+    blocked_request.group = (MULTICAST_GROUPS > 1) ? 1 : 0;
+    require(!mac_request_channel.PushNB(blocked_request), "accepted a second request while the first awaited A");
+
+    push_a_beat(build_a_beat(59));
+
+    MACRequest second_request = build_mac_request(set);
+    second_request.group = 0;
+    queue_expected_beats(set, false, 0, false, 61);
+    mac_request_channel.Push(second_request);
+
+    const ABeat second_beat = build_a_beat(61);
+    pending_a_channel.Push(second_beat);
+
+    constexpr int kTargetedRawBeats = (C_PORT_ORIENTATION == CIM_C_PORT_REDUCTION_MAJOR) ? 1 : REDUCTION_GROUPS;
+    for (int beat = 0; beat < kTargetedRawBeats; beat++) {
+      pop_and_check();
+    }
+    a_transfer_done.SyncPop();
+    for (int beat = 0; beat < kTargetedRawBeats; beat++) {
+      pop_and_check();
+    }
   }
 
   // Load a replicated tile via fanout writes, then verify per-group and broadcast MACs
@@ -582,7 +633,7 @@ struct CIMArrayTbCase : sc_module {
       return;
     }
 
-    const ElementSet set = transaction_set(107);
+    const BSet set = transaction_set(107);
     load_b_operands_fanout(set, 107);
 
     // Groups hold identical tiles; distinct phases verify per-group A delivery
@@ -597,7 +648,7 @@ struct CIMArrayTbCase : sc_module {
 
   // Check long C-channel backpressure after all elements have produced results
   void run_long_c_backpressure_check() {
-    const ElementSet set = transaction_set(67);
+    const BSet set = transaction_set(67);
 
     load_b_operands(set, 67);
     drive_mac_bcast(set, 71);
@@ -611,8 +662,8 @@ struct CIMArrayTbCase : sc_module {
 
   // Check stores to another set while a MAC is already in flight
   void run_store_during_mac_check() {
-    const ElementSet mac_set = ElementSet(0);
-    const ElementSet store_set = ElementSet((B_SETS > 1) ? 1 : 0);
+    const BSet mac_set = BSet(0);
+    const BSet store_set = BSet((B_SETS > 1) ? 1 : 0);
 
     load_b_operands(mac_set, 79);
     drive_mac_bcast(mac_set, 83);
@@ -626,7 +677,7 @@ struct CIMArrayTbCase : sc_module {
 
   // Reset an in-flight transaction and confirm the next one completes cleanly
   void run_reset_recovery_check() {
-    const ElementSet set = transaction_set(31);
+    const BSet set = transaction_set(31);
     load_b_operands(set, 31);
     drive_mac_group(set, 0, 37);
 
@@ -648,10 +699,11 @@ struct CIMArrayTbCase : sc_module {
     clear_expected_state();
 
     run_basic_transaction_checks();
+    run_reduced_result_check();
     run_gapped_store_check();
     run_set_retention_check();
     run_group_issue_check();
-    run_same_group_reissue_check();
+    run_issue_handshake_check();
     run_fanout_write_check();
     run_long_c_backpressure_check();
     run_store_during_mac_check();
@@ -671,46 +723,35 @@ int sc_main(int argc, char** argv) {
   (void)argv;
 
 #ifndef SCVERIFY
-  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2,
-                         CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, false, 2, 3, 1, 1>
-      bcast_dense_unsigned("bcast_dense_unsigned");
+  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, false, 2, 3, 1, 1> bcast_dense_unsigned(
+      "bcast_dense_unsigned");
 
-  CIMArrayTbCase<5, 2, 3, 4, 4, 16, 1, 4,
-                         CIM_MODE_BIT_PARALLEL_VALUE, 5, 4, true, 3, 2, 1, 1>
+  CIMArrayTbCase<5, 2, 3, 4, 4, 16, 1, 4, CIM_MODE_BIT_PARALLEL_VALUE, 5, 4, true, 3, 2, 1, 1>
       reduce_input_lanes_signed("reduce_input_lanes_signed");
 
-  CIMArrayTbCase<4, 4, 2, 4, 4, 12, 2, 2,
-                         CIM_MODE_BIT_PARALLEL_VALUE, 4, 8, true, 2, 2, 1, 1>
-      wider_b_width_signed("wider_b_width_signed");
+  CIMArrayTbCase<4, 4, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 8, true, 2, 2, 1, 1> wider_b_width_signed(
+      "wider_b_width_signed");
 
-  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2,
-                         CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, true, 2, 2, 1, 2>
-      grouped_parallel_signed("grouped_parallel_signed");
+  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, true, 2, 2, 1, 2> grouped_parallel_signed(
+      "grouped_parallel_signed");
 
-  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2,
-                         CIM_MODE_BIT_SERIAL_VALUE, 4, 4, false, 2, 1, 1, 2>
-      grouped_serial_unsigned("grouped_serial_unsigned");
+  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_SERIAL_VALUE, 4, 4, false, 2, 1, 1, 2> grouped_serial_unsigned(
+      "grouped_serial_unsigned");
 
   // Two reduction-group rows by two multicast-group columns of 2 x 2 tiles
-  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2,
-                         CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, true, 2, 2, 2, 2>
+  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, true, 2, 2, 2, 2>
       segmented_parallel_signed("segmented_parallel_signed");
 
-  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2,
-                         CIM_MODE_BIT_SERIAL_VALUE, 4, 4, false, 2, 2, 2, 2>
-      segmented_serial_unsigned("segmented_serial_unsigned");
+  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_SERIAL_VALUE, 4, 4, false, 2, 2, 2, 2> segmented_serial_unsigned(
+      "segmented_serial_unsigned");
 
   // Multicast-major C beats span three groups and stream two reduction rows
-  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2,
-                         CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, true, 2, 2, 2, 3,
-                         2, 3, 3, CIM_C_PORT_MULTICAST_MAJOR>
+  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, true, 2, 2, 2, 3, 2, 3, 3,
+                 CIM_C_PORT_MULTICAST_MAJOR>
       multicast_major_signed("multicast_major_signed");
 #else
-  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2,
-                         CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, false, 2, 2, 2, 3,
-                         2, 3,
-                         (CIM_TEST_C_PORT_ORIENTATION == CIM_C_PORT_REDUCTION_MAJOR) ? 2 : 3,
-                         CIM_TEST_C_PORT_ORIENTATION>
+  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, false, 2, 2, 2, 3, 2, 3,
+                 (CIM_TEST_C_PORT_ORIENTATION == CIM_C_PORT_REDUCTION_MAJOR) ? 2 : 3, CIM_TEST_C_PORT_ORIENTATION>
       cim_array_scverify("cim_array_scverify");
 #endif
 

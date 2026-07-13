@@ -14,27 +14,12 @@
 static constexpr int CIM_C_PORT_REDUCTION_MAJOR = 0;
 static constexpr int CIM_C_PORT_MULTICAST_MAJOR = 1;
 
-// CIMArray reduces streamed A rows against the resident B operand. It is a
+// CIMArray multiplies streamed A operands by resident B operands. It is a
 // REDUCTION_GROUPS x MULTICAST_GROUPS grid of CIMTiles, each containing
 // TILE_INPUT_LANES x TILE_OUTPUT_LANES CIMElements and reducing its input lanes
-// into one registered result row per tile output lane.
-//
-// Each tile owns its A operand station. The array drives one shared delivery bus
-// and pulses the selected multicast-group column, so different columns can hold
-// different A rows over multi-cycle issue windows. A MAC request either targets
-// one column or is broadcast to every column;
-// MULTICAST_GROUPS=1 makes the two equivalent. C beats are emitted in issue
-// order and pack either reduction-group tiles or multicast-group tiles according
-// to the compile-time C_PORT_ORIENTATION.
-//
-// The store side dually addresses a single input lane per write (its control
-// partition of the input axis); see StoreRequest. The array is the tile grid
-// plus three control threads; channel and ordering state lives here, while each
-// tile is self-contained (registered issue station, registered result, SC writes).
-template <int CH_IN, int CH_OUT, int B_SETS, int BASE_A_WIDTH,
-          int BASE_B_WIDTH, int BASE_C_WIDTH, int WRITE_CH_IN, int MAC_LATENCY,
-          int MODE, int A_WIDTH, int B_WIDTH, bool SIGNED,
-          int TILE_INPUT_LANES, int TILE_OUTPUT_LANES,
+// into one registered result row per output lane.
+template <int CH_IN, int CH_OUT, int B_SETS, int BASE_A_WIDTH, int BASE_B_WIDTH, int BASE_C_WIDTH, int WRITE_CH_IN,
+          int MAC_LATENCY, int MODE, int A_WIDTH, int B_WIDTH, bool SIGNED, int TILE_INPUT_LANES, int TILE_OUTPUT_LANES,
           // Input-axis summation partition: the input lanes are split into
           // REDUCTION_GROUPS independent reductions, so a multicast-group column
           // holds REDUCTION_GROUPS tiles, each a shorter-contraction vector-matrix
@@ -82,8 +67,7 @@ template <int CH_IN, int CH_OUT, int B_SETS, int BASE_A_WIDTH,
           int B_PORT_TILES,
           // C_PORT_TILES: complete tile results per transfer. Reduction-major
           // packs one multicast-group column; multicast-major packs one
-          // reduction-group row. Counted in tiles so width stays independent of
-          // each tile's output-lane geometry
+          // reduction-group row.
           int C_PORT_TILES,
           // Compile-time C beat layout: reduction-major favors independently
           // addressed groups; multicast-major favors broadcast output parallelism
@@ -91,41 +75,31 @@ template <int CH_IN, int CH_OUT, int B_SETS, int BASE_A_WIDTH,
 SC_MODULE(CIMArray) {
  private:
   // Return the ceil log2 used for static port widths
-  static constexpr int log2_ceil(int value) {
-    return (value <= 1) ? 0 : 1 + log2_ceil((value + 1) / 2);
-  }
+  static constexpr int log2_ceil(int value) { return (value <= 1) ? 0 : 1 + log2_ceil((value + 1) / 2); }
 
   // Return the ceiling division for static transfer counts
-  static constexpr int ceil_div(int dividend, int divisor) {
-    return (dividend + divisor - 1) / divisor;
-  }
+  static constexpr int ceil_div(int dividend, int divisor) { return (dividend + divisor - 1) / divisor; }
 
-  using Element = CIMElement<CH_IN, CH_OUT, B_SETS, BASE_A_WIDTH,
-                             BASE_B_WIDTH, BASE_C_WIDTH, WRITE_CH_IN, MAC_LATENCY,
+  using Element = CIMElement<CH_IN, CH_OUT, B_SETS, BASE_A_WIDTH, BASE_B_WIDTH, BASE_C_WIDTH, WRITE_CH_IN, MAC_LATENCY,
                              MODE, A_WIDTH, B_WIDTH, SIGNED>;
 
   // One tile is the intersection of one reduction and one multicast group
-  using Tile = CIMTile<CH_IN, CH_OUT, B_SETS, BASE_A_WIDTH, BASE_B_WIDTH,
-                       BASE_C_WIDTH, WRITE_CH_IN, MAC_LATENCY, MODE, A_WIDTH,
-                       B_WIDTH, SIGNED, TILE_INPUT_LANES, TILE_OUTPUT_LANES>;
+  using Tile = CIMTile<CH_IN, CH_OUT, B_SETS, BASE_A_WIDTH, BASE_B_WIDTH, BASE_C_WIDTH, WRITE_CH_IN, MAC_LATENCY, MODE,
+                       A_WIDTH, B_WIDTH, SIGNED, TILE_INPUT_LANES, TILE_OUTPUT_LANES>;
 
  public:
   static_assert(TILE_INPUT_LANES > 0, "TILE_INPUT_LANES must be positive");
   static_assert(TILE_OUTPUT_LANES > 0, "TILE_OUTPUT_LANES must be positive");
   static_assert(REDUCTION_GROUPS > 0, "REDUCTION_GROUPS must be positive");
   static_assert(MULTICAST_GROUPS > 0, "MULTICAST_GROUPS must be positive");
-  static_assert(A_PORT_TILES == REDUCTION_GROUPS,
-                "CIMArray currently delivers one full column per A transfer");
-  static_assert(B_PORT_TILES == MULTICAST_GROUPS,
-                "CIMArray currently delivers one full write-row per B transfer");
-  static_assert(C_PORT_ORIENTATION == CIM_C_PORT_REDUCTION_MAJOR ||
-                    C_PORT_ORIENTATION == CIM_C_PORT_MULTICAST_MAJOR,
+  static_assert(A_PORT_TILES == REDUCTION_GROUPS, "CIMArray currently delivers one full column per A transfer");
+  static_assert(B_PORT_TILES == MULTICAST_GROUPS, "CIMArray currently delivers one full write-row per B transfer");
+  static_assert(C_PORT_ORIENTATION == CIM_C_PORT_REDUCTION_MAJOR || C_PORT_ORIENTATION == CIM_C_PORT_MULTICAST_MAJOR,
                 "C_PORT_ORIENTATION must be reduction-major or multicast-major");
-  static_assert(C_PORT_TILES ==
-                    ((C_PORT_ORIENTATION == CIM_C_PORT_REDUCTION_MAJOR)
-                         ? REDUCTION_GROUPS
-                         : MULTICAST_GROUPS),
-                "C_PORT_TILES must span the selected C port orientation");
+  // Current transfers use one complete grid slice; a future port may assemble that slice over multiple transfers
+  static_assert(
+      C_PORT_TILES == ((C_PORT_ORIENTATION == CIM_C_PORT_REDUCTION_MAJOR) ? REDUCTION_GROUPS : MULTICAST_GROUPS),
+      "C_PORT_TILES must span the complete selected C grid slice");
 
   static constexpr int INPUT_LANES = TILE_INPUT_LANES * REDUCTION_GROUPS;
   static constexpr int OUTPUT_LANES = TILE_OUTPUT_LANES * MULTICAST_GROUPS;
@@ -136,10 +110,11 @@ SC_MODULE(CIMArray) {
   static constexpr int A_COLS = ELEMENT_A_COLS * INPUT_LANES;
   static constexpr int C_COLS = ELEMENT_B_COLS * OUTPUT_LANES;
   static constexpr int ELEMENT_C_WIDTH = Element::C_WIDTH;
-  // The tile owns the input-lane reduction and its result width
+  // The tile owns the input-lane reduction and its raw result width
   static constexpr int C_WIDTH = Tile::C_WIDTH;
-  static constexpr int ELEMENT_B_BEATS =
-      ceil_div(ELEMENT_A_COLS, ELEMENT_B_WRITE_ROWS);
+  static constexpr int REDUCTION_GUARD_WIDTH = (REDUCTION_GROUPS <= 1) ? 0 : log2_ceil(REDUCTION_GROUPS);
+  static constexpr int RESULT_WIDTH = C_WIDTH + REDUCTION_GUARD_WIDTH;
+  static constexpr int ELEMENT_B_BEATS = ceil_div(ELEMENT_A_COLS, ELEMENT_B_WRITE_ROWS);
 
   // output lane:  0     1  |  2     3
   // group:        └─ 0 ─┘  |  └─ 1 ─┘   contiguous lanes
@@ -150,7 +125,7 @@ SC_MODULE(CIMArray) {
   using ElementAValue = ac_int<A_WIDTH, false>;
   using ElementBValue = ac_int<B_WIDTH, false>;
   using ElementCValue = ac_int<ELEMENT_C_WIDTH, false>;
-  using ElementSet = ac_int<Element::BITS_SET, false>;
+  using BSet = typename Element::BSet;
   using ElementAddr = ac_int<Element::BITS_CH_IN, false>;
 
   // CIMElement-level input/output types
@@ -159,7 +134,9 @@ SC_MODULE(CIMArray) {
   using ElementCOutput = Pack1D<ElementCValue, ELEMENT_B_COLS>;
 
   // CIMArray-level input/output types
-  using CValue = ac_int<C_WIDTH, false>;
+  using TileCValue = typename Tile::CValue;
+  using TileCOutput = typename Tile::COutput;
+  using CValue = ac_int<RESULT_WIDTH, false>;
   using COutput = Pack1D<CValue, ELEMENT_B_COLS>;
   using ABeat = Pack1D<ElementAInput, INPUT_LANES>;
   using BBeat = Pack1D<ElementBInput, OUTPUT_LANES>;
@@ -187,35 +164,39 @@ SC_MODULE(CIMArray) {
 
   // MACRequest identifies the B set and multicast-group destination for one A beat
   struct MACRequest {
-    ElementSet set;
-    MulticastGroupIndex group;      // target multicast group; ignored when bcast is set
-    ac_int<1, false> bcast;  // deliver this row to every multicast group and start them together
+    BSet set;
+    MulticastGroupIndex group;  // target multicast group; ignored when bcast is set
+    ac_int<1, false> bcast;     // deliver this row to every multicast group and start them together
+    ac_int<1, false> reduce_groups;  // sum reduction groups into one result beat
 
-    static const unsigned int width = Element::BITS_SET + MULTICAST_GROUP_INDEX_WIDTH + 1;
+    static const unsigned int width = Element::BITS_SET + MULTICAST_GROUP_INDEX_WIDTH + 2;
 
     template <unsigned int Size>
     void Marshall(Marshaller<Size>& m) {
       m & set;
       m & group;
       m & bcast;
+      m & reduce_groups;
     }
 
     inline friend void sc_trace(sc_trace_file* tf, const MACRequest& request, const std::string& name) {
       sc_trace(tf, request.set, name + ".set");
       sc_trace(tf, request.group, name + ".group");
       sc_trace(tf, request.bcast, name + ".bcast");
+      sc_trace(tf, request.reduce_groups, name + ".reduce_groups");
     }
 
     inline friend std::ostream& operator<<(ostream& os, const MACRequest& request) {
       os << request.set << " ";
       os << request.group << " ";
       os << request.bcast << " ";
+      os << request.reduce_groups << " ";
       return os;
     }
 
     inline friend bool operator==(const MACRequest& lhs, const MACRequest& rhs) {
-      return lhs.set == rhs.set && lhs.group == rhs.group &&
-             lhs.bcast == rhs.bcast;
+      return lhs.set == rhs.set && lhs.group == rhs.group && lhs.bcast == rhs.bcast &&
+             lhs.reduce_groups == rhs.reduce_groups;
     }
   };
 
@@ -242,16 +223,23 @@ SC_MODULE(CIMArray) {
   //   input lane 0:          s0c0  s0c1 | s0c0  s0c1   <- section 0, replicated
   //   input lane 1:          s1c0  s1c1 | s1c0  s1c1   <- section 1, replicated
   struct StoreRequest {
-    ElementSet set;
+    BSet set;
     InputLaneIndex lane;  // target input lane; the base lane of a fanout write
     ElementAddr waddr;
-    ac_int<1, false> fanout;    // replicate the packed sections across all multicast groups
+    ac_int<1, false> fanout;  // replicate the packed sections across all multicast groups
     BBeat data;
 
-    static const unsigned int width = Element::BITS_SET + INPUT_LANE_INDEX_WIDTH + Element::BITS_CH_IN + 1 + BBeat::width;
+    static const unsigned int width =
+        Element::BITS_SET + INPUT_LANE_INDEX_WIDTH + Element::BITS_CH_IN + 1 + BBeat::width;
 
     template <unsigned int Size>
-    void Marshall(Marshaller<Size>& m) { m & set; m & lane; m & waddr; m & fanout; m & data; }
+    void Marshall(Marshaller<Size>& m) {
+      m & set;
+      m & lane;
+      m & waddr;
+      m & fanout;
+      m & data;
+    }
 
     inline friend void sc_trace(sc_trace_file* tf, const StoreRequest& request, const std::string& name) {
       sc_trace(tf, request.set, name + ".set");
@@ -271,8 +259,8 @@ SC_MODULE(CIMArray) {
     }
 
     inline friend bool operator==(const StoreRequest& lhs, const StoreRequest& rhs) {
-      return lhs.set == rhs.set && lhs.lane == rhs.lane &&
-             lhs.waddr == rhs.waddr && lhs.fanout == rhs.fanout && lhs.data == rhs.data;
+      return lhs.set == rhs.set && lhs.lane == rhs.lane && lhs.waddr == rhs.waddr && lhs.fanout == rhs.fanout &&
+             lhs.data == rhs.data;
     }
   };
 
@@ -283,18 +271,18 @@ SC_MODULE(CIMArray) {
 
   // Shared delivery bus; each selected tile captures it into its local station
   sc_signal<ElementAInput> bus_a[INPUT_LANES];
-  sc_signal<ElementSet> bus_mset;
+  sc_signal<BSet> bus_mset;
   sc_signal<bool> mac_start[MULTICAST_GROUPS];
 
   // Store-side control is shared per input lane; only the B payload differs per element
   sc_signal<bool> store_wen[INPUT_LANES];
   sc_signal<ElementAddr> store_waddr[INPUT_LANES];
-  sc_signal<ElementSet> store_wset[INPUT_LANES];
+  sc_signal<BSet> store_wset[INPUT_LANES];
   sc_signal<ElementBInput> element_b[INPUT_LANES][OUTPUT_LANES];
 
   // Bind each tile's local registered result and retirement toggle. These
   // sc_signals are array interconnect, not additional array-level storage
-  sc_signal<COutput> tile_c[REDUCTION_GROUPS][MULTICAST_GROUPS][MULTICAST_GROUP_LANES];
+  sc_signal<TileCOutput> tile_c[REDUCTION_GROUPS][MULTICAST_GROUPS][MULTICAST_GROUP_LANES];
   sc_signal<bool> tile_c_retire[REDUCTION_GROUPS][MULTICAST_GROUPS];
   sc_signal<bool> tile_mac_ready[REDUCTION_GROUPS][MULTICAST_GROUPS];
 
@@ -315,17 +303,17 @@ SC_MODULE(CIMArray) {
   using CreditCount = ac_int<CREDIT_COUNT_WIDTH, false>;
   sc_signal<CreditCount> collected_count[MULTICAST_GROUPS];
 
-  // InflightToken records {bcast, mcast_group} of one accepted request in issue order
-  using InflightToken = ac_int<MULTICAST_GROUP_INDEX_WIDTH + 1, false>;
+  // InflightToken records {reduce_groups, bcast, mcast_group} in issue order
+  using InflightToken = ac_int<MULTICAST_GROUP_INDEX_WIDTH + 2, false>;
 
-  // Groups retire independently and CBeat carries only one group, so this narrow
-  // token queue selects the next permitted group and preserves request order.
+  // Groups retire independently, so this narrow token queue preserves request order
+  // across raw and reduced result cardinalities
   // Required depth is the maximum logical outstanding-token count. Actual depth
   // rounds that count up to a power of two for a binary circular pointer and is
   // at least two so the storage index and pointer wrap bit both have valid widths
   static constexpr int INFLIGHT_QUEUE_REQUIRED_DEPTH = GROUP_RESULT_CAPACITY * MULTICAST_GROUPS;
-  static constexpr int INFLIGHT_QUEUE_DEPTH = (INFLIGHT_QUEUE_REQUIRED_DEPTH <= 1) ?
-      2 : 1 << log2_ceil(INFLIGHT_QUEUE_REQUIRED_DEPTH);
+  static constexpr int INFLIGHT_QUEUE_DEPTH =
+      (INFLIGHT_QUEUE_REQUIRED_DEPTH <= 1) ? 2 : 1 << log2_ceil(INFLIGHT_QUEUE_REQUIRED_DEPTH);
   static constexpr int INFLIGHT_QUEUE_INDEX_WIDTH = log2_ceil(INFLIGHT_QUEUE_DEPTH);
   using InflightQueuePointer = ac_int<INFLIGHT_QUEUE_INDEX_WIDTH + 1, false>;
 
@@ -376,12 +364,10 @@ SC_MODULE(CIMArray) {
         // Result and B payload are indexed by the tile's output lanes
         for (int group_lane = 0; group_lane < MULTICAST_GROUP_LANES; group_lane++) {
           const int output_lane_idx = group_idx * MULTICAST_GROUP_LANES + group_lane;
-          tiles[reduce_idx][group_idx]->c[group_lane](
-              tile_c[reduce_idx][group_idx][group_lane]);
+          tiles[reduce_idx][group_idx]->c[group_lane](tile_c[reduce_idx][group_idx][group_lane]);
           for (int til = 0; til < TILE_INPUT_LANES; til++) {
             const int input_lane_idx = reduce_idx * TILE_INPUT_LANES + til;
-            tiles[reduce_idx][group_idx]->b[til][group_lane](
-                element_b[input_lane_idx][output_lane_idx]);
+            tiles[reduce_idx][group_idx]->b[til][group_lane](element_b[input_lane_idx][output_lane_idx]);
           }
         }
       }
@@ -424,9 +410,8 @@ SC_MODULE(CIMArray) {
     for (int input_lane_idx = 0; input_lane_idx < INPUT_LANES; input_lane_idx++) {
       // A fanout write covers MULTICAST_GROUPS consecutive input lanes from the base lane
       const int section_idx = input_lane_idx - request.lane.to_int();
-      const bool lane_active = request_valid && (fanout_write
-          ? (section_idx >= 0 && section_idx < MULTICAST_GROUPS)
-          : (request.lane == input_lane_idx));
+      const bool lane_active = request_valid && (fanout_write ? (section_idx >= 0 && section_idx < MULTICAST_GROUPS)
+                                                              : (request.lane == input_lane_idx));
       store_wen[input_lane_idx].write(lane_active);
       if (lane_active) {
         store_waddr[input_lane_idx].write(request.waddr);
@@ -435,11 +420,10 @@ SC_MODULE(CIMArray) {
         for (int output_lane_idx = 0; output_lane_idx < OUTPUT_LANES; output_lane_idx++) {
           // Fanout beats carry one section per covered input lane; every multicast
           // group receives the same column positions of that section
-          const int beat_lane_idx = fanout_write
-              ? section_idx * MULTICAST_GROUP_LANES + (output_lane_idx % MULTICAST_GROUP_LANES)
-              : output_lane_idx;
-          element_b[input_lane_idx][output_lane_idx].write(
-              request.data[beat_lane_idx]);
+          const int beat_lane_idx =
+              fanout_write ? section_idx * MULTICAST_GROUP_LANES + (output_lane_idx % MULTICAST_GROUP_LANES)
+                           : output_lane_idx;
+          element_b[input_lane_idx][output_lane_idx].write(request.data[beat_lane_idx]);
         }
       }
     }
@@ -464,8 +448,8 @@ SC_MODULE(CIMArray) {
       // lane + MULTICAST_GROUPS - 1; reject a base whose covered range would
       // run past the last input lane
       if (request_valid && request.fanout != 0 && request.lane.to_int() + MULTICAST_GROUPS > INPUT_LANES) {
-        std::cerr << "Error: CIMArray fanout write from base lane "
-                  << request.lane.to_int() << " exceeds INPUT_LANES" << std::endl;
+        std::cerr << "Error: CIMArray fanout write from base lane " << request.lane.to_int() << " exceeds INPUT_LANES"
+                  << std::endl;
       }
 #endif
 
@@ -480,8 +464,7 @@ SC_MODULE(CIMArray) {
   }
 
   // Return whether the inflight token queue has no free entry
-  static bool inflight_queue_full(const InflightQueuePointer& write_pointer,
-                                  const InflightQueuePointer& read_pointer) {
+  static bool inflight_queue_full(const InflightQueuePointer& write_pointer, const InflightQueuePointer& read_pointer) {
     return InflightQueuePointer(write_pointer - read_pointer) == InflightQueuePointer(INFLIGHT_QUEUE_DEPTH);
   }
 
@@ -497,8 +480,7 @@ SC_MODULE(CIMArray) {
   }
 
   // Return whether every selected tile can accept input and retain its result
-  bool mac_request_ready(const MACRequest& request,
-                         const CreditCount issued_count[MULTICAST_GROUPS]) const {
+  bool mac_request_ready(const MACRequest& request, const CreditCount issued_count[MULTICAST_GROUPS]) const {
     // Init to ready
     bool ready = mac_target_valid(request);
 #pragma hls_unroll yes
@@ -513,9 +495,7 @@ SC_MODULE(CIMArray) {
         }
       }
     }
-    return ready && !inflight_queue_full(
-                        inflight_write_pointer.read(),
-                        inflight_read_pointer.read());
+    return ready && !inflight_queue_full(inflight_write_pointer.read(), inflight_read_pointer.read());
   }
 
   // Drive one A beat onto the tile delivery bus
@@ -527,7 +507,7 @@ SC_MODULE(CIMArray) {
     }
   }
 
-  // Issue a pending mac request when its A beat and group tiles are ready
+  // Issue one MAC request after its A beat and selected tiles are ready
   void issue_mac() {
     mac_request_channel.Reset();
     a_channel.Reset();
@@ -560,73 +540,61 @@ SC_MODULE(CIMArray) {
 
     wait();
 
-    MACRequest pending_request;
-    pending_request.set = 0;
-    pending_request.group = 0;
-    pending_request.bcast = 0;
-    bool pending_valid = false;
-
-#pragma hls_pipeline_init_interval 1
-#pragma hls_pipeline_stall_mode bubble
     while (true) {
-      // Every loop iteration represents exactly one controller cycle in native
-      // SystemC and synthesis; PopNB itself is explicitly non-waiting
-      ABeat a_beat;
-      // Build exactly one-cycle mac_start pulses
-      bool issue_this_cycle = false;
-
-      // First retain only narrow metadata. Once its selected tiles and result
-      // slots are available, pop the associated wide A beat and issue atomically
-      if (!pending_valid) {
-        MACRequest next_request;
-        const bool next_valid = mac_request_channel.PopNB(next_request, false);
-
-        if (next_valid) {
-          pending_request = next_request;
-          pending_valid = true;
+      // The request transfer retains metadata but does not acknowledge physical issue
+      // Blocking pops deassert ready after each transfer; conditional PopNB(false)
+      // would leave stale ready asserted while a retained request waits
+      const MACRequest request = mac_request_channel.Pop();
 
 #ifndef __SYNTHESIS__
-          if (pending_request.bcast == 0 && pending_request.group.to_int() >= MULTICAST_GROUPS) {
-            std::cerr << "Error: CIMArray MAC request targets multicast group "
-                      << pending_request.group.to_int() << " beyond MULTICAST_GROUPS" << std::endl;
-          }
-#endif
-        }
-      } else if (mac_request_ready(pending_request, issued_count)) {
-        const bool a_valid = a_channel.PopNB(a_beat, false);
-        if (a_valid) {
-          drive_mac_operand(pending_request, a_beat);
-          issue_this_cycle = true;
-
-#pragma hls_unroll yes
-          for (int group_idx = 0; group_idx < MULTICAST_GROUPS; group_idx++) {
-            if (mac_group_selected(pending_request, group_idx)) {
-              issued_count[group_idx] = issued_count[group_idx] + CreditCount(1);
-            }
-          }
-
-          InflightToken token = 0;
-          // Low bits select the group; the top bit marks a broadcast token
-          token.set_slc(0, pending_request.group);
-          token.set_slc(MULTICAST_GROUP_INDEX_WIDTH, pending_request.bcast);
-          inflight_queue[inflight_queue_index(inflight_pointer)].write(token);
-          inflight_pointer += InflightQueuePointer(1);
-          inflight_write_pointer.write(inflight_pointer);
-
-          pending_valid = false;
-        }
+      if (request.bcast == 0 && request.group.to_int() >= MULTICAST_GROUPS) {
+        std::cerr << "Error: CIMArray MAC request targets multicast group " << request.group.to_int()
+                  << " beyond MULTICAST_GROUPS" << std::endl;
       }
+#endif
+
+      while (!mac_request_ready(request, issued_count)) {
+        wait();
+      }
+
+      // This A transfer is the issue commit because capacity is already reserved
+      ABeat a_beat;
+      a_beat = a_channel.Pop();
+      drive_mac_operand(request, a_beat);
+
 #pragma hls_unroll yes
       for (int group_idx = 0; group_idx < MULTICAST_GROUPS; group_idx++) {
-        mac_start[group_idx].write(issue_this_cycle && mac_group_selected(pending_request, group_idx));
+        if (mac_group_selected(request, group_idx)) {
+          issued_count[group_idx] = issued_count[group_idx] + CreditCount(1);
+        }
       }
+
+      InflightToken token = 0;
+      token.set_slc(0, request.group);
+      token.set_slc(MULTICAST_GROUP_INDEX_WIDTH, request.bcast);
+      token.set_slc(MULTICAST_GROUP_INDEX_WIDTH + 1, request.reduce_groups);
+      inflight_queue[inflight_queue_index(inflight_pointer)].write(token);
+      inflight_pointer += InflightQueuePointer(1);
+      inflight_write_pointer.write(inflight_pointer);
+
+#pragma hls_unroll yes
+      for (int group_idx = 0; group_idx < MULTICAST_GROUPS; group_idx++) {
+        mac_start[group_idx].write(mac_group_selected(request, group_idx));
+      }
+
+      // The following edge is where selected tiles sample mac_start
       wait();
+
+#pragma hls_unroll yes
+      for (int group_idx = 0; group_idx < MULTICAST_GROUPS; group_idx++) {
+        mac_start[group_idx].write(false);
+      }
     }
   }
 
-  // Return whether every tile in one column has flipped its retire toggle past
-  // the seen state. The column's R tiles issue together and retire together
-  bool group_retired(int group_idx, const bool seen_retire[MULTICAST_GROUPS]) const {
+  // Return whether one reduction-major beat is ready for a multicast group
+  // Its R tiles share an issue and must all retire before their partials can be packed
+  bool reduction_major_beat_retired(int group_idx, const bool seen_retire[MULTICAST_GROUPS]) const {
     bool retired = true;
 #pragma hls_unroll yes
     for (int reduce_idx = 0; reduce_idx < REDUCTION_GROUPS; reduce_idx++) {
@@ -635,38 +603,95 @@ SC_MODULE(CIMArray) {
     return retired;
   }
 
-  // Return whether every selected tile in one reduction row has retired
-  bool reduction_row_retired(int reduce_idx, bool bcast, int target_group,
-                             const bool seen_retire[MULTICAST_GROUPS]) const {
+  // Return whether one multicast-major beat is ready for a reduction row
+  // Broadcast beats span every group in the row; targeted beats wait for only the addressed group
+  bool multicast_major_beat_retired(int reduce_idx, bool bcast, int target_group,
+                                    const bool seen_retire[MULTICAST_GROUPS]) const {
     bool retired = true;
 #pragma hls_unroll yes
     for (int group_idx = 0; group_idx < MULTICAST_GROUPS; group_idx++) {
       if (bcast || group_idx == target_group) {
-        retired = retired &&
-                  (tile_c_retire[reduce_idx][group_idx].read() != seen_retire[group_idx]);
+        retired = retired && (tile_c_retire[reduce_idx][group_idx].read() != seen_retire[group_idx]);
       }
     }
     return retired;
   }
 
-  // Pack one column's registered results into a C beat: outer index is the
-  // reduction group, inner the output lane. No reduction here -- each tile
-  // already reduced across its own input lanes, and none sum across tiles
-  CBeat pack_group_output(int group_idx) const {
+  // Return whether every selected reduction and multicast group has retired
+  bool reduced_multicast_beat_retired(bool bcast, int target_group,
+                                      const bool seen_retire[MULTICAST_GROUPS]) const {
+    bool retired = true;
+#pragma hls_unroll yes
+    for (int group_idx = 0; group_idx < MULTICAST_GROUPS; group_idx++) {
+      if (bcast || group_idx == target_group) {
+#pragma hls_unroll yes
+        for (int reduce_idx = 0; reduce_idx < REDUCTION_GROUPS; reduce_idx++) {
+          retired = retired && (tile_c_retire[reduce_idx][group_idx].read() != seen_retire[group_idx]);
+        }
+      }
+    }
+    return retired;
+  }
+
+  // Sign- or zero-extend one raw tile result to the C-port width
+  static CValue widen_tile_value(TileCValue value) {
+    ac_int<C_WIDTH, SIGNED> decoded;
+    decoded.set_slc(0, value);
+    const ac_int<RESULT_WIDTH, SIGNED> widened = decoded;
+    CValue result;
+    result.set_slc(0, widened);
+    return result;
+  }
+
+  // Sum one scalar position across every reduction group
+  CValue reduce_tile_values(int group_idx, int group_lane, int col) const {
+    ac_int<RESULT_WIDTH, SIGNED> sum = 0;
+#pragma hls_unroll yes
+    for (int reduce_idx = 0; reduce_idx < REDUCTION_GROUPS; reduce_idx++) {
+      const TileCOutput tile_output = tile_c[reduce_idx][group_idx][group_lane].read();
+      ac_int<C_WIDTH, SIGNED> value;
+      value.set_slc(0, tile_output[col]);
+      sum += value;
+    }
+    CValue result;
+    result.set_slc(0, sum);
+    return result;
+  }
+
+  // Pack one raw reduction-major beat for a single multicast group
+  CBeat pack_raw_reduction_major_output(int group_idx) const {
     CBeat c_beat;
+    clear_pack(c_beat);
 #pragma hls_unroll yes
     for (int reduce_idx = 0; reduce_idx < C_PORT_TILES; reduce_idx++) {
 #pragma hls_unroll yes
       for (int group_lane = 0; group_lane < MULTICAST_GROUP_LANES; group_lane++) {
-        c_beat[reduce_idx][group_lane] = tile_c[reduce_idx][group_idx][group_lane].read();
+#pragma hls_unroll yes
+        for (int col = 0; col < ELEMENT_B_COLS; col++) {
+          const TileCOutput tile_output = tile_c[reduce_idx][group_idx][group_lane].read();
+          c_beat[reduce_idx][group_lane][col] = widen_tile_value(tile_output[col]);
+        }
       }
     }
     return c_beat;
   }
 
-  // Pack one reduction row across multicast groups. A targeted request fills
-  // only its addressed lane and zeroes the rest; in-order context identifies it
-  CBeat pack_reduction_output(int reduce_idx, bool bcast, int target_group) const {
+  // Pack one reduced reduction-major beat into its first port entry
+  CBeat pack_reduced_reduction_major_output(int group_idx) const {
+    CBeat c_beat;
+    clear_pack(c_beat);
+#pragma hls_unroll yes
+    for (int group_lane = 0; group_lane < MULTICAST_GROUP_LANES; group_lane++) {
+#pragma hls_unroll yes
+      for (int col = 0; col < ELEMENT_B_COLS; col++) {
+        c_beat[0][group_lane][col] = reduce_tile_values(group_idx, group_lane, col);
+      }
+    }
+    return c_beat;
+  }
+
+  // Pack one raw multicast-major beat for a single reduction row
+  CBeat pack_raw_multicast_major_output(int reduce_idx, bool bcast, int target_group) const {
     CBeat c_beat;
     clear_pack(c_beat);
 #pragma hls_unroll yes
@@ -674,8 +699,30 @@ SC_MODULE(CIMArray) {
       if (bcast || group_idx == target_group) {
 #pragma hls_unroll yes
         for (int group_lane = 0; group_lane < MULTICAST_GROUP_LANES; group_lane++) {
-          c_beat[group_idx][group_lane] =
-              tile_c[reduce_idx][group_idx][group_lane].read();
+#pragma hls_unroll yes
+          for (int col = 0; col < ELEMENT_B_COLS; col++) {
+            const TileCOutput tile_output = tile_c[reduce_idx][group_idx][group_lane].read();
+            c_beat[group_idx][group_lane][col] = widen_tile_value(tile_output[col]);
+          }
+        }
+      }
+    }
+    return c_beat;
+  }
+
+  // Pack one reduced multicast-major beat across every selected group
+  CBeat pack_reduced_multicast_major_output(bool bcast, int target_group) const {
+    CBeat c_beat;
+    clear_pack(c_beat);
+#pragma hls_unroll yes
+    for (int group_idx = 0; group_idx < MULTICAST_GROUPS; group_idx++) {
+      if (bcast || group_idx == target_group) {
+#pragma hls_unroll yes
+        for (int group_lane = 0; group_lane < MULTICAST_GROUP_LANES; group_lane++) {
+#pragma hls_unroll yes
+          for (int col = 0; col < ELEMENT_B_COLS; col++) {
+            c_beat[group_idx][group_lane][col] = reduce_tile_values(group_idx, group_lane, col);
+          }
         }
       }
     }
@@ -707,36 +754,33 @@ SC_MODULE(CIMArray) {
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode bubble
     while (true) {
-      const InflightQueuePointer inflight_write =
-          inflight_write_pointer.read();
+      const InflightQueuePointer inflight_write = inflight_write_pointer.read();
       const bool token_available = inflight_pointer != inflight_write;
 
       if (token_available) {
-        const InflightToken token =
-            inflight_queue[inflight_queue_index(inflight_pointer)].read();
-        const bool bcast =
-            (token.template slc<1>(MULTICAST_GROUP_INDEX_WIDTH) != 0);
-        const MulticastGroupIndex token_group =
-            token.template slc<MULTICAST_GROUP_INDEX_WIDTH>(0);
+        const InflightToken token = inflight_queue[inflight_queue_index(inflight_pointer)].read();
+        const bool bcast = (token.template slc<1>(MULTICAST_GROUP_INDEX_WIDTH) != 0);
+        const bool reduce_groups = (token.template slc<1>(MULTICAST_GROUP_INDEX_WIDTH + 1) != 0);
+        const MulticastGroupIndex token_group = token.template slc<MULTICAST_GROUP_INDEX_WIDTH>(0);
         const int target_group = token_group.to_int();
 
         if constexpr (C_PORT_ORIENTATION == CIM_C_PORT_REDUCTION_MAJOR) {
           const int group_idx = bcast ? broadcast_group : target_group;
-          if (group_retired(group_idx, seen_retire)) {
-            result_channel.Push(pack_group_output(group_idx));
+          if (reduction_major_beat_retired(group_idx, seen_retire)) {
+            const CBeat result = reduce_groups ? pack_reduced_reduction_major_output(group_idx)
+                                               : pack_raw_reduction_major_output(group_idx);
+            result_channel.Push(result);
 
 #pragma hls_unroll yes
             for (int update_idx = 0; update_idx < MULTICAST_GROUPS; update_idx++) {
               if (update_idx == group_idx) {
                 seen_retire[update_idx] = !seen_retire[update_idx];
-                collected_local[update_idx] =
-                    collected_local[update_idx] + CreditCount(1);
+                collected_local[update_idx] = collected_local[update_idx] + CreditCount(1);
                 collected_count[update_idx].write(collected_local[update_idx]);
               }
             }
 
-            const bool token_complete =
-                !bcast || (broadcast_group == MULTICAST_GROUPS - 1);
+            const bool token_complete = !bcast || (broadcast_group == MULTICAST_GROUPS - 1);
             if (token_complete) {
               inflight_pointer += InflightQueuePointer(1);
               inflight_read_pointer.write(inflight_pointer);
@@ -747,11 +791,28 @@ SC_MODULE(CIMArray) {
           } else {
             wait();
           }
+        } else if (reduce_groups) {
+          if (reduced_multicast_beat_retired(bcast, target_group, seen_retire)) {
+            result_channel.Push(pack_reduced_multicast_major_output(bcast, target_group));
+
+#pragma hls_unroll yes
+            for (int update_idx = 0; update_idx < MULTICAST_GROUPS; update_idx++) {
+              if (bcast || update_idx == target_group) {
+                seen_retire[update_idx] = !seen_retire[update_idx];
+                collected_local[update_idx] = collected_local[update_idx] + CreditCount(1);
+                collected_count[update_idx].write(collected_local[update_idx]);
+              }
+            }
+
+            inflight_pointer += InflightQueuePointer(1);
+            inflight_read_pointer.write(inflight_pointer);
+            output_reduction = 0;
+          } else {
+            wait();
+          }
         } else {
-          if (reduction_row_retired(output_reduction, bcast, target_group,
-                                    seen_retire)) {
-            result_channel.Push(
-                pack_reduction_output(output_reduction, bcast, target_group));
+          if (multicast_major_beat_retired(output_reduction, bcast, target_group, seen_retire)) {
+            result_channel.Push(pack_raw_multicast_major_output(output_reduction, bcast, target_group));
 
             const bool token_complete = output_reduction == REDUCTION_GROUPS - 1;
             if (token_complete) {
@@ -759,8 +820,7 @@ SC_MODULE(CIMArray) {
               for (int update_idx = 0; update_idx < MULTICAST_GROUPS; update_idx++) {
                 if (bcast || update_idx == target_group) {
                   seen_retire[update_idx] = !seen_retire[update_idx];
-                  collected_local[update_idx] =
-                      collected_local[update_idx] + CreditCount(1);
+                  collected_local[update_idx] = collected_local[update_idx] + CreditCount(1);
                   collected_count[update_idx].write(collected_local[update_idx]);
                 }
               }

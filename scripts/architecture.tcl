@@ -202,6 +202,18 @@ if {![info exists SUPPORT_DWC]} {
   set SUPPORT_DWC false
 }
 
+set MATRIX_BACKEND_SYSTOLIC 0
+set MATRIX_BACKEND_CIM 1
+
+if {![info exists MATRIX_BACKEND]} {
+  set MATRIX_BACKEND $MATRIX_BACKEND_SYSTOLIC
+}
+
+if {$MATRIX_BACKEND != $MATRIX_BACKEND_SYSTOLIC &&
+    $MATRIX_BACKEND != $MATRIX_BACKEND_CIM} {
+  error "MATRIX_BACKEND must be 0 (systolic) or 1 (CIM)"
+}
+
 if {![info exists VECTOR_UNIT_WIDTH]} {
   set VECTOR_UNIT_WIDTH $OC_DIMENSION
 }
@@ -306,7 +318,7 @@ if {![info exists CIM_MAC_LATENCY]} {
 }
 
 if {![info exists CIM_MODE]} {
-  set CIM_MODE 1
+  set CIM_MODE 0
 }
 
 if {![info exists CIM_SIGNED]} {
@@ -314,7 +326,7 @@ if {![info exists CIM_SIGNED]} {
 }
 
 if {![info exists CIM_TILE_INPUT_LANES]} {
-  set CIM_TILE_INPUT_LANES 2
+  set CIM_TILE_INPUT_LANES 1
 }
 
 if {![info exists CIM_TILE_OUTPUT_LANES]} {
@@ -338,7 +350,7 @@ if {![info exists CIM_B_PORT_TILES]} {
 }
 
 if {![info exists CIM_C_PORT_ORIENTATION]} {
-  set CIM_C_PORT_ORIENTATION 0
+  set CIM_C_PORT_ORIENTATION [expr {$MATRIX_BACKEND == $MATRIX_BACKEND_CIM ? 1 : 0}]
 }
 
 if {$CIM_C_PORT_ORIENTATION != 0 && $CIM_C_PORT_ORIENTATION != 1} {
@@ -350,6 +362,42 @@ if {![info exists CIM_C_PORT_TILES]} {
     set CIM_C_PORT_TILES $CIM_REDUCTION_GROUPS
   } else {
     set CIM_C_PORT_TILES $CIM_MULTICAST_GROUPS
+  }
+}
+
+if {$MATRIX_BACKEND == $MATRIX_BACKEND_CIM} {
+  if {$DATATYPE != "INT8" && $DATATYPE != "INT8_32"} {
+    error "CIMProcessor currently supports INT8 and INT8_32 only"
+  }
+  if {$SUPPORT_MX} {
+    error "CIMProcessor currently does not support microscaling"
+  }
+  if {$CIM_WRITE_CH_IN != 1} {
+    error "CIMProcessor currently requires CIM_WRITE_CH_IN=1"
+  }
+  if {$CIM_MODE != 0} {
+    error "CIMProcessor currently requires native bit-parallel CIM_MODE=0"
+  }
+  if {$CIM_B_SETS < 2} {
+    error "CIMProcessor currently requires at least two resident B sets"
+  }
+  if {$CIM_C_PORT_ORIENTATION != 1} {
+    error "CIMProcessor currently requires multicast-major C ports"
+  }
+
+  set cim_input_scalars [expr {$CIM_CH_IN * $CIM_TILE_INPUT_LANES * $CIM_REDUCTION_GROUPS}]
+  if {$cim_input_scalars != $IC_DIMENSION} {
+    error "CIMProcessor input extent $cim_input_scalars must equal IC_DIMENSION $IC_DIMENSION"
+  }
+  if {$IC_DIMENSION ni {4 8 16 32 64}} {
+    error "CIMProcessor currently requires IC_DIMENSION in {4 8 16 32 64}"
+  }
+
+  set cim_b_slices [expr {$WEIGHT_DTYPE_WIDTH / $CIM_BASE_B_WIDTH}]
+  set cim_element_b_cols [expr {$CIM_CH_OUT / $cim_b_slices}]
+  set cim_output_scalars [expr {$cim_element_b_cols * $CIM_TILE_OUTPUT_LANES * $CIM_MULTICAST_GROUPS}]
+  if {$cim_output_scalars != $OC_DIMENSION} {
+    error "CIMProcessor output extent $cim_output_scalars must equal OC_DIMENSION $OC_DIMENSION"
   }
 }
 

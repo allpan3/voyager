@@ -19,19 +19,14 @@
 // Relative to a bare element the tile adds two registered stages: the input
 // station captures A/mset on an accepted issue and pulses the elements on the
 // following cycle, then the result stage registers the reduced element outputs.
-template <int CH_IN, int CH_OUT, int B_SETS, int BASE_A_WIDTH,
-          int BASE_B_WIDTH, int BASE_C_WIDTH, int WRITE_CH_IN,
-          int MAC_LATENCY, int MODE, int A_WIDTH, int B_WIDTH, bool SIGNED,
-          int TILE_INPUT_LANES, int TILE_OUTPUT_LANES>
+template <int CH_IN, int CH_OUT, int B_SETS, int BASE_A_WIDTH, int BASE_B_WIDTH, int BASE_C_WIDTH, int WRITE_CH_IN,
+          int MAC_LATENCY, int MODE, int A_WIDTH, int B_WIDTH, bool SIGNED, int TILE_INPUT_LANES, int TILE_OUTPUT_LANES>
 SC_MODULE(CIMTile) {
  private:
   // Return the ceil log2 used for static port widths
-  static constexpr int log2_ceil(int value) {
-    return (value <= 1) ? 0 : 1 + log2_ceil((value + 1) / 2);
-  }
+  static constexpr int log2_ceil(int value) { return (value <= 1) ? 0 : 1 + log2_ceil((value + 1) / 2); }
 
-  using Element = CIMElement<CH_IN, CH_OUT, B_SETS, BASE_A_WIDTH,
-                             BASE_B_WIDTH, BASE_C_WIDTH, WRITE_CH_IN, MAC_LATENCY,
+  using Element = CIMElement<CH_IN, CH_OUT, B_SETS, BASE_A_WIDTH, BASE_B_WIDTH, BASE_C_WIDTH, WRITE_CH_IN, MAC_LATENCY,
                              MODE, A_WIDTH, B_WIDTH, SIGNED>;
 
  public:
@@ -44,15 +39,14 @@ SC_MODULE(CIMTile) {
   static constexpr int ELEMENT_C_WIDTH = Element::C_WIDTH;
 
   // Reduction across the tile's input lanes widens the result by a guard field
-  static constexpr int REDUCTION_GUARD_WIDTH =
-      (TILE_INPUT_LANES <= 1) ? 0 : log2_ceil(TILE_INPUT_LANES);
+  static constexpr int REDUCTION_GUARD_WIDTH = (TILE_INPUT_LANES <= 1) ? 0 : log2_ceil(TILE_INPUT_LANES);
   static constexpr int C_WIDTH = ELEMENT_C_WIDTH + REDUCTION_GUARD_WIDTH;
 
   // CIMElement-level scalar types
   using ElementAValue = ac_int<A_WIDTH, false>;
   using ElementBValue = ac_int<B_WIDTH, false>;
   using ElementCValue = ac_int<ELEMENT_C_WIDTH, false>;
-  using ElementSet = ac_int<Element::BITS_SET, false>;
+  using BSet = typename Element::BSet;
   using ElementAddr = ac_int<Element::BITS_CH_IN, false>;
 
   // Grouped CIMElement data-port types
@@ -68,9 +62,7 @@ SC_MODULE(CIMTile) {
   static constexpr int issue_window() { return Element::issue_window(); }
 
   // Return the number of mclk cycles from an accepted tile issue to retirement
-  static constexpr int operation_latency() {
-    return Element::operation_latency() + 2;
-  }
+  static constexpr int operation_latency() { return Element::operation_latency() + 2; }
 
   // One logical operation result is retained across all c output lanes. The
   // next retirement overwrites those same registers and there is no result
@@ -85,12 +77,12 @@ SC_MODULE(CIMTile) {
   // Write interface (SC): pass-through per tile input lane, B payload per element
   sc_in<bool> wen[TILE_INPUT_LANES];
   sc_in<ElementAddr> waddr[TILE_INPUT_LANES];
-  sc_in<ElementSet> wset[TILE_INPUT_LANES];
+  sc_in<BSet> wset[TILE_INPUT_LANES];
   sc_in<ElementBInput> b[TILE_INPUT_LANES][TILE_OUTPUT_LANES];
 
   // MAC issue interface: one A section captured by the tile station
   sc_in<ElementAInput> a[TILE_INPUT_LANES];
-  sc_in<ElementSet> CCS_INIT_S1(mset);
+  sc_in<BSet> CCS_INIT_S1(mset);
   sc_in<bool> CCS_INIT_S1(mac_issue);
   sc_out<bool> CCS_INIT_S1(mac_ready);
 
@@ -103,7 +95,7 @@ SC_MODULE(CIMTile) {
 
   // Input station held while the elements consume one issued operand
   sc_signal<ElementAInput> station_a[TILE_INPUT_LANES];
-  sc_signal<ElementSet> station_mset;
+  sc_signal<BSet> station_mset;
   sc_signal<bool> element_mac_issue;
   sc_signal<bool> window_idle_state;
 
@@ -272,7 +264,5 @@ SC_MODULE(CIMTile) {
   }
 
   // Drive ready when the tile input station can accept an issue
-  void drive_mac_ready() {
-    mac_ready.write(rstn.read() && window_idle_state.read());
-  }
+  void drive_mac_ready() { mac_ready.write(rstn.read() && window_idle_state.read()); }
 };

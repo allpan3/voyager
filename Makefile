@@ -7,6 +7,22 @@ CC := $(CATAPULT_ROOT)/bin/g++
 
 export CODEGEN_DIR ?= test/compiler
 
+export MATRIX_BACKEND ?= 0
+export CIM_CH_IN ?= 64
+export CIM_CH_OUT ?= 8
+export CIM_B_SETS ?= 18
+export CIM_BASE_A_WIDTH ?= 4
+export CIM_BASE_B_WIDTH ?= 4
+export CIM_BASE_C_WIDTH ?= 20
+export CIM_WRITE_CH_IN ?= 1
+export CIM_MAC_LATENCY ?= 1
+export CIM_MODE ?= 0
+export CIM_TILE_INPUT_LANES ?= 1
+export CIM_TILE_OUTPUT_LANES ?= 4
+export CIM_REDUCTION_GROUPS ?= 1
+export CIM_MULTICAST_GROUPS ?= 1
+export CIM_C_PORT_ORIENTATION ?= $(if $(filter 1,$(MATRIX_BACKEND)),1,0)
+
 # Check if the environment variable is set
 check_env_var:
 ifndef DATATYPE
@@ -46,7 +62,22 @@ override BASE_FLAGS += \
 	-DSPDLOG_EOL=\"\" \
 	-D$(DATATYPE) \
 	-DIC_DIMENSION=$(IC_DIMENSION) \
-	-DOC_DIMENSION=$(OC_DIMENSION)
+	-DOC_DIMENSION=$(OC_DIMENSION) \
+	-DMATRIX_BACKEND=$(MATRIX_BACKEND) \
+	-DCIM_CH_IN=$(CIM_CH_IN) \
+	-DCIM_CH_OUT=$(CIM_CH_OUT) \
+	-DCIM_B_SETS=$(CIM_B_SETS) \
+	-DCIM_BASE_A_WIDTH=$(CIM_BASE_A_WIDTH) \
+	-DCIM_BASE_B_WIDTH=$(CIM_BASE_B_WIDTH) \
+	-DCIM_BASE_C_WIDTH=$(CIM_BASE_C_WIDTH) \
+	-DCIM_WRITE_CH_IN=$(CIM_WRITE_CH_IN) \
+	-DCIM_MAC_LATENCY=$(CIM_MAC_LATENCY) \
+	-DCIM_MODE=$(CIM_MODE) \
+	-DCIM_TILE_INPUT_LANES=$(CIM_TILE_INPUT_LANES) \
+	-DCIM_TILE_OUTPUT_LANES=$(CIM_TILE_OUTPUT_LANES) \
+	-DCIM_REDUCTION_GROUPS=$(CIM_REDUCTION_GROUPS) \
+	-DCIM_MULTICAST_GROUPS=$(CIM_MULTICAST_GROUPS) \
+	-DCIM_C_PORT_ORIENTATION=$(CIM_C_PORT_ORIENTATION)
 
 ifndef INPUT_BUFFER_SIZE
 	export INPUT_BUFFER_SIZE = 1024
@@ -115,7 +146,8 @@ LDLIBS_NO_SYSC += -L$(CONDA_PREFIX)/lib
 ###########################################################
 # Build Directories
 ###########################################################
-BUILD_DIR ?= build/$(DATATYPE)_$(IC_DIMENSION)x$(OC_DIMENSION)_$(INPUT_BUFFER_SIZE)x$(WEIGHT_BUFFER_SIZE)x$(ACCUM_BUFFER_SIZE)_$(DOUBLE_BUFFERED_ACCUM_BUFFER)_$(SUPPORT_MVM)_$(SUPPORT_SPMM)
+CIM_BUILD_SIGNATURE = ci$(CIM_CH_IN)_co$(CIM_CH_OUT)_bs$(CIM_B_SETS)_base$(CIM_BASE_A_WIDTH)x$(CIM_BASE_B_WIDTH)x$(CIM_BASE_C_WIDTH)_w$(CIM_WRITE_CH_IN)_lat$(CIM_MAC_LATENCY)_m$(CIM_MODE)_til$(CIM_TILE_INPUT_LANES)_tol$(CIM_TILE_OUTPUT_LANES)_rg$(CIM_REDUCTION_GROUPS)_mg$(CIM_MULTICAST_GROUPS)_cpo$(CIM_C_PORT_ORIENTATION)
+BUILD_DIR ?= build/$(DATATYPE)_$(IC_DIMENSION)x$(OC_DIMENSION)_$(INPUT_BUFFER_SIZE)x$(WEIGHT_BUFFER_SIZE)x$(ACCUM_BUFFER_SIZE)_$(DOUBLE_BUFFERED_ACCUM_BUFFER)_$(SUPPORT_MVM)_$(SUPPORT_SPMM)_backend$(MATRIX_BACKEND)$(if $(filter 1,$(MATRIX_BACKEND)),_$(CIM_BUILD_SIGNATURE))
 CC_BUILD_DIR = $(BUILD_DIR)/cc
 ALL_BUILD_DIRS = $(CC_BUILD_DIR) $(TOOLCHAIN_BUILD_DIRS)
 # Create build dirs automatically
@@ -171,12 +203,27 @@ ifeq ($(SUPPORT_SPMM), true)
 VU_RTL_DEPENDENCIES += $(CATAPULT_BUILD_DIR)/OutlierFilter/OutlierFilter.v1/concat_rtl.v
 endif
 
+ifeq ($(MATRIX_BACKEND),1)
+CIM_ARRAY_RTL := $(CATAPULT_BUILD_DIR)/CIMArray/CIMArray.v1/concat_rtl.sv
+MATRIX_BACKEND_RTL := $(CATAPULT_BUILD_DIR)/CIMProcessor/CIMProcessor.v1/concat_rtl.sv
+ACCELERATOR_RTL := $(CATAPULT_BUILD_DIR)/Accelerator/Accelerator.v1/concat_rtl.sv
+else
+MATRIX_BACKEND_RTL := $(CATAPULT_BUILD_DIR)/MatrixProcessor/MatrixProcessor.v1/concat_rtl.v
+ACCELERATOR_RTL := $(CATAPULT_BUILD_DIR)/Accelerator/Accelerator.v1/concat_rtl.v
+endif
+
 # For debugging it might be beneficial to only build sub-components in RTL and
 # have them integrate into the SystemC code
 InputController: $(CATAPULT_BUILD_DIR)/InputController/InputController.v1/concat_rtl.v
 WeightController: $(CATAPULT_BUILD_DIR)/WeightController/WeightController.v1/concat_rtl.v
 SystolicArray: $(CATAPULT_BUILD_DIR)/SystolicArray/SystolicArray.v1/concat_rtl.v
 MatrixProcessor: $(CATAPULT_BUILD_DIR)/MatrixProcessor/MatrixProcessor.v1/concat_rtl.v
+CIMArray:
+	env -u CATAPULT_BUILD_DIR $(MAKE) cim-array-rtl MATRIX_BACKEND=1 CIM_C_PORT_ORIENTATION=1
+CIMProcessor:
+	env -u CATAPULT_BUILD_DIR $(MAKE) cim-processor-rtl MATRIX_BACKEND=1 CIM_C_PORT_ORIENTATION=1
+cim-array-rtl: $(CIM_ARRAY_RTL)
+cim-processor-rtl: $(MATRIX_BACKEND_RTL)
 ProcessingElement: $(CATAPULT_BUILD_DIR)/ProcessingElement/ProcessingElement.v1/concat_rtl.v
 CIMElement: $(CATAPULT_BUILD_DIR)/CIMElement/CIMElement.v1/concat_rtl.v
 CIMUnit: $(CATAPULT_BUILD_DIR)/CIMUnit/CIMUnit.v1/concat_rtl.v
@@ -188,7 +235,7 @@ MatrixVectorUnit: $(CATAPULT_BUILD_DIR)/MatrixVectorUnit/MatrixVectorUnit.v1/con
 SpMMUnit: $(CATAPULT_BUILD_DIR)/SpMMUnit/SpMMUnit.v1/concat_rtl.v
 MulAddTree: $(CATAPULT_BUILD_DIR)/MulAddTree/MulAddTree.v1/concat_rtl.v
 DwCUnit: $(CATAPULT_BUILD_DIR)/DwCUnit/DwCUnit.v1/concat_rtl.v
-Accelerator: $(CATAPULT_BUILD_DIR)/Accelerator/Accelerator.v1/concat_rtl.v
+Accelerator: $(ACCELERATOR_RTL)
 
 $(CATAPULT_BUILD_DIR)/InputController/InputController.v1/concat_rtl.v: src/InputController.h $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
@@ -221,6 +268,14 @@ $(CATAPULT_BUILD_DIR)/SystolicArray/SystolicArray.v1/concat_rtl.v: src/SystolicA
 $(CATAPULT_BUILD_DIR)/MatrixProcessor/MatrixProcessor.v1/concat_rtl.v: src/MatrixProcessor.h src/SystolicArray.h src/Skewer.h $(CATAPULT_BUILD_DIR)/SystolicArray/SystolicArray.v1/concat_rtl.v $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=MatrixProcessor catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/MatrixProcessor.log
+
+$(CATAPULT_BUILD_DIR)/CIMArray/CIMArray.v1/concat_rtl.sv: src/CIMArray.h src/CIMTile.h src/CIMElement.h src/CIM/cim_macro_wrapper.sv src/CIM/cim_macro_model.sv src/CIM/cim_macro_1.sv src/CIM/cim_element.sv scripts/blocks/CIMArray.tcl scripts/architecture.tcl scripts/utils/setup_project.tcl $(PROTOS_DEPENDENCY)
+	mkdir -p $(CATAPULT_BUILD_DIR)
+	BLOCK=CIMArray catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/CIMArray.log
+
+$(CATAPULT_BUILD_DIR)/CIMProcessor/CIMProcessor.v1/concat_rtl.sv: src/CIMProcessor.h src/ArchitectureParams.h src/Params.h scripts/blocks/CIMProcessor.tcl scripts/architecture.tcl scripts/utils/setup_project.tcl $(CIM_ARRAY_RTL) $(PROTOS_DEPENDENCY)
+	mkdir -p $(CATAPULT_BUILD_DIR)
+	BLOCK=CIMProcessor catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/CIMProcessor.log
 
 $(CATAPULT_BUILD_DIR)/MatrixParamsDeserializer/MatrixParamsDeserializer.v1/concat_rtl.v: src/ParamsDeserializer.h $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
@@ -286,12 +341,16 @@ $(CATAPULT_BUILD_DIR)/DwCUnit/DwCUnit.v1/concat_rtl.v: src/DwCUnit.h $(CATAPULT_
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=DwCUnit catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/DwCUnit.log
 
-$(CATAPULT_BUILD_DIR)/Accelerator/Accelerator.v1/concat_rtl.v: \
+$(ACCELERATOR_RTL): \
 	src/Accelerator.h \
 	src/DoubleBuffer.h \
+	src/MatrixUnit.h \
+	scripts/blocks/Accelerator.tcl \
+	scripts/architecture.tcl \
+	scripts/utils/setup_project.tcl \
 	$(CATAPULT_BUILD_DIR)/InputController/InputController.v1/concat_rtl.v \
 	$(CATAPULT_BUILD_DIR)/WeightController/WeightController.v1/concat_rtl.v \
-	$(CATAPULT_BUILD_DIR)/MatrixProcessor/MatrixProcessor.v1/concat_rtl.v \
+	$(MATRIX_BACKEND_RTL) \
 	$(CATAPULT_BUILD_DIR)/VectorUnit/VectorUnit.v1/concat_rtl.v \
 	$(CATAPULT_BUILD_DIR)/MatrixParamsDeserializer/MatrixParamsDeserializer.v1/concat_rtl.v \
 	$(RTL_DEPENDENCIES) \
@@ -299,7 +358,7 @@ $(CATAPULT_BUILD_DIR)/Accelerator/Accelerator.v1/concat_rtl.v: \
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=Accelerator catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/Accelerator.log
 
-.PHONY: rtl Accelerator InputController WeightController MatrixProcessor ProcessingElement CIMElement CIMUnit VectorUnit VectorParamsDeserializer VectorFetchUnit VectorPipeline VectorReducer VectorAccumulator OutputController MatrixVectorUnit MulAddTree DwCUnit
+.PHONY: rtl Accelerator InputController WeightController MatrixProcessor CIMArray CIMProcessor cim-array-rtl cim-processor-rtl ProcessingElement CIMElement CIMUnit VectorUnit VectorParamsDeserializer VectorFetchUnit VectorPipeline VectorReducer VectorAccumulator OutputController MatrixVectorUnit MulAddTree DwCUnit
 
 # Run RTL simulation
 .PHONY: rtl-sim

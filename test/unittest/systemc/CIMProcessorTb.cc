@@ -105,6 +105,8 @@ SC_MODULE(CIMProcessorTb) {
 
     SC_THREAD(run_accumulation_buffer);
     sensitive << clk.posedge_event();
+
+    SC_THREAD(watchdog);
   }
 
   // Advance one processor cycle
@@ -120,6 +122,13 @@ SC_MODULE(CIMProcessorTb) {
     }
     std::cerr << "[FAIL] " << message << std::endl;
     test_failed = true;
+  }
+
+  // Stop an issue-handshake or result-backpressure deadlock with a bounded failure
+  void watchdog() {
+    wait(100, SC_US);
+    require(false, "timed out waiting for CIMProcessor completion");
+    sc_stop();
   }
 
   // Create the two-address, two-reduction schedule used by this test
@@ -271,7 +280,7 @@ SC_MODULE(CIMProcessorTb) {
   }
 };
 
-// Elaborate the focused CIMProcessor v1 test
+// Elaborate the focused current CIMProcessor test
 int sc_main(int argc, char **argv) {
   (void)argc;
   (void)argv;

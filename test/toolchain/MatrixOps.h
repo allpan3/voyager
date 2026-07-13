@@ -585,7 +585,7 @@ void map_matrix_operation(const Operation& operation,
 #if MATRIX_BACKEND == MATRIX_BACKEND_CIM
     if (tiling.resnet_replication || tiling.generic_replication) {
       throw std::invalid_argument(
-          "CIMProcessor v1 does not support replicated operands");
+          "CIMProcessor currently does not support replicated operands");
     }
 #endif
     matrix_params->is_resnet_replication = tiling.resnet_replication;

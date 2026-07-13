@@ -30,6 +30,7 @@ set RESET_NAME     [env_required HLS_RESET_NAME]
 set DATATYPE       [env_required DATATYPE]
 set IC_DIMENSION   [env_required IC_DIMENSION]
 set OC_DIMENSION   [env_required OC_DIMENSION]
+set CIM_A_PORT_TILES [env_required CIM_A_PORT_TILES]
 
 # Optional VCS SCVerify cosim. Attach the requested self-checking testbench and
 # enable Catapult's SCVerify+VCS flow so the block can be co-simulated (C++
@@ -62,6 +63,7 @@ solution options set Input/CppStandard c++17
 # path leaves the blackbox external and the sim concat Verilog (matching the
 # global scripts/utils/setup_project.tcl flow).
 set compiler_flags "-D$DATATYPE -DIC_DIMENSION=$IC_DIMENSION -DOC_DIMENSION=$OC_DIMENSION -I$ROOT/src -I$ROOT/lib -I$ROOT"
+# Keep CIMArrayTb's DUT specialization aligned with HLS_TOP during Catapult analysis
 if {[info exists ::env(CIM_C_PORT_ORIENTATION)]} {
   append compiler_flags " -DCIM_TEST_C_PORT_ORIENTATION=$::env(CIM_C_PORT_ORIENTATION)"
 }
@@ -144,15 +146,15 @@ directive set -CLOCK_OVERHEAD 0
 # --- Schedule / extract RTL --------------------------------------------------
 go assembly
 
-# Match the production CIMArray resource mapping for the wide A receive beat
-if {$BLOCK eq "CIMArray"} {
+# Match the production CIMArray resource mapping when the A temporary is materialized
+if {$BLOCK eq "CIMArray" && $CIM_A_PORT_TILES > 1} {
   set top_stripped [string map {" " ""} $TOP]
   directive set /$top_stripped/issue_mac/while:a_beat.value.value:rsc -MAP_TO_MODULE {[Register]}
 }
 
 # The standalone processor flow inlines its CIMArray child, so apply the same
 # wide-A register mapping at the nested resource path
-if {$BLOCK eq "CIMProcessor"} {
+if {$BLOCK eq "CIMProcessor" && $CIM_A_PORT_TILES > 1} {
   set array_top [env_required HLS_CIM_ARRAY_TOP]
   set top_stripped [string map {" " ""} $TOP]
   set array_stripped [string map {" " ""} $array_top]
