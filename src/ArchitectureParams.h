@@ -169,6 +169,13 @@ using F9 = StdFloat<3, 5>;
 // Common Constants
 // ================================================================
 
+#define MATRIX_BACKEND_SYSTOLIC 0
+#define MATRIX_BACKEND_CIM 1
+
+#ifndef MATRIX_BACKEND
+#define MATRIX_BACKEND MATRIX_BACKEND_SYSTOLIC
+#endif
+
 #ifndef DOUBLE_BUFFERED_ACCUM_BUFFER
 #define DOUBLE_BUFFERED_ACCUM_BUFFER false
 #endif
@@ -269,6 +276,90 @@ using F9 = StdFloat<3, 5>;
 
 #ifndef NUM_CODEBOOK_ENTRIES
 #define NUM_CODEBOOK_ENTRIES 16
+#endif
+
+// ================================================================
+// CIM Configuration
+// ================================================================
+
+#ifndef CIM_CH_IN
+#define CIM_CH_IN 64
+#endif
+
+#ifndef CIM_CH_OUT
+#define CIM_CH_OUT 8
+#endif
+
+#ifndef CIM_B_SETS
+#define CIM_B_SETS 18
+#endif
+
+#ifndef CIM_BASE_A_WIDTH
+#define CIM_BASE_A_WIDTH 4
+#endif
+
+#ifndef CIM_BASE_B_WIDTH
+#define CIM_BASE_B_WIDTH 4
+#endif
+
+#ifndef CIM_BASE_C_WIDTH
+#define CIM_BASE_C_WIDTH 20
+#endif
+
+#ifndef CIM_WRITE_CH_IN
+#define CIM_WRITE_CH_IN 1
+#endif
+
+#ifndef CIM_MAC_LATENCY
+#define CIM_MAC_LATENCY 1
+#endif
+
+#ifndef CIM_MODE
+#define CIM_MODE 0
+#endif
+
+#ifndef CIM_SIGNED
+#define CIM_SIGNED true
+#endif
+
+#ifndef CIM_TILE_INPUT_LANES
+#define CIM_TILE_INPUT_LANES 1
+#endif
+
+#ifndef CIM_TILE_OUTPUT_LANES
+#define CIM_TILE_OUTPUT_LANES 4
+#endif
+
+#ifndef CIM_REDUCTION_GROUPS
+#define CIM_REDUCTION_GROUPS 1
+#endif
+
+#ifndef CIM_MULTICAST_GROUPS
+#define CIM_MULTICAST_GROUPS 1
+#endif
+
+#ifndef CIM_A_PORT_TILES
+#define CIM_A_PORT_TILES CIM_REDUCTION_GROUPS
+#endif
+
+#ifndef CIM_B_PORT_TILES
+#define CIM_B_PORT_TILES CIM_MULTICAST_GROUPS
+#endif
+
+#ifndef CIM_C_PORT_ORIENTATION
+#if MATRIX_BACKEND == MATRIX_BACKEND_CIM
+#define CIM_C_PORT_ORIENTATION 1
+#else
+#define CIM_C_PORT_ORIENTATION 0
+#endif
+#endif
+
+#ifndef CIM_C_PORT_TILES
+#if CIM_C_PORT_ORIENTATION == 0
+#define CIM_C_PORT_TILES CIM_REDUCTION_GROUPS
+#else
+#define CIM_C_PORT_TILES CIM_MULTICAST_GROUPS
+#endif
 #endif
 
 // ================================================================

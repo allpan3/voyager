@@ -32,6 +32,9 @@ endif
 VERILATOR_ROOT ?= $(shell $(VERILATOR) -V 2>/dev/null | sed -n 's/.*VERILATOR_ROOT *= *//p' | head -1)
 
 SYSTEMC_BUILD := $(THIS_DIR)/build/systemc/$(DATATYPE)_$(IC_DIMENSION)x$(OC_DIMENSION)
+CIM_PROCESSOR_IC_DIMENSION := 8
+CIM_PROCESSOR_OC_DIMENSION := 3
+CIM_PROCESSOR_SYSTEMC_BUILD := $(THIS_DIR)/build/systemc/INT8_$(CIM_PROCESSOR_IC_DIMENSION)x$(CIM_PROCESSOR_OC_DIMENSION)
 SYSTEMC_GENERATED := $(SYSTEMC_BUILD)/generated
 SYSTEMC_CASES := $(THIS_DIR)/systemc/cim_element_cosim_cases.py
 SYSTEMC_CASES_INC := $(SYSTEMC_GENERATED)/CIMElementTbCases.inc
@@ -101,6 +104,18 @@ SCVERIFY_ARRAY_HLS_ARGS := \
 	CIM_REDUCTION_GROUPS=2 CIM_MULTICAST_GROUPS=3 \
 	DATATYPE=INT8 IC_DIMENSION=4 OC_DIMENSION=2
 
+# Geometry pinned by CIMProcessorTb.cc in SCVerify mode
+SCVERIFY_PROCESSOR_HLS_ARGS := \
+	CIM_CH_IN=2 CIM_CH_OUT=2 CIM_B_SETS=2 \
+	CIM_BASE_A_WIDTH=4 CIM_BASE_B_WIDTH=4 CIM_BASE_C_WIDTH=12 \
+	CIM_WRITE_CH_IN=1 CIM_MAC_LATENCY=1 CIM_MODE=0 \
+	CIM_A_WIDTH=8 CIM_B_WIDTH=8 CIM_SIGNED=true \
+	CIM_TILE_INPUT_LANES=2 CIM_TILE_OUTPUT_LANES=1 \
+	CIM_REDUCTION_GROUPS=2 CIM_MULTICAST_GROUPS=3 \
+	CIM_C_PORT_ORIENTATION=1 DATATYPE=INT8 \
+	IC_DIMENSION=$(CIM_PROCESSOR_IC_DIMENSION) \
+	OC_DIMENSION=$(CIM_PROCESSOR_OC_DIMENSION)
+
 # CIM template parameters. Defaults match the production macro geometry in
 # scripts/architecture.tcl; override individually to sweep configurations.
 CIM_CH_IN ?= 64
@@ -111,13 +126,13 @@ CIM_BASE_B_WIDTH ?= 4
 CIM_BASE_C_WIDTH ?= 20
 CIM_WRITE_CH_IN ?= 1
 CIM_MAC_LATENCY ?= 1
-CIM_MODE ?= 1
+CIM_MODE ?= 0
 CIM_A_WIDTH ?= 8
 CIM_B_WIDTH ?= 8
 CIM_SIGNED ?= true
 
 # Shared tile geometry plus CIMArray tile-grid dimensions
-CIM_TILE_INPUT_LANES ?= 2
+CIM_TILE_INPUT_LANES ?= 1
 CIM_TILE_OUTPUT_LANES ?= 4
 CIM_REDUCTION_GROUPS ?= 1
 CIM_MULTICAST_GROUPS ?= 1
@@ -142,6 +157,9 @@ CIM_TILE_TPARAMS := $(CIM_TPARAMS), $(CIM_TILE_INPUT_LANES), $(CIM_TILE_OUTPUT_L
 CIM_ARRAY_TPARAMS := $(CIM_TPARAMS), $(CIM_TILE_INPUT_LANES), $(CIM_TILE_OUTPUT_LANES), $(CIM_REDUCTION_GROUPS), $(CIM_MULTICAST_GROUPS), $(CIM_A_PORT_TILES), $(CIM_B_PORT_TILES), $(CIM_C_PORT_TILES), $(CIM_C_PORT_ORIENTATION)
 HLS_TOP_TILE := CIMTile<$(CIM_TILE_TPARAMS)>
 HLS_TOP_ARRAY := CIMArray<$(CIM_ARRAY_TPARAMS)>
+CIM_PROCESSOR_BUFFER_SIZE ?= 16
+CIM_PROCESSOR_TPARAMS := InputTypeList, WeightTypeList, DataTypes::int8, DataTypes::int8, DataTypes::int24, DataTypes::int24, DataTypes::fp8_e8m0, $(CIM_PROCESSOR_IC_DIMENSION), $(CIM_PROCESSOR_OC_DIMENSION), $(CIM_PROCESSOR_BUFFER_SIZE), $(CIM_ARRAY_TPARAMS)
+HLS_TOP_PROCESSOR := CIMProcessor<$(CIM_PROCESSOR_TPARAMS)>
 CIM_TILE_CONFIG := ci$(CIM_CH_IN)_co$(CIM_CH_OUT)_bs$(CIM_B_SETS)_base$(CIM_BASE_A_WIDTH)x$(CIM_BASE_B_WIDTH)x$(CIM_BASE_C_WIDTH)_w$(CIM_WRITE_CH_IN)_lat$(CIM_MAC_LATENCY)_m$(CIM_MODE)_a$(CIM_A_WIDTH)_b$(CIM_B_WIDTH)_s$(CIM_SIGNED)_til$(CIM_TILE_INPUT_LANES)_tol$(CIM_TILE_OUTPUT_LANES)
 CIM_ARRAY_CONFIG := ci$(CIM_CH_IN)_co$(CIM_CH_OUT)_bs$(CIM_B_SETS)_base$(CIM_BASE_A_WIDTH)x$(CIM_BASE_B_WIDTH)x$(CIM_BASE_C_WIDTH)_w$(CIM_WRITE_CH_IN)_lat$(CIM_MAC_LATENCY)_m$(CIM_MODE)_a$(CIM_A_WIDTH)_b$(CIM_B_WIDTH)_s$(CIM_SIGNED)_til$(CIM_TILE_INPUT_LANES)_tol$(CIM_TILE_OUTPUT_LANES)_rg$(CIM_REDUCTION_GROUPS)_mg$(CIM_MULTICAST_GROUPS)_cpo$(CIM_C_PORT_ORIENTATION)
 HLS_TILE_BUILD := $(HLS_BUILD)/CIMTile/$(CIM_TILE_CONFIG)
@@ -150,9 +168,15 @@ HLS_TILE_RTL := $(HLS_TILE_PROJECT)/rtl.v
 HLS_ARRAY_BUILD := $(HLS_BUILD)/CIMArray/$(CIM_ARRAY_CONFIG)
 HLS_ARRAY_PROJECT := $(HLS_ARRAY_BUILD)/CIMArray.v1
 HLS_ARRAY_RTL := $(HLS_ARRAY_PROJECT)/rtl.v
+HLS_PROCESSOR_BUILD := $(HLS_BUILD)/CIMProcessor/$(CIM_ARRAY_CONFIG)_ic$(CIM_PROCESSOR_IC_DIMENSION)_oc$(CIM_PROCESSOR_OC_DIMENSION)
+HLS_PROCESSOR_PROJECT := $(HLS_PROCESSOR_BUILD)/CIMProcessor.v1
+HLS_PROCESSOR_RTL := $(HLS_PROCESSOR_PROJECT)/rtl.v
 SCVERIFY_ARRAY_PROJECT := $(HLS_ARRAY_PROJECT)
 SCVERIFY_ARRAY_MK := $(SCVERIFY_ARRAY_PROJECT)/scverify/Verify_rtl_v_vcs.mk
 SCVERIFY_ARRAY_TB := $(THIS_DIR)/systemc/CIMArrayTb.cc
+SCVERIFY_PROCESSOR_PROJECT := $(HLS_PROCESSOR_PROJECT)
+SCVERIFY_PROCESSOR_MK := $(SCVERIFY_PROCESSOR_PROJECT)/scverify/Verify_rtl_v_vcs.mk
+SCVERIFY_PROCESSOR_TB := $(THIS_DIR)/systemc/CIMProcessorTb.cc
 
 # Shared environment forwarded into the driver
 HLS_TILE_DEPS := \
@@ -166,9 +190,19 @@ HLS_ARRAY_DEPS := \
 	$(REPO_ROOT)/src/CIMArray.h \
 	$(REPO_ROOT)/src/CIMTile.h \
 	$(REPO_ROOT)/src/CIMElement.h
+HLS_PROCESSOR_DEPS := \
+	$(THIS_DIR)/Makefile \
+	$(HLS_DRIVER) \
+	$(REPO_ROOT)/src/CIMProcessor.h \
+	$(REPO_ROOT)/src/CIMArray.h \
+	$(REPO_ROOT)/src/CIMTile.h \
+	$(REPO_ROOT)/src/CIMElement.h
 SCVERIFY_ARRAY_DEPS := \
 	$(HLS_ARRAY_DEPS) \
 	$(SCVERIFY_ARRAY_TB)
+SCVERIFY_PROCESSOR_DEPS := \
+	$(HLS_PROCESSOR_DEPS) \
+	$(SCVERIFY_PROCESSOR_TB)
 
 HLS_ENV = \
 	REPO_ROOT=$(REPO_ROOT) \
@@ -181,9 +215,9 @@ HLS_ENV = \
 	HLS_RESET_NAME=rstn \
 	$(if $(HLS_SCVERIFY),HLS_SCVERIFY=$(HLS_SCVERIFY))
 
-.PHONY: test test-macro test-element build-systemc build-systemc-element build-systemc-tile build-systemc-array test-systemc-element test-systemc-tile test-systemc-array check-systemc-env check-verilator-env clean hls hls-tile hls-array scverify-array scverify-array-run check-catapult-root check-catapult-env FORCE
+.PHONY: test test-macro test-element build-systemc build-systemc-element build-systemc-tile build-systemc-array build-systemc-processor test-systemc-element test-systemc-tile test-systemc-array test-systemc-processor check-systemc-env check-verilator-env clean hls hls-tile hls-array hls-processor hls-processor-run scverify-array scverify-array-run scverify-processor scverify-processor-run check-catapult-root check-catapult-env FORCE
 
-test: test-macro test-element test-systemc-element test-systemc-tile test-systemc-array
+test: test-macro test-element test-systemc-element test-systemc-tile test-systemc-array test-systemc-processor
 
 test-macro:
 	$(PYTHON) $(THIS_DIR)/verilog/test_cim_macro.py $(JOBS_ARG) $(WAVEFORM_ARG) $(TEST_ARGS) $(MODEL_TEST_ARGS)
@@ -199,6 +233,8 @@ build-systemc-tile: $(SYSTEMC_BUILD)/CIMTileTb
 
 build-systemc-array: $(SYSTEMC_BUILD)/CIMArrayTb
 
+build-systemc-processor: $(CIM_PROCESSOR_SYSTEMC_BUILD)/CIMProcessorTb
+
 test-systemc-element: check-systemc-env
 	@$(PYTHON) $(SYSTEMC_RUNNER) --suite cim_element_systemc --build-target build-systemc-element --binary $(SYSTEMC_BUILD)/CIMElementTb --log-dir $(SYSTEMC_BUILD)/logs/cim_element --makefile $(THIS_DIR)/Makefile --datatype $(DATATYPE) --ic-dimension $(IC_DIMENSION) --oc-dimension $(OC_DIMENSION)
 
@@ -208,6 +244,9 @@ test-systemc-tile: check-systemc-env
 test-systemc-array: check-systemc-env
 	@$(PYTHON) $(SYSTEMC_RUNNER) --suite cim_array_systemc --build-target build-systemc-array --binary $(SYSTEMC_BUILD)/CIMArrayTb --log-dir $(SYSTEMC_BUILD)/logs/cim_array --makefile $(THIS_DIR)/Makefile --datatype $(DATATYPE) --ic-dimension $(IC_DIMENSION) --oc-dimension $(OC_DIMENSION)
 
+test-systemc-processor: check-systemc-env
+	@$(PYTHON) $(SYSTEMC_RUNNER) --suite cim_processor_systemc --build-target build-systemc-processor --binary $(CIM_PROCESSOR_SYSTEMC_BUILD)/CIMProcessorTb --log-dir $(CIM_PROCESSOR_SYSTEMC_BUILD)/logs/cim_processor --makefile $(THIS_DIR)/Makefile --datatype INT8 --ic-dimension $(CIM_PROCESSOR_IC_DIMENSION) --oc-dimension $(CIM_PROCESSOR_OC_DIMENSION)
+
 $(SYSTEMC_BUILD)/CIMElementTb: $(SYSTEMC_BUILD)/CIMElementTb.o $(CIM_ELEMENT_VERILATED_LIBS)
 	$(SYSTEMC_CC) -o $@ $< $(CIM_ELEMENT_VERILATED_LIBS) $(CIM_ELEMENT_VERILATED_RUNTIME_LIB) $(SYSTEMC_LDFLAGS)
 
@@ -215,6 +254,9 @@ $(SYSTEMC_BUILD)/CIMTileTb: $(SYSTEMC_BUILD)/CIMTileTb.o
 	$(SYSTEMC_CC) -o $@ $^ $(SYSTEMC_LDFLAGS)
 
 $(SYSTEMC_BUILD)/CIMArrayTb: $(SYSTEMC_BUILD)/CIMArrayTb.o
+	$(SYSTEMC_CC) -o $@ $^ $(SYSTEMC_LDFLAGS)
+
+$(CIM_PROCESSOR_SYSTEMC_BUILD)/CIMProcessorTb: $(CIM_PROCESSOR_SYSTEMC_BUILD)/CIMProcessorTb.o
 	$(SYSTEMC_CC) -o $@ $^ $(SYSTEMC_LDFLAGS)
 
 $(SYSTEMC_BUILD)/CIMElementTb.o: $(THIS_DIR)/systemc/CIMElementTb.cc $(REPO_ROOT)/src/CIMElement.h $(REPO_ROOT)/src/ArchitectureParams.h $(SYSTEMC_CASES_INC) $(CIM_ELEMENT_VERILATED_LIBS) | check-systemc-env check-verilator-env
@@ -227,6 +269,10 @@ $(SYSTEMC_BUILD)/CIMTileTb.o: $(THIS_DIR)/systemc/CIMTileTb.cc $(REPO_ROOT)/src/
 
 $(SYSTEMC_BUILD)/CIMArrayTb.o: $(THIS_DIR)/systemc/CIMArrayTb.cc $(REPO_ROOT)/src/CIMArray.h $(REPO_ROOT)/src/CIMTile.h $(REPO_ROOT)/src/CIMElement.h $(REPO_ROOT)/src/ArchitectureParams.h | check-systemc-env
 	mkdir -p $(SYSTEMC_BUILD)
+	$(SYSTEMC_CC) $(SYSTEMC_CXXFLAGS) -c -o $@ $<
+
+$(CIM_PROCESSOR_SYSTEMC_BUILD)/CIMProcessorTb.o: $(THIS_DIR)/systemc/CIMProcessorTb.cc $(REPO_ROOT)/src/CIMProcessor.h $(REPO_ROOT)/src/CIMArray.h $(REPO_ROOT)/src/CIMTile.h $(REPO_ROOT)/src/CIMElement.h $(REPO_ROOT)/src/ArchitectureParams.h | check-systemc-env
+	mkdir -p $(CIM_PROCESSOR_SYSTEMC_BUILD)
 	$(SYSTEMC_CC) $(SYSTEMC_CXXFLAGS) -c -o $@ $<
 
 $(SYSTEMC_CASES_MK): $(SYSTEMC_CASES)
@@ -248,7 +294,7 @@ check-verilator-env:
 	@test -n "$(VERILATOR_ROOT)" || { echo "VERILATOR_ROOT could not be detected"; exit 2; }
 
 # --- Catapult HLS ------------------------------------------------------------
-hls: hls-tile hls-array
+hls: hls-tile hls-array hls-processor
 
 hls-tile: $(HLS_TILE_RTL)
 
@@ -268,6 +314,20 @@ $(HLS_ARRAY_RTL): $(HLS_ARRAY_DEPS) | check-catapult-env
 	HLS_PROJECT_DIR=$(HLS_ARRAY_BUILD) HLS_CLOCKS='clk' \
 	$(CATAPULT) -shell -file $(HLS_DRIVER) -logfile $(HLS_ARRAY_BUILD).log
 
+hls-processor:
+	$(MAKE) -C $(THIS_DIR) hls-processor-run $(SCVERIFY_PROCESSOR_HLS_ARGS)
+
+hls-processor-run: $(HLS_PROCESSOR_RTL)
+
+$(HLS_PROCESSOR_RTL): $(HLS_PROCESSOR_DEPS) | check-catapult-env
+	mkdir -p $(HLS_PROCESSOR_BUILD)
+	$(HLS_ENV) CIM_C_PORT_ORIENTATION=1 BLOCK=CIMProcessor \
+	HLS_TOP='$(HLS_TOP_PROCESSOR)' \
+	HLS_CIM_ARRAY_TOP='$(HLS_TOP_ARRAY)' \
+	DESIGN_HEADER=$(REPO_ROOT)/src/CIMProcessor.h \
+	HLS_PROJECT_DIR=$(HLS_PROCESSOR_BUILD) HLS_CLOCKS='clk' \
+	$(CATAPULT) -shell -file $(HLS_DRIVER) -logfile $(HLS_PROCESSOR_BUILD).log
+
 scverify-array:
 	$(MAKE) -C $(THIS_DIR) scverify-array-run HLS_SCVERIFY=1 HLS_SCVERIFY_TB=$(SCVERIFY_ARRAY_TB) $(SCVERIFY_ARRAY_HLS_ARGS)
 
@@ -282,6 +342,23 @@ $(SCVERIFY_ARRAY_MK): $(SCVERIFY_ARRAY_DEPS) | check-catapult-env
 	DESIGN_HEADER=$(REPO_ROOT)/src/CIMArray.h \
 	HLS_PROJECT_DIR=$(HLS_ARRAY_BUILD) HLS_CLOCKS='clk' \
 	$(CATAPULT) -shell -file $(HLS_DRIVER) -logfile $(HLS_ARRAY_BUILD).log
+
+scverify-processor:
+	$(MAKE) -C $(THIS_DIR) scverify-processor-run HLS_SCVERIFY=1 HLS_SCVERIFY_TB=$(SCVERIFY_PROCESSOR_TB) $(SCVERIFY_PROCESSOR_HLS_ARGS)
+
+scverify-processor-run: $(SCVERIFY_PROCESSOR_MK)
+	$(MAKE) -C $(SCVERIFY_PROCESSOR_PROJECT) -f ./scverify/Verify_rtl_v_vcs.mk SIMTOOL=vcs build
+	$(MAKE) -C $(SCVERIFY_PROCESSOR_PROJECT) -f ./scverify/Verify_rtl_v_vcs.mk SIMTOOL=vcs sim
+
+$(SCVERIFY_PROCESSOR_MK): $(SCVERIFY_PROCESSOR_DEPS) | check-catapult-env
+	mkdir -p $(HLS_PROCESSOR_BUILD)
+	$(HLS_ENV) CIM_C_PORT_ORIENTATION=1 \
+	HLS_SCVERIFY_TB=$(SCVERIFY_PROCESSOR_TB) BLOCK=CIMProcessor \
+	HLS_TOP='$(HLS_TOP_PROCESSOR)' \
+	HLS_CIM_ARRAY_TOP='$(HLS_TOP_ARRAY)' \
+	DESIGN_HEADER=$(REPO_ROOT)/src/CIMProcessor.h \
+	HLS_PROJECT_DIR=$(HLS_PROCESSOR_BUILD) HLS_CLOCKS='clk' \
+	$(CATAPULT) -shell -file $(HLS_DRIVER) -logfile $(HLS_PROCESSOR_BUILD).log
 
 # HLS env: the shared toolchain root plus the catapult binary (no test-config vars).
 check-catapult-env: check-catapult-root

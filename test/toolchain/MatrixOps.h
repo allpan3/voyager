@@ -582,6 +582,12 @@ void map_matrix_operation(const Operation& operation,
       matrix_params->weight_addr_fy_idx[1] = 0;
     }
 
+#if MATRIX_BACKEND == MATRIX_BACKEND_CIM
+    if (tiling.resnet_replication || tiling.generic_replication) {
+      throw std::invalid_argument(
+          "CIMProcessor v1 does not support replicated operands");
+    }
+#endif
     matrix_params->is_resnet_replication = tiling.resnet_replication;
     matrix_params->is_generic_replication = tiling.generic_replication;
     matrix_params->num_channels = tiling.num_channels;

@@ -3,12 +3,18 @@
 #include <mc_connections.h>
 #include <systemc.h>
 
+#include "ArchitectureParams.h"
+#if MATRIX_BACKEND == MATRIX_BACKEND_CIM
+#include "CIMProcessor.h"
+#else
+#include "MatrixProcessor.h"
+#endif
 #include "DoubleBuffer.h"
 #include "DualPortBuffer.h"
 #include "InputController.h"
 #include "InputScaleController.h"
-#include "MatrixProcessor.h"
 #include "OutputController.h"
+#include "ParamsDeserializer.h"
 #include "WeightController.h"
 #include "WeightScaleController.h"
 #include "mc_scverify.h"
@@ -101,12 +107,21 @@ SC_MODULE(MatrixUnit) {
       weight_scale_read_resp);
 #endif
 
-  MatrixProcessor<InputTypeList, WeightTypeList, SA_INPUT_TYPE, SA_WEIGHT_TYPE,
-                  ACCUM_DATATYPE, ACCUM_BUFFER_DATATYPE, SCALE_DATATYPE,
-                  IC_DIMENSION, OC_DIMENSION, ACCUM_BUFFER_SIZE>
-      CCS_INIT_S1(matrix_processor);
-  Connections::Combinational<Pack1D<ACCUM_BUFFER_DATATYPE, OC_DIMENSION>>
-      CCS_INIT_S1(bias_data);
+#if MATRIX_BACKEND == MATRIX_BACKEND_CIM
+  using ActiveMatrixProcessor =
+      CIMProcessor<InputTypeList, WeightTypeList, SA_INPUT_TYPE, SA_WEIGHT_TYPE, ACCUM_DATATYPE, ACCUM_BUFFER_DATATYPE,
+                   SCALE_DATATYPE, IC_DIMENSION, OC_DIMENSION, ACCUM_BUFFER_SIZE, CIM_CH_IN, CIM_CH_OUT, CIM_B_SETS,
+                   CIM_BASE_A_WIDTH, CIM_BASE_B_WIDTH, CIM_BASE_C_WIDTH, CIM_WRITE_CH_IN, CIM_MAC_LATENCY, CIM_MODE,
+                   INPUT_DTYPE_WIDTH, WEIGHT_DTYPE_WIDTH, CIM_SIGNED, CIM_TILE_INPUT_LANES, CIM_TILE_OUTPUT_LANES,
+                   CIM_REDUCTION_GROUPS, CIM_MULTICAST_GROUPS, CIM_A_PORT_TILES, CIM_B_PORT_TILES, CIM_C_PORT_TILES,
+                   CIM_C_PORT_ORIENTATION>;
+#else
+  using ActiveMatrixProcessor =
+      MatrixProcessor<InputTypeList, WeightTypeList, SA_INPUT_TYPE, SA_WEIGHT_TYPE, ACCUM_DATATYPE,
+                      ACCUM_BUFFER_DATATYPE, SCALE_DATATYPE, IC_DIMENSION, OC_DIMENSION, ACCUM_BUFFER_SIZE>;
+#endif
+  ActiveMatrixProcessor CCS_INIT_S1(matrix_processor);
+  Connections::Combinational<Pack1D<ACCUM_BUFFER_DATATYPE, OC_DIMENSION>> CCS_INIT_S1(bias_data);
 
   DualPortBuffer<Pack1D<ACCUM_BUFFER_DATATYPE, OC_DIMENSION>, ACCUM_BUFFER_SIZE>
       CCS_INIT_S1(accumulation_buffer);

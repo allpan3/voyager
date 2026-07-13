@@ -150,7 +150,25 @@ if {$BLOCK eq "CIMArray"} {
   directive set /$top_stripped/issue_mac/while:a_beat.value.value:rsc -MAP_TO_MODULE {[Register]}
 }
 
+# The standalone processor flow inlines its CIMArray child, so apply the same
+# wide-A register mapping at the nested resource path
+if {$BLOCK eq "CIMProcessor"} {
+  set array_top [env_required HLS_CIM_ARRAY_TOP]
+  set top_stripped [string map {" " ""} $TOP]
+  set array_stripped [string map {" " ""} $array_top]
+  directive set /$top_stripped/$array_stripped/issue_mac/while:a_beat.value.value:rsc -MAP_TO_MODULE {[Register]}
+}
+
 go architect
+
+# Preserve the MatrixUnit accumulation-buffer response latency contract
+if {$BLOCK eq "CIMProcessor"} {
+  cycle set accumulation_buffer_read_data.Pop() -from accumulation_buffer_read_address.Push() -equal 2
+  if {[info exists ::env(DOUBLE_BUFFERED_ACCUM_BUFFER)] && $::env(DOUBLE_BUFFERED_ACCUM_BUFFER) eq "true"} {
+    cycle set accumulation_buffer_read_data.Pop()#1 -from accumulation_buffer_read_address.Push()#1 -equal 2
+  }
+}
+
 go extract
 project save
 
