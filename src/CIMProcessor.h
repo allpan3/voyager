@@ -44,6 +44,18 @@ SC_MODULE(CIMProcessor) {
   using MACRequest = typename Array::MACRequest;
   using WriteRequest = typename Array::WriteRequest;
 
+  // One array B-port write. Array::BBeat already folds in both WRITE_CH_IN
+  // (rows along the input axis) and B_PORT_TILES (span along the output axis),
+  // so this stays correct when either widens
+  static constexpr int WEIGHT_WRITE_WIDTH = Array::BBeat::width;
+  // One logical B row spans the complete output axis; the controller assembles
+  // rows from memory and slices them into B-port beats
+  static constexpr int WEIGHT_ROW_WIDTH = N * B_WIDTH;
+  // Narrowing the B port splits a row into more beats, which is what lets the
+  // controller deliver part of a row early
+  static constexpr int WEIGHT_BEATS_PER_ROW = OUTPUT_AXIS_TILES / B_PORT_TILES;
+  static constexpr int WEIGHT_WRITES_PER_SET = K * WEIGHT_BEATS_PER_ROW;
+
   static constexpr int LOOP_WIDTH = 10;
 #if DOUBLE_BUFFERED_ACCUM_BUFFER
   static constexpr int ACCUM_BUFFER_BANKS = 2;
@@ -89,9 +101,18 @@ SC_MODULE(CIMProcessor) {
                 "CIM accumulation buffer depth must be positive");
   static_assert(INPUT_BUFFER_WIDTH == ABeat::width,
                 "One input-buffer word must contain one complete CIM A beat");
-  static_assert(
-      WEIGHT_BUFFER_WIDTH == N * B_WIDTH,
-      "One weight-buffer word must contain one complete logical B row");
+  static_assert(OUTPUT_AXIS_TILES % B_PORT_TILES == 0,
+                "One logical B row must split into whole B-port beats");
+  static_assert(K % WRITE_CH_IN == 0,
+                "One resident set must hold a whole number of write blocks");
+  // The lane order inside a beat is a convention, but its size is not: pin the
+  // width to the array geometry so a beat cannot silently hold the wrong lanes
+  static_assert(WEIGHT_WRITE_WIDTH ==
+                    WRITE_CH_IN * B_PORT_TILES * Array::TILE_N * B_WIDTH,
+                "A beat must hold exactly the lanes one B-port write covers");
+  static_assert(WEIGHT_ROW_WIDTH ==
+                    WEIGHT_WRITE_WIDTH * WEIGHT_BEATS_PER_ROW / WRITE_CH_IN,
+                "Beats must tile one logical B row exactly");
   static_assert(Input::width == A_WIDTH,
                 "CIM A width must match the configured input datatype");
   static_assert(Weight::width == B_WIDTH,
@@ -103,8 +124,10 @@ SC_MODULE(CIMProcessor) {
   sc_in<bool> CCS_INIT_S1(rstn);
 
   Connections::In<ac_int<INPUT_BUFFER_WIDTH, false>> CCS_INIT_S1(input_channel);
-  Connections::In<ac_int<WEIGHT_BUFFER_WIDTH, false>> CCS_INIT_S1(
-      weight_channel);
+  // Addressed weight writes mirroring the systolic weight buffer's two banks:
+  // the port index is the resident set and the request address is the row
+  Connections::In<BufferWriteRequest<ac_int<WEIGHT_WRITE_WIDTH, false>>>
+      weight_write[2];
   Connections::In<Pack1D<Buffer, N>> CCS_INIT_S1(bias_channel);
   Connections::In<MatrixParams> CCS_INIT_S1(params_in);
 
@@ -134,6 +157,18 @@ SC_MODULE(CIMProcessor) {
   Connections::Combinational<WriteRequest> CCS_INIT_S1(write_request_channel);
   Connections::Combinational<CBeat> CCS_INIT_S1(result_channel);
 
+  // Swap interlock mirroring the weight DoubleBuffer's bank alternation: a set
+  // becomes MAC-able once completely filled, and is refilled only after every
+  // result computed from it has been collected (the analog of a bank finishing
+  // its read phase), which closes each element's MAC issue window
+  // The release tokens pass through small FIFOs so the result thread never
+  // blocks on a token that only a future job's fill will consume
+  Connections::Combinational<bool> set_filled[2];
+  Connections::Fifo<bool, 2> CCS_INIT_S1(set_consumed_fifo_0);
+  Connections::Fifo<bool, 2> CCS_INIT_S1(set_consumed_fifo_1);
+  Connections::Combinational<bool> set_consumed_enq[2];
+  Connections::Combinational<bool> set_consumed_deq[2];
+
   // MatrixProcessor has separate accumulation/write-back parameter FIFOs; the
   // fused result thread needs one
   Connections::Fifo<MatrixParams, 1> CCS_INIT_S1(result_params_fifo);
@@ -154,7 +189,21 @@ SC_MODULE(CIMProcessor) {
     result_params_fifo.enq(result_params_enq);
     result_params_fifo.deq(result_params_deq);
 
+    set_consumed_fifo_0.clk(clk);
+    set_consumed_fifo_0.rst(rstn);
+    set_consumed_fifo_0.enq(set_consumed_enq[0]);
+    set_consumed_fifo_0.deq(set_consumed_deq[0]);
+
+    set_consumed_fifo_1.clk(clk);
+    set_consumed_fifo_1.rst(rstn);
+    set_consumed_fifo_1.enq(set_consumed_enq[1]);
+    set_consumed_fifo_1.deq(set_consumed_deq[1]);
+
     SC_THREAD(issue_operations);
+    sensitive << clk.pos();
+    async_reset_signal_is(rstn, false);
+
+    SC_THREAD(load_weights);
     sensitive << clk.pos();
     async_reset_signal_is(rstn, false);
 
@@ -238,36 +287,135 @@ SC_MODULE(CIMProcessor) {
     return step == 0 || (inner && (!reuse_weights || outer));
   }
 
-  // Replace MatrixProcessor::push_weights K loop and weight_skewer_din.Push
-  // with direct weight-set writes
-  void load_weight_set(Set wset) {
-    for (int k = 0; k < K; k++) {
-      const ac_int<WEIGHT_BUFFER_WIDTH, false> weights = weight_channel.Pop();
-      for (int output_axis_tile_base = 0;
-           output_axis_tile_base < OUTPUT_AXIS_TILES;
-           output_axis_tile_base += B_PORT_TILES) {
-        WriteRequest request;
-        request.wset = wset;
-        request.input_axis_idx = k / Array::TILE_K;
-        request.output_axis_tile_base = output_axis_tile_base;
-        request.wchi = k % Array::TILE_K;
-        request.replicate = 0;
-        clear_pack(request.data);
+  // Commit one B-port beat straight to the array
+  // The address encodes the row and the output-axis span:
+  //   row  = address / WEIGHT_BEATS_PER_ROW
+  //   span = address % WEIGHT_BEATS_PER_ROW  (B_PORT_TILES tiles from tile
+  //          span * B_PORT_TILES)
+  // WIRE FORMAT of one beat. Nothing checks this at compile time: the producer
+  // (WeightController's writer) slices a row by bit offset and the consumer
+  // here rebuilds lanes by index, so both sides must agree by construction
+  //
+  //   address = row * WEIGHT_BEATS_PER_ROW + span
+  //
+  //   bit 0                                            WEIGHT_WRITE_WIDTH-1
+  //   |                                                                   |
+  //   [ bk=0 ................................ ][ bk=1 ................... ]
+  //     [ tile 0    ][ tile 1    ] ... [ tile B_PORT_TILES-1 ]
+  //       [n0][n1]...  [n0][n1]...
+  //        ^   ^
+  //        |   +-- TILE_N lanes per output tile, ascending n
+  //        +------ lane bit offset = ((bk * B_PORT_TILES + port_tile)
+  //                                   * TILE_N + tile_n) * B_WIDTH
+  //
+  //   The output channel a lane feeds is
+  //     n = (span * B_PORT_TILES + port_tile) * TILE_N + tile_n
+  //   and the input-channel row it belongs to is base_k + bk
+  //
+  // At WRITE_CH_IN == 1 there is a single bk block, so a beat is just the
+  // row's span in ascending output-channel order and a narrower B port only
+  // changes how many beats a row takes
+  //
+  // At WRITE_CH_IN > 1 the bk-major choice above is NOT Array::BBeat's own
+  // marshalled order (its nesting is [port tile][bk][tile lane], so it packs
+  // port-tile-major). Pick the order with the weight memory layout: bk-major
+  // keeps each fetched row's span contiguous, which suits gathering strided
+  // rows in the controller; port-tile-major suits a k-interleaved layout where
+  // one burst already holds the bk values per output channel
+  void write_weight_beat(Set wset, ac_int<16, false> address,
+                         const ac_int<WEIGHT_WRITE_WIDTH, false> &beat) {
+    const int base_k = address / WEIGHT_BEATS_PER_ROW;
+    const int span = address % WEIGHT_BEATS_PER_ROW;
+
+    WriteRequest request;
+    request.wset = wset;
+    request.input_axis_idx = base_k / Array::TILE_K;
+    request.output_axis_tile_base = span * B_PORT_TILES;
+    request.wchi = base_k % Array::TILE_K;
+    request.replicate = 0;
+    clear_pack(request.data);
 
 #pragma hls_unroll yes
-        for (int port_tile_idx = 0; port_tile_idx < B_PORT_TILES;
-             port_tile_idx++) {
+    for (int bk = 0; bk < WRITE_CH_IN; bk++) {
 #pragma hls_unroll yes
-          for (int tile_n = 0; tile_n < Array::TILE_N; tile_n++) {
-            const int n =
-                (output_axis_tile_base + port_tile_idx) * Array::TILE_N +
-                tile_n;
-            request.data[port_tile_idx][0][tile_n] =
-                weights.template slc<B_WIDTH>(n * B_WIDTH);
-          }
+      for (int port_tile_idx = 0; port_tile_idx < B_PORT_TILES;
+           port_tile_idx++) {
+#pragma hls_unroll yes
+        for (int tile_n = 0; tile_n < Array::TILE_N; tile_n++) {
+          const int lane =
+              (bk * B_PORT_TILES + port_tile_idx) * Array::TILE_N + tile_n;
+          request.data[port_tile_idx][bk][tile_n] =
+              beat.template slc<B_WIDTH>(lane * B_WIDTH);
         }
-        write_request_channel.Push(request);
       }
+    }
+    write_request_channel.Push(request);
+  }
+
+  // Consume the controller's addressed bank writes and commit them to the
+  // resident sets Mirror the weight DoubleBuffer's per-bank phase alternation:
+  // a complete fill ends at req.last, the set is handed to the issue thread,
+  // and the same set is written again only after the issue thread swaps away
+  // from it
+  void load_weights() {
+    weight_write[0].Reset();
+    weight_write[1].Reset();
+    write_request_channel.ResetWrite();
+    set_filled[0].ResetWrite();
+    set_filled[1].ResetWrite();
+    set_consumed_deq[0].ResetRead();
+    set_consumed_deq[1].ResetRead();
+
+    wait();
+
+    bool bank = 0;
+    bool filled_before[2] = {false, false};
+    while (true) {
+      if (filled_before[bank]) {
+        // The DoubleBuffer's write-after-read interlock: no overwrite of a live
+        // set
+        set_consumed_deq[bank].Pop();
+      }
+
+      bool last = false;
+#ifndef __SYNTHESIS__
+      // The address is a destination, not a sequence position, so a controller
+      // may fill a set in any order it likes. What it may not do is leave a
+      // destination stale or write one twice, which no ordering assumption
+      // would catch
+      bool covered[WEIGHT_WRITES_PER_SET] = {false};
+#endif
+      while (!last) {
+        const BufferWriteRequest<ac_int<WEIGHT_WRITE_WIDTH, false>> request =
+            weight_write[bank].Pop();
+        last = request.last;
+#ifndef __SYNTHESIS__
+        if (request.address >= WEIGHT_WRITES_PER_SET) {
+          SC_REPORT_FATAL("CIMProcessor",
+                          "weight write address exceeds one resident set; a "
+                          "bank holds one weight tile");
+        }
+        if (covered[request.address]) {
+          SC_REPORT_FATAL("CIMProcessor",
+                          "weight write repeats a destination within one fill");
+        }
+        covered[request.address] = true;
+#endif
+        write_weight_beat(Set(bank), request.address, request.data);
+      }
+#ifndef __SYNTHESIS__
+      for (int write = 0; write < WEIGHT_WRITES_PER_SET; write++) {
+        if (!covered[write]) {
+          SC_REPORT_FATAL("CIMProcessor",
+                          "fill ended with a resident weight destination left "
+                          "unwritten");
+        }
+      }
+#endif
+
+      set_filled[bank].Push(true);
+      filled_before[bank] = true;
+      bank = !bank;
     }
   }
 
@@ -289,15 +437,18 @@ SC_MODULE(CIMProcessor) {
   void issue_operations() {
     params_in.Reset();
     input_channel.Reset();
-    weight_channel.Reset();
     result_params_enq.ResetWrite();
     mac_request_channel.ResetWrite();
-    write_request_channel.ResetWrite();
+    set_filled[0].ResetRead();
+    set_filled[1].ResetRead();
     start.Reset();
 
     wait();
 
-    Set next_wset = 0;
+    // The active set follows the controller's bank alternation; this thread
+    // only times the swaps, it no longer chooses which set to load
+    Set active_wset = 0;
+    bool have_active = false;
     while (true) {
       const MatrixParams params = params_in.Pop();
       // MatrixProcessor::push_inputs also sends params to push_weights_params;
@@ -330,30 +481,19 @@ SC_MODULE(CIMProcessor) {
       const bool reuse_weights = reuses_weights(params);
       ac_int<3, false> outer_reuse_indices[2];
       select_weight_reuse_indices(params, outer_reuse_indices);
-      Set active_wset = 0;
 
       for (ac_int<32, false> step = 0; step < total_ops; step++) {
-        // Current controller loads at the demand boundary rather than
-        // preloading after the prior block's final use A false load decision
-        // keeps active_wset unchanged, so following inputs reuse its resident
-        // weights A true decision overwrites next_wset and advances it only
-        // after the complete block is loaded next_wset wraps after B_SETS load
-        // events; each full load covers every output-axis B-port span The
-        // MAC-request handshake blocks loop progress until the array commits
-        // the current multicast issue With at least two sets, an intervening
-        // multicast closes the prior issue window before round-robin wraparound
-        // Future independent preloading still requires explicit per-set
-        // liveness instead of this ordered schedule MatrixProcessor tags input
-        // with swap_weights; CIM completes that weight load before issuing
-        // input
+        // needs_weight_load times the swap exactly like MatrixProcessor
+        // push_inputs swap_weights Waiting on set_filled guarantees every row
+        // of the incoming set is committed first The result thread releases the
+        // outgoing set once its results are all collected
         if (needs_weight_load(params, loop_counters, outer_reuse_indices,
                               reuse_weights, step)) {
-          // Finish the complete weight set load before popping the mac request
-          // and input data that use it
-          load_weight_set(next_wset);
-          active_wset = next_wset;
-          next_wset =
-              (next_wset == Set(B_SETS - 1)) ? Set(0) : Set(next_wset + Set(1));
+          if (have_active) {
+            active_wset = (active_wset & 1) ? Set(0) : Set(1);
+          }
+          set_filled[active_wset & 1].Pop();
+          have_active = true;
         }
 
         MACRequest request;
@@ -452,9 +592,16 @@ SC_MODULE(CIMProcessor) {
 #endif
     }
 
+    set_consumed_enq[0].ResetWrite();
+    set_consumed_enq[1].ResetWrite();
+
     bool accumulation_buffer_bank = false;
     wait();
 
+    // Mirror the issue thread's set alternation to release each set only
+    // after the last result computed from it has been collected
+    Set release_wset = 0;
+    bool have_release = false;
     while (true) {
       const MatrixParams params = result_params_deq.Pop();
       ac_int<LOOP_WIDTH, false> loop_counters[2][6];
@@ -472,8 +619,24 @@ SC_MODULE(CIMProcessor) {
         bias_reuse_indices[5 - loop] = loop;
       }
 
+      const bool reuse_weights = reuses_weights(params);
+      ac_int<3, false> outer_reuse_indices[2];
+      select_weight_reuse_indices(params, outer_reuse_indices);
+
       const ac_int<32, false> total_ops = total_operations(params);
       for (ac_int<32, false> step = 0; step < total_ops; step++) {
+        // At a swap boundary every result of the outgoing set has been
+        // collected, so its elements' MAC issue windows are closed and the
+        // fill thread may safely overwrite it
+        if (needs_weight_load(params, loop_counters, outer_reuse_indices,
+                              reuse_weights, step)) {
+          if (have_release) {
+            set_consumed_enq[release_wset & 1].Push(true);
+            release_wset = (release_wset & 1) ? Set(0) : Set(1);
+          }
+          have_release = true;
+        }
+
         const Pack1D<Psum, N> result = collect_complete_result();
         const bool first = starts_accumulation(params, loop_counters);
         const bool last = finishes_accumulation(params, loop_counters);

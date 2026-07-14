@@ -7,15 +7,38 @@
 #include "ArchitectureParams.h"
 
 template <typename WeightTypeTuple, typename Bias, int rows, int cols,
-          int port_width, int buffer_width>
+          int port_width, int buffer_width, int write_width = buffer_width>
 struct WeightController;
 
 template <typename... WeightTypes, typename Bias, int rows, int cols,
-          int port_width, int buffer_width>
+          int port_width, int buffer_width, int write_width>
 struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
-                        port_width, buffer_width> : public sc_module {
+                        port_width, buffer_width, write_width>
+    : public sc_module {
   static constexpr int LOOP_WIDTH = 10;
   static constexpr int DATA_WIDTH = buffer_width / cols;
+  // A row is delivered as WRITES_PER_ROW writes. The systolic backend writes a
+  // whole buffer word at once; the CIM backend narrows this to one array
+  // B-port beat so a partial row can be committed early
+  //
+  // WIRE FORMAT (CIM). This is a convention with CIMProcessor that no compiler
+  // check enforces - see the matching diagram on
+  // CIMProcessor::write_weight_beat and change both together
+  // One unpacked row holds the output channels ascending, lowest bits first:
+  //
+  //   row: [n=0][n=1][n=2] ... [n=cols-1]        each B_WIDTH wide
+  //         \______ beat 0 ______/\____ beat 1 ____/   at WRITES_PER_ROW = 2
+  //
+  // Beat b is the contiguous slice starting at b * write_width, so it carries
+  // output channels [b * lanes, (b+1) * lanes) with lanes = write_width /
+  // B_WIDTH, and is addressed row * WRITES_PER_ROW + b. The consumer maps that
+  // span onto B_PORT_TILES output tiles
+  //
+  // WRITE_CH_IN > 1 will stage that many rows and slice the staged block
+  // instead; the slice would then interleave rows per the order chosen there
+  static constexpr int WRITES_PER_ROW = buffer_width / write_width;
+  static_assert(buffer_width % write_width == 0,
+                "One buffer word must split into whole writes");
   static constexpr int MAX_FETCH_WIDTH = std::max(
       {dtype_fetch_config<WeightTypes, cols, port_width>::max_fetch_width...});
 
@@ -25,9 +48,13 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
   Connections::Out<MemoryRequest> CCS_INIT_S1(weight_req);
   Connections::In<ac_int<port_width, false>> CCS_INIT_S1(weight_resp);
 
-  Connections::Out<BufferWriteRequest<ac_int<buffer_width, false>>>
+  // For the CIM backend the two write_request ports address the two resident
+  // weight sets directly (bank = wset, address = wchi)
+  Connections::Out<BufferWriteRequest<ac_int<write_width, false>>>
       write_request[2];
+#if MATRIX_BACKEND != MATRIX_BACKEND_CIM
   Connections::Out<BufferReadRequest> read_request[2];
+#endif
 
   Connections::Out<MemoryRequest> CCS_INIT_S1(bias_req);
   Connections::In<ac_int<OC_PORT_WIDTH, false>> CCS_INIT_S1(bias_resp);
@@ -36,7 +63,9 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
   Connections::In<MatrixParams> CCS_INIT_S1(params_in);
   Connections::Combinational<MatrixParams> CCS_INIT_S1(fetcher_params);
   Connections::Combinational<MatrixParams> CCS_INIT_S1(writer_params);
+#if MATRIX_BACKEND != MATRIX_BACKEND_CIM
   Connections::Combinational<MatrixParams> CCS_INIT_S1(reader_params);
+#endif
   Connections::Combinational<MatrixParams> CCS_INIT_S1(weight_packer_params);
   Connections::Combinational<MatrixParams> CCS_INIT_S1(transposer_params);
   Connections::Combinational<MatrixParams> CCS_INIT_S1(bias_fetcher_params);
@@ -57,9 +86,11 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
     sensitive << clk.pos();
     async_reset_signal_is(rstn, false);
 
+#if MATRIX_BACKEND != MATRIX_BACKEND_CIM
     SC_THREAD(reader);
     sensitive << clk.pos();
     async_reset_signal_is(rstn, false);
+#endif
 
     SC_THREAD(writer);
     sensitive << clk.pos();
@@ -285,17 +316,24 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
                                 (address << params.weight_pack_factor_lg2) +
                                 pack;
 
-                            BufferWriteRequest<ac_int<buffer_width, false>> req;
-                            req.address = address;
-                            req.data = data;
-                            req.last =
+                            const bool last_word =
                                 loop_counters[1][4] == loop_bounds[1][4] &&
                                 loop_counters[1][3] == loop_bounds[1][3] &&
                                 loop_counters[1][2] == loop_bounds[1][2] &&
                                 loop_counters[1][1] == loop_bounds[1][1] &&
                                 loop_counters[1][0] == loop_bounds[1][0] &&
                                 pack == pack_offset_bound;
-                            write_request[bank_sel].Push(req);
+
+                            for (int beat = 0; beat < WRITES_PER_ROW; beat++) {
+                              BufferWriteRequest<ac_int<write_width, false>>
+                                  req;
+                              req.address = address * WRITES_PER_ROW + beat;
+                              req.data = data.template slc<write_width>(
+                                  beat * write_width);
+                              req.last =
+                                  last_word && beat == WRITES_PER_ROW - 1;
+                              write_request[bank_sel].Push(req);
+                            }
 
                             if (pack == pack_offset_bound) break;
                           }
@@ -323,6 +361,7 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
     }
   }
 
+#if MATRIX_BACKEND != MATRIX_BACKEND_CIM
   void reader() {
     reader_params.ResetRead();
 
@@ -409,7 +448,8 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
               for (loop_counters[0][4] = 0;; loop_counters[0][4]++) {
                 for (ac_int<LOOP_WIDTH, false> spatial_reuse_idx = 0;;
                      spatial_reuse_idx++) {
-                  for (int transpose_reuse_idx = 0; transpose_reuse_idx < ratio;
+                  for (int transpose_reuse_idx = 0;
+                       transpose_reuse_idx < transpose_reuse_bound;
                        transpose_reuse_idx++) {
                     for (loop_counters[1][0] = 0;; loop_counters[1][0]++) {
                       for (loop_counters[1][1] = 0;; loop_counters[1][1]++) {
@@ -574,6 +614,7 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
       }
     }
   }
+#endif
 
   void weight_packer() {
     weight_packer_params.ResetRead();
@@ -858,7 +899,9 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
     params_in.Reset();
     fetcher_params.ResetWrite();
     writer_params.ResetWrite();
+#if MATRIX_BACKEND != MATRIX_BACKEND_CIM
     reader_params.ResetWrite();
+#endif
     transposer_params.ResetWrite();
     weight_packer_params.ResetWrite();
     bias_fetcher_params.ResetWrite();
@@ -871,7 +914,9 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
 
       fetcher_params.Push(params);
       writer_params.Push(params);
+#if MATRIX_BACKEND != MATRIX_BACKEND_CIM
       reader_params.Push(params);
+#endif
       transposer_params.Push(params);
       weight_packer_params.Push(params);
 

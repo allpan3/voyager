@@ -22,7 +22,7 @@ proc get_accelerator_config {} {
           CIM_TILE_INPUT_AXIS_ELEMENTS CIM_TILE_OUTPUT_AXIS_ELEMENTS CIM_INPUT_AXIS_TILES \
           CIM_OUTPUT_AXIS_TILES CIM_A_PORT_TILES CIM_B_PORT_TILES \
           CIM_C_PORT_TILES CIM_C_BEAT_LAYOUT INPUT_DTYPE_WIDTH \
-          WEIGHT_DTYPE_WIDTH
+          WEIGHT_DTYPE_WIDTH WEIGHT_WRITE_WIDTH
 
   set config_list [list]
 
@@ -34,7 +34,7 @@ proc get_accelerator_config {} {
 
   lappend config_list [dict create \
     name "WeightController" \
-    template "WeightController<WeightTypeList, $ACCUM_BUFFER_DATATYPE, $IC_DIMENSION, $OC_DIMENSION, $OC_PORT_WIDTH, $WEIGHT_BUFFER_WIDTH>" \
+    template "WeightController<WeightTypeList, $ACCUM_BUFFER_DATATYPE, $IC_DIMENSION, $OC_DIMENSION, $OC_PORT_WIDTH, $WEIGHT_BUFFER_WIDTH, $WEIGHT_WRITE_WIDTH>" \
   ]
 
   if {$MATRIX_BACKEND == $MATRIX_BACKEND_CIM} {
@@ -158,7 +158,7 @@ proc pre_architect {} {
          INPUT_BUFFER_WIDTH WEIGHT_BUFFER_SIZE WEIGHT_BUFFER_WIDTH \
          ACCUM_BUFFER_DATATYPE ACCUM_BUFFER_SIZE ACCUM_DATATYPE_WIDTH \
          ACC_BUF_C_DATA_REP_NAME SUPPORT_MX DOUBLE_BUFFERED_ACCUM_BUFFER \
-         SCALE_DATATYPE_WIDTH
+         SCALE_DATATYPE_WIDTH MATRIX_BACKEND MATRIX_BACKEND_CIM
 
   # --- 1. Standard Double Buffers ---
 
@@ -167,10 +167,12 @@ proc pre_architect {} {
     "DoubleBuffer<$INPUT_BUFFER_SIZE,$INPUT_BUFFER_WIDTH>" \
     $INPUT_BUFFER_SIZE $INPUT_BUFFER_WIDTH $TECHNOLOGY
 
-  # Weight Buffer
-  configure_double_buffer \
-    "DoubleBuffer<$WEIGHT_BUFFER_SIZE,$WEIGHT_BUFFER_WIDTH>" \
-    $WEIGHT_BUFFER_SIZE $WEIGHT_BUFFER_WIDTH $TECHNOLOGY
+  # Weight Buffer does not exist for the CIM backend; the macros hold weights
+  if {$MATRIX_BACKEND != $MATRIX_BACKEND_CIM} {
+    configure_double_buffer \
+      "DoubleBuffer<$WEIGHT_BUFFER_SIZE,$WEIGHT_BUFFER_WIDTH>" \
+      $WEIGHT_BUFFER_SIZE $WEIGHT_BUFFER_WIDTH $TECHNOLOGY
+  }
 
   # --- 2. MX Scaling Factors Buffers ---
   if {$SUPPORT_MX == true} {

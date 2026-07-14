@@ -212,9 +212,16 @@ endif
 ifeq ($(MATRIX_BACKEND),1)
 CIM_ARRAY_RTL := $(CATAPULT_BUILD_DIR)/CIMArray/CIMArray.v1/concat_rtl.sv
 MATRIX_BACKEND_RTL := $(CATAPULT_BUILD_DIR)/CIMProcessor/CIMProcessor.v1/concat_rtl.sv
+# The CIM netlist is SystemVerilog, so Catapult emits no Verilog concat flow, and
+# its SystemVerilog concat flow never builds the ccs_wrapper the harness links
+# against; the per-file RTL flow does, and needs the CIM include path
+SCVERIFY_RTL_MK := Verify_rtl_v_vcs.mk
+SCVERIFY_RTL_ARGS := VLOG_INCDIRS=$(PROJ_ROOT)/src/CIM
 ACCELERATOR_RTL := $(CATAPULT_BUILD_DIR)/Accelerator/Accelerator.v1/concat_rtl.sv
 else
 MATRIX_BACKEND_RTL := $(CATAPULT_BUILD_DIR)/MatrixProcessor/MatrixProcessor.v1/concat_rtl.v
+SCVERIFY_RTL_MK := Verify_concat_sim_rtl_v_vcs.mk
+SCVERIFY_RTL_ARGS :=
 ACCELERATOR_RTL := $(CATAPULT_BUILD_DIR)/Accelerator/Accelerator.v1/concat_rtl.v
 endif
 
@@ -279,7 +286,17 @@ $(CATAPULT_BUILD_DIR)/CIMArray/CIMArray.v1/concat_rtl.sv: src/CIMArray.h src/CIM
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=CIMArray catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/CIMArray.log
 
-$(CATAPULT_BUILD_DIR)/CIMProcessor/CIMProcessor.v1/concat_rtl.sv: src/CIMProcessor.h src/ArchitectureParams.h src/Params.h scripts/blocks/CIMProcessor.tcl scripts/architecture.tcl scripts/utils/setup_project.tcl $(CIM_ARRAY_RTL) $(PROTOS_DEPENDENCY)
+$(CATAPULT_BUILD_DIR)/CIMProcessor/CIMProcessor.v1/concat_rtl.sv: \
+	src/CIMProcessor.h \
+	src/ArchitectureParams.h \
+	src/Params.h \
+	src/TypeToBits.h \
+	src/Utils.h \
+	scripts/blocks/CIMProcessor.tcl \
+	scripts/architecture.tcl \
+	scripts/utils/setup_project.tcl \
+	$(CIM_ARRAY_RTL) \
+	$(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=CIMProcessor catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/CIMProcessor.log
 
@@ -369,11 +386,11 @@ $(ACCELERATOR_RTL): \
 # Run RTL simulation
 .PHONY: rtl-sim
 rtl-sim: rtl network-proto
-	cd $(CATAPULT_BUILD_DIR)/Accelerator/Accelerator.v1 && LD_PRELOAD=$(CONDA_PREFIX)/lib/libstdc++.so.6 make -f ./scverify/Verify_concat_sim_rtl_v_vcs.mk SIMTOOL=vcs sim
+	cd $(CATAPULT_BUILD_DIR)/Accelerator/Accelerator.v1 && LD_PRELOAD=$(CONDA_PREFIX)/lib/libstdc++.so.6 make -f ./scverify/$(SCVERIFY_RTL_MK) SIMTOOL=vcs $(SCVERIFY_RTL_ARGS) sim
 
 .PHONY: rtl-sim-debug
 rtl-sim-debug: rtl network-proto
-	cd $(CATAPULT_BUILD_DIR)/Accelerator/Accelerator.v1 && LD_PRELOAD=$(CONDA_PREFIX)/lib/libstdc++.so.6 SIM_DUMP_FSDB=1 make -f ./scverify/Verify_concat_sim_rtl_v_vcs.mk SIMTOOL=vcs sim
+	cd $(CATAPULT_BUILD_DIR)/Accelerator/Accelerator.v1 && LD_PRELOAD=$(CONDA_PREFIX)/lib/libstdc++.so.6 SIM_DUMP_FSDB=1 make -f ./scverify/$(SCVERIFY_RTL_MK) SIMTOOL=vcs $(SCVERIFY_RTL_ARGS) sim
 
 ###########################################################
 # Standard Event-based SystemC Simulations

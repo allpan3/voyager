@@ -227,6 +227,31 @@ void map_matrix_operation(const Operation& operation,
 #endif
   }
 
+#if MATRIX_BACKEND == MATRIX_BACKEND_CIM
+  if (!is_fc && !is_dwc) {
+    if (is_mx_op) {
+      throw std::invalid_argument(
+          "CIM MatrixUnit direct weights do not support microscaling operands");
+    }
+    if (matrix_op.kwargs().contains("input_code")) {
+      throw std::invalid_argument(
+          "CIM MatrixUnit direct weights do not support input codebooks");
+    }
+    if (matrix_op.kwargs().contains("weight_code")) {
+      throw std::invalid_argument(
+          "CIM MatrixUnit direct weights do not support weight codebooks");
+    }
+    if (weight.reshape().target() == "transpose") {
+      throw std::invalid_argument(
+          "CIM MatrixUnit direct weights do not support transposed weights");
+    }
+    if (weight.has_dequant()) {
+      throw std::invalid_argument(
+          "CIM MatrixUnit direct weights do not support weight dequantization");
+    }
+  }
+#endif
+
   Tiling tiling;
 
   if (is_dwc) {
@@ -350,6 +375,13 @@ void map_matrix_operation(const Operation& operation,
     } else {
       tiling = get_tiling(operation);
     }
+
+#if MATRIX_BACKEND == MATRIX_BACKEND_CIM
+    if (!is_fc && (tiling.resnet_replication || tiling.generic_replication)) {
+      throw std::invalid_argument(
+          "CIM MatrixUnit direct weights do not support replicated operands");
+    }
+#endif
 
     std::ostringstream oss;
     oss << tiling;
@@ -530,7 +562,7 @@ void map_matrix_operation(const Operation& operation,
       // C1 loop
       matrix_params->weight_addr_loops[1][0] =
           tiling.loops[1][tiling.reduction_loop_idx[1]];
-      if (OC_DIMENSION > IC_DIMENSION) {
+      if constexpr (OC_DIMENSION > IC_DIMENSION) {
         // we can reduce the number of iterations, since we have already fetched
         // the values
         if (tiling.loops[0][tiling.reduction_loop_idx[0]] >=
@@ -583,11 +615,24 @@ void map_matrix_operation(const Operation& operation,
     }
 
 #if MATRIX_BACKEND == MATRIX_BACKEND_CIM
-    if (tiling.resnet_replication || tiling.generic_replication) {
-      throw std::invalid_argument(
-          "CIMProcessor currently does not support replicated operands");
+    if (!is_fc) {
+      // One CIM bank is one resident set, so a bank fill must be exactly one
+      // weight tile; anything larger would silently overwrite resident rows
+      int tiles_per_fill = 1;
+      for (int i = 0; i < 5; i++) {
+        if (i != matrix_params->weight_addr_reduction_loop_idx[2]) {
+          tiles_per_fill *= matrix_params->weight_addr_loops[1][i];
+        }
+      }
+      if (tiles_per_fill > 1) {
+        throw std::invalid_argument(
+            "CIM double-buffered weight sets hold one tile per bank fill; "
+            "this tiling fills " +
+            std::to_string(tiles_per_fill) + " tiles between swap points");
+      }
     }
 #endif
+
     matrix_params->is_resnet_replication = tiling.resnet_replication;
     matrix_params->is_generic_replication = tiling.generic_replication;
     matrix_params->num_channels = tiling.num_channels;

@@ -184,7 +184,9 @@ Harness::Harness(sc_module_name name, std::vector<Operation> operations,
 // do not set access counters for an RTL simulation
 #ifndef CCS_DUT_RTL
   accelerator.matrix_unit.input_buffer.access_counter = access_counter;
+#if MATRIX_BACKEND != MATRIX_BACKEND_CIM
   accelerator.matrix_unit.weight_buffer.access_counter = access_counter;
+#endif
 #endif
 }
 

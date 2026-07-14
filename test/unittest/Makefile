@@ -39,6 +39,7 @@ CIM_PROCESSOR_LARGE_OC_DIMENSION := 128
 CIM_PROCESSOR_SYSTEMC_BUILD := $(THIS_DIR)/build/systemc/processor/INT8_$(CIM_PROCESSOR_IC_DIMENSION)x$(CIM_PROCESSOR_OC_DIMENSION)_db0
 CIM_PROCESSOR_DB_SYSTEMC_BUILD := $(THIS_DIR)/build/systemc/processor/INT8_$(CIM_PROCESSOR_IC_DIMENSION)x$(CIM_PROCESSOR_OC_DIMENSION)_db1
 CIM_PROCESSOR_LARGE_SYSTEMC_BUILD := $(THIS_DIR)/build/systemc/processor/INT8_$(CIM_PROCESSOR_LARGE_IC_DIMENSION)x$(CIM_PROCESSOR_LARGE_OC_DIMENSION)_large
+CIM_MATRIX_UNIT_SYSTEMC_BUILD := $(CIM_PROCESSOR_SYSTEMC_BUILD)
 SYSTEMC_GENERATED := $(SYSTEMC_BUILD)/generated
 SYSTEMC_CASES := $(THIS_DIR)/systemc/cim_element_cosim_cases.py
 SYSTEMC_CASES_INC := $(SYSTEMC_GENERATED)/CIMElementTbCases.inc
@@ -82,6 +83,36 @@ SYSTEMC_LDFLAGS := \
 	-L$(CATAPULT_ROOT)/shared/lib/ \
 	-lsystemc \
 	-lpthread
+
+CIM_MATRIX_UNIT_CXXFLAGS := \
+	-I$(CONDA_ENV)/include \
+	-I$(REPO_ROOT)/lib/spdlog/include \
+	-UIC_DIMENSION \
+	-UOC_DIMENSION \
+	-DIC_DIMENSION=$(CIM_PROCESSOR_IC_DIMENSION) \
+	-DOC_DIMENSION=$(CIM_PROCESSOR_OC_DIMENSION) \
+	-DMATRIX_BACKEND=1 \
+	-DINPUT_BUFFER_SIZE=16 \
+	-DWEIGHT_BUFFER_SIZE=0 \
+	-DACCUM_BUFFER_SIZE=16 \
+	-DCIM_CH_IN=2 \
+	-DCIM_CH_OUT=2 \
+	-DCIM_B_SETS=2 \
+	-DCIM_BASE_A_WIDTH=4 \
+	-DCIM_BASE_B_WIDTH=4 \
+	-DCIM_BASE_C_WIDTH=12 \
+	-DCIM_WRITE_CH_IN=1 \
+	-DCIM_MAC_LATENCY=1 \
+	-DCIM_MODE=0 \
+	-DCIM_SIGNED=true \
+	-DCIM_TILE_INPUT_AXIS_ELEMENTS=2 \
+	-DCIM_TILE_OUTPUT_AXIS_ELEMENTS=1 \
+	-DCIM_INPUT_AXIS_TILES=2 \
+	-DCIM_OUTPUT_AXIS_TILES=3 \
+	-DCIM_A_PORT_TILES=2 \
+	-DCIM_B_PORT_TILES=3 \
+	-DCIM_C_PORT_TILES=3 \
+	-DCIM_C_BEAT_LAYOUT=1
 
 ###########################################################
 # Standalone Catapult HLS for CIMTile and CIMArray
@@ -204,7 +235,9 @@ HLS_PROCESSOR_DEPS := \
 	$(REPO_ROOT)/src/ConnectionsSignal.h \
 	$(REPO_ROOT)/src/CIMArray.h \
 	$(REPO_ROOT)/src/CIMTile.h \
-	$(REPO_ROOT)/src/CIMElement.h
+	$(REPO_ROOT)/src/CIMElement.h \
+	$(REPO_ROOT)/src/TypeToBits.h \
+	$(REPO_ROOT)/src/Utils.h
 SCVERIFY_ARRAY_DEPS := \
 	$(HLS_ARRAY_DEPS) \
 	$(SCVERIFY_ARRAY_TB)
@@ -227,9 +260,9 @@ HLS_ENV = \
 	HLS_RESET_NAME=rstn \
 	$(if $(HLS_SCVERIFY),HLS_SCVERIFY=$(HLS_SCVERIFY))
 
-.PHONY: test test-macro test-element build-systemc build-systemc-element build-systemc-tile build-systemc-array build-systemc-processor build-systemc-processor-double-buffered build-systemc-processor-large test-systemc-element test-systemc-tile test-systemc-array test-systemc-processor test-systemc-processor-standard test-systemc-processor-double-buffered test-systemc-processor-large check-systemc-env check-verilator-env clean hls hls-tile hls-array hls-processor hls-processor-double-buffered hls-processor-run scverify-array scverify-array-run scverify-processor scverify-processor-double-buffered scverify-processor-run check-catapult-root check-catapult-env FORCE
+.PHONY: test test-macro test-element build-systemc build-systemc-element build-systemc-tile build-systemc-array build-systemc-processor build-systemc-processor-double-buffered build-systemc-processor-large build-systemc-matrix-unit test-systemc-element test-systemc-tile test-systemc-array test-systemc-processor test-systemc-processor-standard test-systemc-processor-double-buffered test-systemc-processor-large test-systemc-matrix-unit check-systemc-env check-verilator-env clean hls hls-tile hls-array hls-processor hls-processor-double-buffered hls-processor-run scverify-array scverify-array-run scverify-processor scverify-processor-double-buffered scverify-processor-run check-catapult-root check-catapult-env FORCE
 
-test: test-macro test-element test-systemc-element test-systemc-tile test-systemc-array test-systemc-processor
+test: test-macro test-element test-systemc-element test-systemc-tile test-systemc-array test-systemc-processor test-systemc-matrix-unit
 
 test-macro:
 	$(PYTHON) $(THIS_DIR)/verilog/test_cim_macro.py $(JOBS_ARG) $(WAVEFORM_ARG) $(TEST_ARGS) $(MODEL_TEST_ARGS)
@@ -251,6 +284,8 @@ build-systemc-processor-double-buffered: $(CIM_PROCESSOR_DB_SYSTEMC_BUILD)/CIMPr
 
 build-systemc-processor-large: $(CIM_PROCESSOR_LARGE_SYSTEMC_BUILD)/CIMProcessorTb
 
+build-systemc-matrix-unit: $(CIM_MATRIX_UNIT_SYSTEMC_BUILD)/MatrixUnitTb
+
 test-systemc-element: check-systemc-env
 	@$(PYTHON) $(SYSTEMC_RUNNER) --suite cim_element_systemc --build-target build-systemc-element --binary $(SYSTEMC_BUILD)/CIMElementTb --log-dir $(SYSTEMC_BUILD)/logs/cim_element --makefile $(THIS_DIR)/Makefile --datatype $(DATATYPE) --ic-dimension $(IC_DIMENSION) --oc-dimension $(OC_DIMENSION)
 
@@ -271,6 +306,9 @@ test-systemc-processor-double-buffered: check-systemc-env
 test-systemc-processor-large: check-systemc-env
 	@$(PYTHON) $(SYSTEMC_RUNNER) --suite cim_processor_large_systemc --build-target build-systemc-processor-large --binary $(CIM_PROCESSOR_LARGE_SYSTEMC_BUILD)/CIMProcessorTb --log-dir $(CIM_PROCESSOR_LARGE_SYSTEMC_BUILD)/logs/cim_processor --makefile $(THIS_DIR)/Makefile --datatype INT8 --ic-dimension $(CIM_PROCESSOR_LARGE_IC_DIMENSION) --oc-dimension $(CIM_PROCESSOR_LARGE_OC_DIMENSION)
 
+test-systemc-matrix-unit: check-systemc-env
+	@$(PYTHON) $(SYSTEMC_RUNNER) --suite matrix_unit_cim_systemc --build-target build-systemc-matrix-unit --binary $(CIM_MATRIX_UNIT_SYSTEMC_BUILD)/MatrixUnitTb --log-dir $(CIM_MATRIX_UNIT_SYSTEMC_BUILD)/logs/matrix_unit --makefile $(THIS_DIR)/Makefile --datatype INT8 --ic-dimension $(CIM_PROCESSOR_IC_DIMENSION) --oc-dimension $(CIM_PROCESSOR_OC_DIMENSION)
+
 $(SYSTEMC_BUILD)/CIMElementTb: $(SYSTEMC_BUILD)/CIMElementTb.o $(CIM_ELEMENT_VERILATED_LIBS)
 	$(SYSTEMC_CC) -o $@ $< $(CIM_ELEMENT_VERILATED_LIBS) $(CIM_ELEMENT_VERILATED_RUNTIME_LIB) $(SYSTEMC_LDFLAGS)
 
@@ -289,6 +327,9 @@ $(CIM_PROCESSOR_DB_SYSTEMC_BUILD)/CIMProcessorTb: $(CIM_PROCESSOR_DB_SYSTEMC_BUI
 $(CIM_PROCESSOR_LARGE_SYSTEMC_BUILD)/CIMProcessorTb: $(CIM_PROCESSOR_LARGE_SYSTEMC_BUILD)/CIMProcessorTb.o
 	$(SYSTEMC_CC) -o $@ $^ $(SYSTEMC_LDFLAGS)
 
+$(CIM_MATRIX_UNIT_SYSTEMC_BUILD)/MatrixUnitTb: $(CIM_MATRIX_UNIT_SYSTEMC_BUILD)/MatrixUnitTb.o
+	$(SYSTEMC_CC) -o $@ $^ $(SYSTEMC_LDFLAGS)
+
 $(SYSTEMC_BUILD)/CIMElementTb.o: $(THIS_DIR)/systemc/CIMElementTb.cc $(REPO_ROOT)/src/CIMElement.h $(REPO_ROOT)/src/ArchitectureParams.h $(SYSTEMC_CASES_INC) $(CIM_ELEMENT_VERILATED_LIBS) | check-systemc-env check-verilator-env
 	mkdir -p $(SYSTEMC_BUILD)
 	$(SYSTEMC_CC) $(SYSTEMC_CXXFLAGS) -c -o $@ $<
@@ -301,17 +342,37 @@ $(SYSTEMC_BUILD)/CIMArrayTb.o: $(THIS_DIR)/systemc/CIMArrayTb.cc $(REPO_ROOT)/sr
 	mkdir -p $(SYSTEMC_BUILD)
 	$(SYSTEMC_CC) $(SYSTEMC_CXXFLAGS) -c -o $@ $<
 
-$(CIM_PROCESSOR_SYSTEMC_BUILD)/CIMProcessorTb.o: $(THIS_DIR)/systemc/CIMProcessorTb.cc $(REPO_ROOT)/src/CIMProcessor.h $(REPO_ROOT)/src/CIMArray.h $(REPO_ROOT)/src/ConnectionsSignal.h $(REPO_ROOT)/src/CIMTile.h $(REPO_ROOT)/src/CIMElement.h $(REPO_ROOT)/src/ArchitectureParams.h | check-systemc-env
+$(CIM_PROCESSOR_SYSTEMC_BUILD)/CIMProcessorTb.o: $(THIS_DIR)/systemc/CIMProcessorTb.cc $(REPO_ROOT)/src/CIMProcessor.h $(REPO_ROOT)/src/CIMArray.h $(REPO_ROOT)/src/ConnectionsSignal.h $(REPO_ROOT)/src/CIMTile.h $(REPO_ROOT)/src/CIMElement.h $(REPO_ROOT)/src/ArchitectureParams.h $(REPO_ROOT)/src/TypeToBits.h $(REPO_ROOT)/src/Utils.h | check-systemc-env
 	mkdir -p $(CIM_PROCESSOR_SYSTEMC_BUILD)
 	$(SYSTEMC_CC) $(SYSTEMC_CXXFLAGS) -DDOUBLE_BUFFERED_ACCUM_BUFFER=false -c -o $@ $<
 
-$(CIM_PROCESSOR_DB_SYSTEMC_BUILD)/CIMProcessorTb.o: $(THIS_DIR)/systemc/CIMProcessorTb.cc $(REPO_ROOT)/src/CIMProcessor.h $(REPO_ROOT)/src/CIMArray.h $(REPO_ROOT)/src/ConnectionsSignal.h $(REPO_ROOT)/src/CIMTile.h $(REPO_ROOT)/src/CIMElement.h $(REPO_ROOT)/src/ArchitectureParams.h | check-systemc-env
+$(CIM_PROCESSOR_DB_SYSTEMC_BUILD)/CIMProcessorTb.o: $(THIS_DIR)/systemc/CIMProcessorTb.cc $(REPO_ROOT)/src/CIMProcessor.h $(REPO_ROOT)/src/CIMArray.h $(REPO_ROOT)/src/ConnectionsSignal.h $(REPO_ROOT)/src/CIMTile.h $(REPO_ROOT)/src/CIMElement.h $(REPO_ROOT)/src/ArchitectureParams.h $(REPO_ROOT)/src/TypeToBits.h $(REPO_ROOT)/src/Utils.h | check-systemc-env
 	mkdir -p $(CIM_PROCESSOR_DB_SYSTEMC_BUILD)
 	$(SYSTEMC_CC) $(SYSTEMC_CXXFLAGS) -DDOUBLE_BUFFERED_ACCUM_BUFFER=true -c -o $@ $<
 
-$(CIM_PROCESSOR_LARGE_SYSTEMC_BUILD)/CIMProcessorTb.o: $(THIS_DIR)/systemc/CIMProcessorTb.cc $(REPO_ROOT)/src/CIMProcessor.h $(REPO_ROOT)/src/CIMArray.h $(REPO_ROOT)/src/ConnectionsSignal.h $(REPO_ROOT)/src/CIMTile.h $(REPO_ROOT)/src/CIMElement.h $(REPO_ROOT)/src/ArchitectureParams.h | check-systemc-env
+$(CIM_PROCESSOR_LARGE_SYSTEMC_BUILD)/CIMProcessorTb.o: $(THIS_DIR)/systemc/CIMProcessorTb.cc $(REPO_ROOT)/src/CIMProcessor.h $(REPO_ROOT)/src/CIMArray.h $(REPO_ROOT)/src/ConnectionsSignal.h $(REPO_ROOT)/src/CIMTile.h $(REPO_ROOT)/src/CIMElement.h $(REPO_ROOT)/src/ArchitectureParams.h $(REPO_ROOT)/src/TypeToBits.h $(REPO_ROOT)/src/Utils.h | check-systemc-env
 	mkdir -p $(CIM_PROCESSOR_LARGE_SYSTEMC_BUILD)
 	$(SYSTEMC_CC) $(SYSTEMC_CXXFLAGS) -DDOUBLE_BUFFERED_ACCUM_BUFFER=false -DCIM_PROCESSOR_LARGE_TEST=1 -c -o $@ $<
+
+$(CIM_MATRIX_UNIT_SYSTEMC_BUILD)/MatrixUnitTb.o: \
+	$(THIS_DIR)/systemc/MatrixUnitTb.cc \
+	$(REPO_ROOT)/src/MatrixUnit.h \
+	$(REPO_ROOT)/src/CIMProcessor.h \
+	$(REPO_ROOT)/src/CIMArray.h \
+	$(REPO_ROOT)/src/CIMTile.h \
+	$(REPO_ROOT)/src/CIMElement.h \
+	$(REPO_ROOT)/src/InputController.h \
+	$(REPO_ROOT)/src/WeightController.h \
+	$(REPO_ROOT)/src/OutputController.h \
+	$(REPO_ROOT)/src/ParamsDeserializer.h \
+	$(REPO_ROOT)/src/DoubleBuffer.h \
+	$(REPO_ROOT)/src/DualPortBuffer.h \
+	$(REPO_ROOT)/src/ArchitectureParams.h \
+	$(REPO_ROOT)/src/TypeToBits.h \
+	$(REPO_ROOT)/src/Utils.h \
+	| check-systemc-env
+	mkdir -p $(CIM_MATRIX_UNIT_SYSTEMC_BUILD)
+	$(SYSTEMC_CC) $(SYSTEMC_CXXFLAGS) $(CIM_MATRIX_UNIT_CXXFLAGS) -c -o $@ $<
 
 $(SYSTEMC_CASES_MK): $(SYSTEMC_CASES)
 	mkdir -p $(SYSTEMC_GENERATED)
