@@ -14,20 +14,20 @@ localparam int unsigned ILLEGAL_SUITE_EXPECTED_EXCEPTION_COUNT = 3;
 logic                  wclk;
 logic                  mclk;
 logic [A_WIDTH-1:0]    a [CH_IN];
-logic [B_WIDTH-1:0]    b [CH_OUT][WRITE_CH_IN];
+logic [B_WIDTH-1:0]    b [WRITE_CH_IN][CH_OUT];
 logic                  wen;
 logic                  mac;
 logic                  init;
 logic                  a_signed;
 logic                  b_signed [CH_OUT];
-logic [BITS_CH_IN-1:0] waddr;
+logic [BITS_CH_IN-1:0] wchi;
 logic [BITS_SET-1:0]   wset;
 logic [BITS_SET-1:0]   mset;
 logic [C_WIDTH-1:0]    c [CH_OUT];
 
 // Reference state used by the self-checker. Rows start invalid and become
 // usable only after the write scheduler has completed all write groups for that row
-logic [B_WIDTH-1:0] model_weights [B_SETS][CH_OUT][CH_IN];
+logic [B_WIDTH-1:0] model_weights [B_SETS][CH_IN][CH_OUT];
 logic [C_WIDTH-1:0] expected [NUM_ITERS][CH_OUT];
 int expected_row [NUM_ITERS];
 bit row_valid [B_SETS];
@@ -74,7 +74,7 @@ CIMIntMacroWrapper #(
     .init(init),
     .a_signed(a_signed),
     .b_signed(b_signed),
-    .waddr(waddr),
+    .wchi(wchi),
     .wset(wset),
     .mset(mset),
     .c(c)
@@ -174,7 +174,7 @@ task automatic drive_defaults;
     mac = 1'b0;
     init = 1'b0;
     a_signed = A_SIGNED;
-    waddr = '0;
+    wchi = '0;
     wset = '0;
     mset = '0;
     init_rng_from_plusarg();
@@ -197,9 +197,9 @@ task automatic drive_defaults;
     for (int chi = 0; chi < CH_IN; chi++) begin
       a[chi] = '0;
     end
-    for (int cho = 0; cho < CH_OUT; cho++) begin
-      for (int lane = 0; lane < WRITE_CH_IN; lane++) begin
-        b[cho][lane] = '0;
+    for (int lane = 0; lane < WRITE_CH_IN; lane++) begin
+      for (int cho = 0; cho < CH_OUT; cho++) begin
+        b[lane][cho] = '0;
       end
     end
     #1;
@@ -267,11 +267,11 @@ task automatic drive_random_weight_group(input int row, input int base);
   int unsigned value;
   begin
     wset = BITS_SET'(row);
-    waddr = BITS_CH_IN'(base);
-    for (int cho = 0; cho < CH_OUT; cho++) begin
-      for (int lane = 0; lane < WRITE_CH_IN; lane++) begin
+    wchi = BITS_CH_IN'(base);
+    for (int lane = 0; lane < WRITE_CH_IN; lane++) begin
+      for (int cho = 0; cho < CH_OUT; cho++) begin
         rng_next(value);
-        b[cho][lane] = B_WIDTH'(value);
+        b[lane][cho] = B_WIDTH'(value);
       end
     end
     wen = 1'b1;
@@ -281,9 +281,9 @@ endtask
 // Mirror a completed DUT write group into the reference model
 task automatic commit_weight_group(input int row, input int base);
   begin
-    for (int cho = 0; cho < CH_OUT; cho++) begin
-      for (int lane = 0; lane < WRITE_CH_IN; lane++) begin
-        model_weights[row][cho][base + lane] = b[cho][lane];
+    for (int lane = 0; lane < WRITE_CH_IN; lane++) begin
+      for (int cho = 0; cho < CH_OUT; cho++) begin
+        model_weights[row][base + lane][cho] = b[lane][cho];
       end
     end
   end
@@ -303,7 +303,7 @@ task automatic record_expected(input int slot, input int row);
     for (int cho = 0; cho < CH_OUT; cho++) begin
       acc = 0;
       for (int chi = 0; chi < CH_IN; chi++) begin
-        acc += decode_a(a[chi]) * decode_b(model_weights[row][cho][chi], cho);
+        acc += decode_a(a[chi]) * decode_b(model_weights[row][chi][cho], cho);
       end
       expected[slot][cho] = C_WIDTH'(acc);
     end

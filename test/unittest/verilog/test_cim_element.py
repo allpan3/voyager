@@ -38,12 +38,12 @@ class Inst:
     mode: str
     signed: bool
     mac_latency: int
-    write_ch_in: int
+    bk: int
     iterations: int
     mclk_period: int
     wclk_period: int
-    a_cols: int = 4
-    ch_out: int = 2
+    k: int = 4
+    n: int = 2
     b_sets: int = 2
     base_a_width: int = 4
     base_b_width: int = 4
@@ -61,7 +61,7 @@ CASES = (
         mode=MODE_PARALLEL,
         signed=False,
         mac_latency=1,
-        write_ch_in=2,
+        bk=2,
         iterations=8,
         mclk_period=5,
         wclk_period=7,
@@ -71,7 +71,7 @@ CASES = (
         mode=MODE_PARALLEL,
         signed=False,
         mac_latency=2,
-        write_ch_in=2,
+        bk=2,
         iterations=8,
         mclk_period=5,
         wclk_period=7,
@@ -83,11 +83,11 @@ CASES = (
         mode=MODE_PARALLEL,
         signed=False,
         mac_latency=2,
-        write_ch_in=2,
+        bk=2,
         iterations=8,
         mclk_period=5,
         wclk_period=7,
-        ch_out=4,
+        n=2,
         b_width=8,
         expect_dropped_issue=False,
     ),
@@ -96,12 +96,12 @@ CASES = (
         mode=MODE_PARALLEL,
         signed=True,
         mac_latency=3,
-        write_ch_in=1,
+        bk=1,
         iterations=10,
         mclk_period=6,
         wclk_period=11,
-        a_cols=5,
-        ch_out=6,
+        k=5,
+        n=3,
         b_sets=3,
         base_c_width=12,
         a_width=10,
@@ -109,41 +109,41 @@ CASES = (
         expect_dropped_issue=True,
     ),
     Inst(
-        name="generic_element_parallel_chin1_equal_clocks_min_c",
+        name="generic_element_parallel_k1_equal_clocks_min_c",
         mode=MODE_PARALLEL,
         signed=False,
         mac_latency=1,
-        write_ch_in=1,
+        bk=1,
         iterations=6,
         mclk_period=6,
         wclk_period=6,
-        a_cols=1,
+        k=1,
         base_c_width=9,
     ),
     Inst(
-        name="generic_element_parallel_single_row_signed_b16",
+        name="generic_element_parallel_single_set_signed_b16",
         mode=MODE_PARALLEL,
         signed=True,
         mac_latency=2,
-        write_ch_in=2,
+        bk=2,
         iterations=6,
         mclk_period=5,
         wclk_period=7,
-        ch_out=4,
+        n=1,
         b_sets=1,
         b_width=16,
         expect_dropped_issue=False,
     ),
     Inst(
-        name="generic_element_parallel_b12_chout6_unsigned",
+        name="generic_element_parallel_b12_n2_unsigned",
         mode=MODE_PARALLEL,
         signed=False,
         mac_latency=2,
-        write_ch_in=2,
+        bk=2,
         iterations=8,
         mclk_period=5,
         wclk_period=7,
-        ch_out=6,
+        n=2,
         b_width=12,
         expect_dropped_issue=False,
     ),
@@ -152,7 +152,7 @@ CASES = (
         mode=MODE_PARALLEL,
         signed=False,
         mac_latency=2,
-        write_ch_in=2,
+        bk=2,
         iterations=8,
         mclk_period=5,
         wclk_period=7,
@@ -164,7 +164,7 @@ CASES = (
         mode=MODE_PARALLEL,
         signed=True,
         mac_latency=2,
-        write_ch_in=2,
+        bk=2,
         iterations=8,
         mclk_period=5,
         wclk_period=7,
@@ -172,16 +172,16 @@ CASES = (
         expect_dropped_issue=True,
     ),
     Inst(
-        name="generic_element_parallel_latency5_rows5_signed",
+        name="generic_element_parallel_latency5_k5_signed",
         mode=MODE_PARALLEL,
         signed=True,
         mac_latency=5,
-        write_ch_in=5,
+        bk=5,
         iterations=10,
         mclk_period=7,
         wclk_period=11,
-        a_cols=5,
-        ch_out=4,
+        k=5,
+        n=2,
         b_sets=5,
         base_c_width=12,
         a_width=5,
@@ -193,11 +193,11 @@ CASES = (
         mode=MODE_PARALLEL,
         signed=False,
         mac_latency=3,
-        write_ch_in=2,
+        bk=2,
         iterations=8,
         mclk_period=4,
         wclk_period=8,
-        ch_out=4,
+        n=1,
         b_width=16,
         expect_dropped_issue=False,
     ),
@@ -206,7 +206,7 @@ CASES = (
         mode=MODE_SERIAL,
         signed=True,
         mac_latency=1,
-        write_ch_in=2,
+        bk=2,
         iterations=6,
         mclk_period=5,
         wclk_period=7,
@@ -217,7 +217,7 @@ CASES = (
         mode=MODE_SERIAL,
         signed=False,
         mac_latency=2,
-        write_ch_in=2,
+        bk=2,
         iterations=6,
         mclk_period=5,
         wclk_period=7,
@@ -231,12 +231,12 @@ CASES = (
         mode=MODE_SERIAL,
         signed=True,
         mac_latency=2,
-        write_ch_in=1,
+        bk=1,
         iterations=6,
         mclk_period=7,
         wclk_period=10,
-        a_cols=5,
-        ch_out=4,
+        k=5,
+        n=2,
         b_sets=3,
         base_a_width=3,
         base_c_width=12,
@@ -249,7 +249,7 @@ CASES = (
         mode=MODE_SERIAL,
         signed=False,
         mac_latency=1,
-        write_ch_in=2,
+        bk=2,
         iterations=5,
         mclk_period=5,
         wclk_period=7,
@@ -260,7 +260,7 @@ CASES = (
         mode=MODE_SERIAL,
         signed=True,
         mac_latency=2,
-        write_ch_in=2,
+        bk=2,
         iterations=5,
         mclk_period=5,
         wclk_period=7,
@@ -274,7 +274,7 @@ CASES = (
         mode=MODE_SERIAL,
         signed=False,
         mac_latency=2,
-        write_ch_in=2,
+        bk=2,
         iterations=5,
         mclk_period=5,
         wclk_period=7,
@@ -288,7 +288,7 @@ CASES = (
         mode=MODE_SERIAL,
         signed=True,
         mac_latency=2,
-        write_ch_in=2,
+        bk=2,
         iterations=5,
         mclk_period=5,
         wclk_period=7,
@@ -298,28 +298,28 @@ CASES = (
         expect_dropped_issue=True,
     ),
     Inst(
-        name="generic_element_serial_b12_chout6_signed",
+        name="generic_element_serial_b12_n2_signed",
         mode=MODE_SERIAL,
         signed=True,
         mac_latency=2,
-        write_ch_in=2,
+        bk=2,
         iterations=5,
         mclk_period=5,
         wclk_period=7,
-        ch_out=6,
+        n=2,
         b_width=12,
         expect_dropped_issue=True,
     ),
     Inst(
-        name="generic_element_serial_chin1_single_row_unsigned",
+        name="generic_element_serial_k1_single_set_unsigned",
         mode=MODE_SERIAL,
         signed=False,
         mac_latency=2,
-        write_ch_in=1,
+        bk=1,
         iterations=4,
         mclk_period=5,
         wclk_period=7,
-        a_cols=1,
+        k=1,
         b_sets=1,
         base_c_width=9,
         expect_dropped_issue=True,
@@ -329,11 +329,11 @@ CASES = (
         mode=MODE_PARALLEL,
         signed=True,
         mac_latency=2,
-        write_ch_in=2,
+        bk=2,
         iterations=4,
         mclk_period=5,
         wclk_period=7,
-        ch_out=4,
+        n=2,
         base_c_width=12,
         a_width=9,
         b_width=8,
@@ -345,11 +345,11 @@ CASES = (
         mode=MODE_SERIAL,
         signed=True,
         mac_latency=2,
-        write_ch_in=2,
+        bk=2,
         iterations=4,
         mclk_period=5,
         wclk_period=7,
-        ch_out=4,
+        n=2,
         base_c_width=12,
         a_width=7,
         b_width=8,
@@ -361,12 +361,12 @@ CASES = (
         mode=MODE_SERIAL,
         signed=True,
         mac_latency=5,
-        write_ch_in=1,
+        bk=1,
         iterations=5,
         mclk_period=7,
         wclk_period=10,
-        a_cols=5,
-        ch_out=6,
+        k=5,
+        n=2,
         b_sets=5,
         base_a_width=3,
         base_c_width=12,
@@ -375,11 +375,11 @@ CASES = (
         expect_dropped_issue=True,
     ),
     Inst(
-        name="macro1_element_serial_unsigned_lat3_wb1_equal_clocks",
+        name="macro1_element_serial_unsigned_lat3_bk1_equal_clocks",
         mode=MODE_SERIAL,
         signed=False,
         mac_latency=3,
-        write_ch_in=1,
+        bk=1,
         iterations=6,
         mclk_period=5,
         wclk_period=5,
@@ -389,16 +389,16 @@ CASES = (
         impl=IMPL_MACRO_1,
     ),
     Inst(
-        name="macro1_element_serial_unsigned_chin8_lat3_wb1_equal_clocks",
+        name="macro1_element_serial_unsigned_k8_lat3_bk1_equal_clocks",
         mode=MODE_SERIAL,
         signed=False,
         mac_latency=3,
-        write_ch_in=1,
+        bk=1,
         iterations=5,
         mclk_period=6,
         wclk_period=6,
-        a_cols=8,
-        ch_out=3,
+        k=8,
+        n=3,
         b_sets=1,
         base_c_width=11,
         expect_dropped_issue=True,
@@ -429,36 +429,34 @@ def num_b_slices(case: Inst) -> int:
 
 # Return the minimum legal base C width for the macro wrapper shape
 def minimum_base_c_width(case: Inst) -> int:
-    guard_width = 1 if case.a_cols <= 1 else (case.a_cols - 1).bit_length()
+    guard_width = 1 if case.k <= 1 else (case.k - 1).bit_length()
     return case.base_a_width + case.base_b_width + guard_width
 
 
 # Catch parameter combinations that the shared SV harness cannot model correctly
 def validate_case(case: Inst) -> None:
-    if case.a_cols <= 0 or case.ch_out <= 0 or case.b_sets <= 0:
+    if case.k <= 0 or case.n <= 0 or case.b_sets <= 0:
         raise ValueError(f"{case.name}: dimensions must be positive")
     if case.base_a_width <= 0 or case.base_b_width <= 0 or case.base_c_width <= 0:
         raise ValueError(f"{case.name}: base widths must be positive")
     if case.a_width <= 0 or case.b_width <= 0:
         raise ValueError(f"{case.name}: logical widths must be positive")
-    if case.write_ch_in <= 0 or case.mac_latency <= 0:
-        raise ValueError(f"{case.name}: WRITE_CH_IN and MAC_LATENCY must be positive")
+    if case.bk <= 0 or case.mac_latency <= 0:
+        raise ValueError(f"{case.name}: BK and MAC_LATENCY must be positive")
     if case.iterations <= 0:
         raise ValueError(f"{case.name}: iterations must be positive")
     if case.mclk_period <= 1 or case.wclk_period <= 1:
         raise ValueError(f"{case.name}: clock periods must be greater than one tick")
-    if (case.a_cols % case.write_ch_in) != 0:
-        raise ValueError(f"{case.name}: A_COLS must be divisible by WRITE_CH_IN")
+    if (case.k % case.bk) != 0:
+        raise ValueError(f"{case.name}: K must be divisible by BK")
     if (case.b_width % case.base_b_width) != 0:
         raise ValueError(f"{case.name}: B_WIDTH must be divisible by BASE_B_WIDTH")
     if num_b_slices(case) <= 0:
         raise ValueError(f"{case.name}: B_WIDTH must be at least BASE_B_WIDTH")
-    if (case.ch_out % num_b_slices(case)) != 0:
-        raise ValueError(f"{case.name}: CH_OUT must be divisible by B slices")
     if case.base_c_width < minimum_base_c_width(case):
         raise ValueError(f"{case.name}: BASE_C_WIDTH is too small for the macro wrapper")
     if case.mode == MODE_SERIAL:
-        guard_width = 1 if case.a_cols <= 1 else (case.a_cols - 1).bit_length()
+        guard_width = 1 if case.k <= 1 else (case.k - 1).bit_length()
         if case.base_c_width <= case.base_b_width + guard_width:
             raise ValueError(f"{case.name}: serial slice capacity must be positive")
     if case.test_kind not in {TEST_NORMAL, TEST_RESET_MID_OP}:
@@ -468,14 +466,14 @@ def validate_case(case: Inst) -> None:
     if case.impl == IMPL_MACRO_1:
         if case.mode != MODE_SERIAL:
             raise ValueError(f"{case.name}: macro1 requires bit-serial mode")
-        if case.a_cols <= 1:
-            raise ValueError(f"{case.name}: macro1 requires CH_IN greater than one")
+        if case.k <= 1:
+            raise ValueError(f"{case.name}: macro1 requires K greater than one")
         if case.signed:
             raise ValueError(f"{case.name}: macro1 element cases must be unsigned")
         if case.b_sets != 1:
             raise ValueError(f"{case.name}: macro1 requires B_SETS=1")
-        if case.write_ch_in != 1:
-            raise ValueError(f"{case.name}: macro1 requires WRITE_CH_IN=1")
+        if case.bk != 1:
+            raise ValueError(f"{case.name}: macro1 requires BK=1")
         if case.mac_latency < 3:
             raise ValueError(f"{case.name}: macro1 requires MAC_LATENCY >= 3")
         if case.mclk_period != case.wclk_period:
@@ -496,13 +494,13 @@ def tb_text(case: Inst) -> str:
 
     return f"""module {TOP};
   localparam string CASE_NAME = \"{case.name}\";
-  localparam int unsigned CH_IN = {case.a_cols};
-  localparam int unsigned CH_OUT = {case.ch_out};
+  localparam int unsigned K = {case.k};
+  localparam int unsigned N = {case.n};
+  localparam int unsigned BK = {case.bk};
   localparam int unsigned B_SETS = {case.b_sets};
   localparam int unsigned BASE_A_WIDTH = {case.base_a_width};
   localparam int unsigned BASE_B_WIDTH = {case.base_b_width};
   localparam int unsigned BASE_C_WIDTH = {case.base_c_width};
-  localparam int unsigned WRITE_CH_IN = {case.write_ch_in};
   localparam int unsigned MAC_LATENCY = {case.mac_latency};
   localparam cim_mode_t INST_MODE = {case.mode};
   localparam cim_macro_wrapper_impl_t INST_IMPL = {case.impl};

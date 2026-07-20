@@ -1,16 +1,16 @@
 // Common CIMIntElement unit-test harness code
 // Include this inside a generated test module after defining the localparams below:
-// CASE_NAME, CH_IN, CH_OUT, B_SETS, BASE_A_WIDTH, BASE_B_WIDTH, BASE_C_WIDTH,
-// WRITE_CH_IN, MAC_LATENCY, INST_MODE, INST_IMPL, SIGNED, A_WIDTH, B_WIDTH, NUM_ITERS,
+// CASE_NAME, K, N, BK, B_SETS, BASE_A_WIDTH, BASE_B_WIDTH, BASE_C_WIDTH,
+// MAC_LATENCY, INST_MODE, INST_IMPL, SIGNED, A_WIDTH, B_WIDTH, NUM_ITERS,
 // MCLK_PERIOD, WCLK_PERIOD, EXPECT_DROPPED_ISSUE, and TEST_KIND
 
-localparam int unsigned A_COLS = CH_IN;
-localparam int unsigned SUM_GUARD_WIDTH = (A_COLS <= 1) ? 1 : $clog2(A_COLS);
 localparam int unsigned NUM_B_SLICES = B_WIDTH / BASE_B_WIDTH;
-localparam int unsigned B_COLS = CH_OUT / NUM_B_SLICES;
-localparam int unsigned B_ROWS = WRITE_CH_IN;
+localparam int unsigned CH_IN = K;
+localparam int unsigned CH_OUT = N * NUM_B_SLICES;
+localparam int unsigned WRITE_CH_IN = BK;
+localparam int unsigned SUM_GUARD_WIDTH = (K <= 1) ? 1 : $clog2(K);
 localparam int unsigned C_WIDTH = A_WIDTH + B_WIDTH + SUM_GUARD_WIDTH;
-localparam int unsigned BITS_A_COLS = (A_COLS <= 1) ? 1 : $clog2(A_COLS);
+localparam int unsigned BITS_K = (K <= 1) ? 1 : $clog2(K);
 localparam int unsigned BITS_SET = (B_SETS <= 1) ? 1 : $clog2(B_SETS);
 localparam int unsigned DEFAULT_RNG_SEED = 32'h1;
 
@@ -21,19 +21,19 @@ localparam int unsigned MAX_WAIT_CYCLES = 4096;
 logic                       wclk;
 logic                       mclk;
 logic                       rstn;
-logic [A_WIDTH-1:0]         a [A_COLS];
-logic [B_WIDTH-1:0]         b [B_COLS][B_ROWS];
+logic [A_WIDTH-1:0]         a [K];
+logic [B_WIDTH-1:0]         b [BK][N];
 logic                       wen;
-logic [BITS_A_COLS-1:0]     waddr;
+logic [BITS_K-1:0]          wchi;
 logic [BITS_SET-1:0]        wset;
 logic                       mac_issue;
 logic [BITS_SET-1:0]        mset;
-logic [C_WIDTH-1:0]         c [B_COLS];
+logic [C_WIDTH-1:0]         c [N];
 logic                       c_retire;
 logic                       mac_ready;
 
-logic [B_WIDTH-1:0] model_weights [B_SETS][B_COLS][A_COLS];
-logic [C_WIDTH-1:0] expected [NUM_ITERS][B_COLS];
+logic [B_WIDTH-1:0] model_b [B_SETS][K][N];
+logic [C_WIDTH-1:0] expected [NUM_ITERS][N];
 logic last_retire_toggle;
 int unsigned dropped_issue_attempts;
 int unsigned rng_state;
@@ -60,7 +60,7 @@ CIMIntElement #(
     .a(a),
     .b(b),
     .wen(wen),
-    .waddr(waddr),
+    .wchi(wchi),
     .wset(wset),
     .mac_issue(mac_issue),
     .mset(mset),
@@ -111,18 +111,18 @@ task automatic check_common_test_params;
   end
 endtask
 
-// Generate one random activation vector on the a interface
-task automatic randomize_activation;
+// Generate one random A vector on the a interface
+task automatic randomize_a;
   int unsigned value;
   begin
-    for (int col = 0; col < A_COLS; col++) begin
+    for (int k = 0; k < K; k++) begin
       rng_next(value);
-      a[col] = A_WIDTH'(value);
+      a[k] = A_WIDTH'(value);
     end
   end
 endtask
 
-// Interpret an activation according to the generated element signedness
+// Interpret an A according to the generated element signedness
 function automatic longint signed decode_a(input logic [A_WIDTH-1:0] value);
   logic signed [A_WIDTH-1:0] signed_value;
   begin
@@ -131,7 +131,7 @@ function automatic longint signed decode_a(input logic [A_WIDTH-1:0] value);
   end
 endfunction
 
-// Interpret a stored weight according to the generated element signedness
+// Interpret a stored B according to the generated element signedness
 function automatic longint signed decode_b(input logic [B_WIDTH-1:0] value);
   logic signed [B_WIDTH-1:0] signed_value;
   begin
@@ -165,7 +165,7 @@ task automatic drive_defaults;
     mclk = 1'b0;
     rstn = 1'b0;
     wen = 1'b0;
-    waddr = '0;
+    wchi = '0;
     wset = '0;
     mac_issue = 1'b0;
     mset = '0;
@@ -174,24 +174,24 @@ task automatic drive_defaults;
 
     init_rng_from_plusarg();
 
-    for (int chi = 0; chi < A_COLS; chi++) begin
-      a[chi] = '0;
+    for (int k = 0; k < K; k++) begin
+      a[k] = '0;
     end
-    for (int col = 0; col < B_COLS; col++) begin
-      for (int lane = 0; lane < B_ROWS; lane++) begin
-        b[col][lane] = '0;
+    for (int bk = 0; bk < BK; bk++) begin
+      for (int n = 0; n < N; n++) begin
+        b[bk][n] = '0;
       end
     end
-    for (int row = 0; row < B_SETS; row++) begin
-      for (int col = 0; col < B_COLS; col++) begin
-        for (int chi = 0; chi < A_COLS; chi++) begin
-          model_weights[row][col][chi] = '0;
+    for (int set_idx = 0; set_idx < B_SETS; set_idx++) begin
+      for (int k = 0; k < K; k++) begin
+        for (int n = 0; n < N; n++) begin
+          model_b[set_idx][k][n] = '0;
         end
       end
     end
     for (int slot = 0; slot < NUM_ITERS; slot++) begin
-      for (int col = 0; col < B_COLS; col++) begin
-        expected[slot][col] = '0;
+      for (int n = 0; n < N; n++) begin
+        expected[slot][n] = '0;
       end
     end
     #1;
@@ -202,8 +202,8 @@ endtask
 task automatic check_test_params;
   begin
     check_common_test_params();
-    if ((A_COLS % WRITE_CH_IN) != 0) begin
-      $fatal(1, "%s: A_COLS must be divisible by WRITE_CH_IN", CASE_NAME);
+    if ((K % BK) != 0) begin
+      $fatal(1, "%s: K must be divisible by BK", CASE_NAME);
     end
     if ((B_WIDTH % BASE_B_WIDTH) != 0) begin
       $fatal(1, "%s: B_WIDTH must be divisible by BASE_B_WIDTH", CASE_NAME);
@@ -244,75 +244,75 @@ task automatic apply_reset;
   end
 endtask
 
-// Drive one WRITE_CH_IN-wide logical B write group for a set and base channel
-task automatic drive_random_weight_group(input int row, input int base);
+// Drive one BK-wide B block for a set and base K index
+task automatic drive_random_b_group(input int set_idx, input int base_k);
   int unsigned value;
   begin
-    wset = BITS_SET'(row);
-    waddr = BITS_A_COLS'(base);
-    for (int col = 0; col < B_COLS; col++) begin
-      for (int lane = 0; lane < B_ROWS; lane++) begin
+    wset = BITS_SET'(set_idx);
+    wchi = BITS_K'(base_k);
+    for (int bk = 0; bk < BK; bk++) begin
+      for (int n = 0; n < N; n++) begin
         rng_next(value);
-        b[col][lane] = B_WIDTH'(value);
+        b[bk][n] = B_WIDTH'(value);
       end
     end
     wen = 1'b1;
   end
 endtask
 
-// Mirror a completed DUT write group into the logical reference model
-task automatic commit_weight_group(input int row, input int base);
+// Mirror a completed DUT write into the logical reference model
+task automatic commit_b_group(input int set_idx, input int base_k);
   begin
-    for (int col = 0; col < B_COLS; col++) begin
-      for (int lane = 0; lane < B_ROWS; lane++) begin
-        model_weights[row][col][base + lane] = b[col][lane];
+    for (int bk = 0; bk < BK; bk++) begin
+      for (int n = 0; n < N; n++) begin
+        model_b[set_idx][base_k + bk][n] = b[bk][n];
       end
     end
   end
 endtask
 
 // Load every logical B set before MAC checks begin
-task automatic load_all_weights;
+task automatic load_all_b_sets;
   begin
-    for (int row = 0; row < B_SETS; row++) begin
-      for (int base = 0; base < A_COLS; base += WRITE_CH_IN) begin
-        drive_random_weight_group(row, base);
+    for (int set_idx = 0; set_idx < B_SETS; set_idx++) begin
+      for (int base_k = 0; base_k < K; base_k += BK) begin
+        drive_random_b_group(set_idx, base_k);
         tick_wclk();
-        commit_weight_group(row, base);
+        commit_b_group(set_idx, base_k);
         wen = 1'b0;
       end
     end
   end
 endtask
 
-// Compute the expected logical output for the currently driven activation and set
-task automatic record_expected(input int slot, input int row);
+// Compute the expected logical output for the currently driven A and set
+task automatic record_expected(input int slot, input int set_idx);
   longint signed acc;
   begin
     if (slot >= NUM_ITERS) begin
       $fatal(1, "%s: expected slot %0d is outside NUM_ITERS=%0d", CASE_NAME, slot, NUM_ITERS);
     end
 
-    for (int col = 0; col < B_COLS; col++) begin
+    for (int n = 0; n < N; n++) begin
       acc = 0;
-      for (int chi = 0; chi < A_COLS; chi++) begin
-        acc += decode_a(a[chi]) * decode_b(model_weights[row][col][chi]);
+      for (int k = 0; k < K; k++) begin
+        acc += decode_a(a[k]) * decode_b(model_b[set_idx][k][n]);
       end
-      expected[slot][col] = C_WIDTH'(acc);
+      expected[slot][n] = C_WIDTH'(acc);
     end
   end
 endtask
 
 // Issue one logical element MAC operation while the element is ready
-task automatic start_element_op(input int slot, input int row);
+task automatic start_element_op(input int slot, input int set_idx);
   begin
     if (mac_ready !== 1'b1) begin
       $fatal(1, "%s: attempted to issue op %0d while mac_ready is low", CASE_NAME, slot);
     end
 
-    randomize_activation();
-    mset = BITS_SET'(row);
-    record_expected(slot, row);
+    randomize_a();
+    mset = BITS_SET'(set_idx);
+    record_expected(slot, set_idx);
 
     mac_issue = 1'b1;
     tick_mclk();
@@ -332,7 +332,7 @@ task automatic drive_dropped_issue_noise;
   end
 endtask
 
-// Wait for one retirement and compare every output column
+// Wait for one retirement and compare every column in N
 task automatic wait_for_retire_and_check(input int slot);
   int unsigned wait_cycles;
   begin
@@ -348,11 +348,11 @@ task automatic wait_for_retire_and_check(input int slot);
     end
     last_retire_toggle = c_retire;
 
-    for (int col = 0; col < B_COLS; col++) begin
-      if (c[col] !== expected[slot][col]) begin
+    for (int n = 0; n < N; n++) begin
+      if (c[n] !== expected[slot][n]) begin
         $fatal(1,
-               "%s: op %0d column %0d got 0x%0h expected 0x%0h",
-               CASE_NAME, slot, col, c[col], expected[slot][col]);
+               "%s: op %0d column n=%0d got 0x%0h expected 0x%0h",
+               CASE_NAME, slot, n, c[n], expected[slot][n]);
       end
     end
     if (mac_ready !== 1'b1) begin
@@ -363,29 +363,29 @@ endtask
 
 // Check that retired outputs stay stable until the next retirement
 task automatic check_result_hold(input int slot);
-  logic [C_WIDTH-1:0] held_c [B_COLS];
+  logic [C_WIDTH-1:0] held_c [N];
   begin
-    for (int col = 0; col < B_COLS; col++) begin
-      held_c[col] = c[col];
+    for (int n = 0; n < N; n++) begin
+      held_c[n] = c[n];
     end
     mac_issue = 1'b0;
     tick_mclk();
     if (c_retire !== last_retire_toggle) begin
       $fatal(1, "%s: c_retire flipped without a new op after slot %0d", CASE_NAME, slot);
     end
-    for (int col = 0; col < B_COLS; col++) begin
-      if (c[col] !== held_c[col]) begin
-        $fatal(1, "%s: c changed without a new retirement after slot %0d column %0d",
-               CASE_NAME, slot, col);
+    for (int n = 0; n < N; n++) begin
+      if (c[n] !== held_c[n]) begin
+        $fatal(1, "%s: c changed without a new retirement after slot %0d column n=%0d",
+               CASE_NAME, slot, n);
       end
     end
   end
 endtask
 
 // Run one complete logical operation and stable-output check
-task automatic run_one_op(input int slot, input int row);
+task automatic run_one_op(input int slot, input int set_idx);
   begin
-    start_element_op(slot, row);
+    start_element_op(slot, set_idx);
     wait_for_retire_and_check(slot);
     check_result_hold(slot);
   end
@@ -415,7 +415,7 @@ task automatic run_pipelined_ops;
     wait_cycles = 0;
     while (retired < NUM_ITERS) begin
       if ((issued < NUM_ITERS) && (mac_ready === 1'b1)) begin
-        randomize_activation();
+        randomize_a();
         mset = BITS_SET'(issued % B_SETS);
         record_expected(issued, issued % B_SETS);
         mac_issue = 1'b1;
@@ -428,11 +428,11 @@ task automatic run_pipelined_ops;
 
       if (c_retire !== last_retire_toggle) begin
         last_retire_toggle = c_retire;
-        for (int col = 0; col < B_COLS; col++) begin
-          if (c[col] !== expected[retired][col]) begin
+        for (int n = 0; n < N; n++) begin
+          if (c[n] !== expected[retired][n]) begin
             $fatal(1,
-                   "%s: pipelined op %0d column %0d got 0x%0h expected 0x%0h",
-                   CASE_NAME, retired, col, c[col], expected[retired][col]);
+                   "%s: pipelined op %0d column n=%0d got 0x%0h expected 0x%0h",
+                   CASE_NAME, retired, n, c[n], expected[retired][n]);
           end
         end
         retired++;
@@ -454,7 +454,7 @@ task automatic reset_during_active_op;
       $fatal(1, "%s: reset-mid-op precondition failed because mac_ready is low", CASE_NAME);
     end
 
-    randomize_activation();
+    randomize_a();
     mset = '0;
     mac_issue = 1'b1;
     tick_mclk();
@@ -504,7 +504,7 @@ endtask
 task automatic run_reset_mid_op;
   begin
     apply_reset();
-    load_all_weights();
+    load_all_b_sets();
     reset_during_active_op();
     run_normal_ops();
   end
@@ -518,7 +518,7 @@ initial begin
     run_reset_mid_op();
   end else begin
     apply_reset();
-    load_all_weights();
+    load_all_b_sets();
     run_normal_ops();
   end
 

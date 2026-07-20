@@ -9,7 +9,7 @@ module CIMIntMacroModel #(
     parameter int unsigned A_WIDTH = 4,              // Bit-width of A operand (the streaming operand)
     parameter int unsigned B_WIDTH = 4,              // Base bit-width of B operand (the stored operand)
     parameter int unsigned C_WIDTH = 20,             // Bit-width of the output result; This determines the max supported precision for A
-    parameter int unsigned WRITE_CH_IN = 1,             // Number of input channels written per cycle when writing B
+    parameter int unsigned WRITE_CH_IN = 1,          // Number of input channels written per cycle when writing B
     parameter int unsigned MAC_LATENCY = 1,          // Latency to produce C; for bit-serial, this is the latency for a single bit's MAC, the total latency would be this plus A_WIDTH-1
     parameter cim_mode_t MODE = CIM_MODE_BIT_SERIAL, // Select bit-parallel or bit-serial MAC behavior
     localparam int unsigned BITS_CH_IN = (CH_IN <= 1) ? 1 : $clog2(CH_IN),  // Number of bits needed to index the B operand when writing; note when WRITE_CH_IN > 1, continguous addresses are written
@@ -18,13 +18,13 @@ module CIMIntMacroModel #(
     input  logic                  wclk,
     input  logic                  mclk,
     input  logic [A_WIDTH-1:0]    a [CH_IN],               // Activation operand sampled directly while mac is high
-    input  logic [B_WIDTH-1:0]    b [CH_OUT][WRITE_CH_IN],    // Stored operand to be written
+    input  logic [B_WIDTH-1:0]    b [WRITE_CH_IN][CH_OUT],    // Row-major stored-operand block to be written
     input  logic                  wen,
     input  logic                  mac,                     // Signals the start of an MAC op, no need to stay high for the mac pipeline; for bit-serial, this performs one-bit mac; for bit-parallel, this performs an A_WIDTHxB_WIDTH mac
     input  logic                  init,                    // Serial: marks the first partial result when mac is high; ignored by bit-parallel
     input  logic                  a_signed,
     input  logic                  b_signed [CH_OUT],       // Each output channel can have different signedness, which is needed to support wider signed B computation
-    input  logic [BITS_CH_IN-1:0] waddr,                    // Address of the slot (bank) within a row for writing b
+    input  logic [BITS_CH_IN-1:0] wchi,                    // Input channel written across all output channels
     input  logic [BITS_ROW-1:0]   wrow,                    // Address to select the row for writing b
     input  logic [BITS_ROW-1:0]   mrow,                    // Address to select the row for MAC computation
     output logic [C_WIDTH-1:0]    c [CH_OUT]
@@ -34,21 +34,21 @@ module CIMIntMacroModel #(
 `endif
 
   // Stored B data
-  logic [B_WIDTH-1:0] b_mem [NUM_ROWS][CH_OUT][CH_IN];
+  logic [B_WIDTH-1:0] b_mem [NUM_ROWS][CH_IN][CH_OUT];
 
   // -- Write logic for B
   always_ff @(posedge wclk) begin
     if (wen) begin
-      for (int cho = 0; cho < CH_OUT; cho++) begin : chan_out
-        for (int lane = 0; lane < WRITE_CH_IN; lane++) begin : chan_in
-          b_mem[wrow][cho][waddr + BITS_CH_IN'(lane)] <= b[cho][lane];
+      for (int lane = 0; lane < WRITE_CH_IN; lane++) begin : chan_in
+        for (int cho = 0; cho < CH_OUT; cho++) begin : chan_out
+          b_mem[wrow][wchi + BITS_CH_IN'(lane)][cho] <= b[lane][cho];
         end
       end
     end
   end
 
   // Row of operand B selected for the current MAC operation
-  logic [B_WIDTH-1:0] b_mac [CH_OUT][CH_IN];
+  logic [B_WIDTH-1:0] b_mac [CH_IN][CH_OUT];
   assign b_mac = b_mem[mrow];
 
 `ifndef SYNTHESIS
@@ -120,7 +120,7 @@ module CIMIntMacroModel #(
         for (int cho = 0; cho < CH_OUT; cho++) begin : mac_ch_out
           mac_res[cho] = '0;
           for (int chi = 0; chi < CH_IN; chi++) begin : mac_ch_in
-            mac_res[cho] += mac_product(a[chi], b_mac[cho][chi], b_signed[cho]);
+            mac_res[cho] += mac_product(a[chi], b_mac[chi][cho], b_signed[cho]);
           end
         end
       end
@@ -238,7 +238,7 @@ module CIMIntMacroModel #(
           mac_res[cho] = '0;
           for (int chi = 0; chi < CH_IN; chi++) begin : mac_ch_in
             if (a[chi][active_bit_idx]) begin
-              mac_res[cho] += extend_b_for_mac(b_mac[cho][chi], b_signed[cho]);
+              mac_res[cho] += extend_b_for_mac(b_mac[chi][cho], b_signed[cho]);
             end
           end
           mac_res[cho] = apply_a_sign_bit(mac_res[cho], active_bit_idx == A_MSB_IDX);

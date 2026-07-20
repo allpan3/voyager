@@ -31,6 +31,8 @@ set DATATYPE       [env_required DATATYPE]
 set IC_DIMENSION   [env_required IC_DIMENSION]
 set OC_DIMENSION   [env_required OC_DIMENSION]
 set CIM_A_PORT_TILES [env_required CIM_A_PORT_TILES]
+set CIM_B_PORT_TILES [env_required CIM_B_PORT_TILES]
+set CIM_C_PORT_TILES [env_required CIM_C_PORT_TILES]
 
 # Optional VCS SCVerify cosim. Attach the requested self-checking testbench and
 # enable Catapult's SCVerify+VCS flow so the block can be co-simulated (C++
@@ -64,8 +66,12 @@ solution options set Input/CppStandard c++17
 # global scripts/utils/setup_project.tcl flow).
 set compiler_flags "-D$DATATYPE -DIC_DIMENSION=$IC_DIMENSION -DOC_DIMENSION=$OC_DIMENSION -I$ROOT/src -I$ROOT/lib -I$ROOT"
 # Keep CIMArrayTb's DUT specialization aligned with HLS_TOP during Catapult analysis
-if {[info exists ::env(CIM_C_PORT_ORIENTATION)]} {
-  append compiler_flags " -DCIM_TEST_C_PORT_ORIENTATION=$::env(CIM_C_PORT_ORIENTATION)"
+if {[info exists ::env(CIM_C_BEAT_LAYOUT)]} {
+  append compiler_flags " -DCIM_TEST_C_BEAT_LAYOUT=$::env(CIM_C_BEAT_LAYOUT)"
+}
+append compiler_flags " -DCIM_TEST_B_PORT_TILES=$CIM_B_PORT_TILES"
+if {[info exists ::env(DOUBLE_BUFFERED_ACCUM_BUFFER)]} {
+  append compiler_flags " -DDOUBLE_BUFFERED_ACCUM_BUFFER=$::env(DOUBLE_BUFFERED_ACCUM_BUFFER)"
 }
 solution options set Input/CompilerFlags $compiler_flags
 
@@ -90,8 +96,12 @@ if {$SCVERIFY} {
   solution options set Flows/VCS/VLOGAN_OPTS \
     "+v2k -timescale=1ns/10ps +notimingcheck +define+UNIT_DELAY +incdir+$ROOT/src/CIM"
   solution options set Flows/VCS/VCSSIM_OPTS {+vcs+lic+wait}
-  solution options set Flows/VCS/COMP_FLAGS \
-    "-O3 -Wall -Wno-unknown-pragmas -Wno-deprecated-declarations -I$ROOT/src -I$ROOT/lib -I$ROOT -I$ROOT/test/unittest -D$DATATYPE -DIC_DIMENSION=$IC_DIMENSION -DOC_DIMENSION=$OC_DIMENSION -DCIM_TEST_C_PORT_ORIENTATION=$::env(CIM_C_PORT_ORIENTATION) -DSCVERIFY -std=c++17"
+  set scverify_comp_flags \
+    "-O3 -Wall -Wno-unknown-pragmas -Wno-deprecated-declarations -I$ROOT/src -I$ROOT/lib -I$ROOT -I$ROOT/test/unittest -D$DATATYPE -DIC_DIMENSION=$IC_DIMENSION -DOC_DIMENSION=$OC_DIMENSION -DCIM_TEST_B_PORT_TILES=$CIM_B_PORT_TILES -DCIM_TEST_C_BEAT_LAYOUT=$::env(CIM_C_BEAT_LAYOUT) -DSCVERIFY -std=c++17"
+  if {[info exists ::env(DOUBLE_BUFFERED_ACCUM_BUFFER)]} {
+    append scverify_comp_flags " -DDOUBLE_BUFFERED_ACCUM_BUFFER=$::env(DOUBLE_BUFFERED_ACCUM_BUFFER)"
+  }
+  solution options set Flows/VCS/COMP_FLAGS $scverify_comp_flags
   solution options set Flows/VCS/VCSELAB_OPTS \
     "-timescale=1ns/1ps -sysc=blocksync -lstdc++fs -lpthread"
   flow package require /SCVerify
@@ -145,21 +155,6 @@ directive set -CLOCK_OVERHEAD 0
 
 # --- Schedule / extract RTL --------------------------------------------------
 go assembly
-
-# Match the production CIMArray resource mapping when the A temporary is materialized
-if {$BLOCK eq "CIMArray" && $CIM_A_PORT_TILES > 1} {
-  set top_stripped [string map {" " ""} $TOP]
-  directive set /$top_stripped/issue_mac/while:a_beat.value.value:rsc -MAP_TO_MODULE {[Register]}
-}
-
-# The standalone processor flow inlines its CIMArray child, so apply the same
-# wide-A register mapping at the nested resource path
-if {$BLOCK eq "CIMProcessor" && $CIM_A_PORT_TILES > 1} {
-  set array_top [env_required HLS_CIM_ARRAY_TOP]
-  set top_stripped [string map {" " ""} $TOP]
-  set array_stripped [string map {" " ""} $array_top]
-  directive set /$top_stripped/$array_stripped/issue_mac/while:a_beat.value.value:rsc -MAP_TO_MODULE {[Register]}
-}
 
 go architect
 

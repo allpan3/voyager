@@ -92,13 +92,13 @@ module CIMVanillaMacroAdapter #(
     input  logic                  wclk,
     input  logic                  mclk,
     input  logic [A_WIDTH-1:0]    a [CH_IN],
-    input  logic [B_WIDTH-1:0]    b [CH_OUT][WRITE_CH_IN],
+    input  logic [B_WIDTH-1:0]    b [WRITE_CH_IN][CH_OUT],
     input  logic                  wen,
     input  logic                  mac,
     input  logic                  init,
     input  logic                  a_signed,
     input  logic                  b_signed [CH_OUT],
-    input  logic [BITS_CH_IN-1:0] waddr,
+    input  logic [BITS_CH_IN-1:0] wchi,
     input  logic [BITS_SET-1:0]   wset,
     input  logic [BITS_SET-1:0]   mset,
     output logic [C_WIDTH-1:0]    c [CH_OUT]
@@ -118,7 +118,7 @@ module CIMVanillaMacroAdapter #(
   logic [CH_IN-1:0] generic_in;
   logic [GENERIC_DIN_BITS-1:0] generic_din;
   logic [GENERIC_DOUT_BITS-1:0] generic_dout;
-  logic [BITS_CH_IN-1:0] generic_waddr;
+  logic [BITS_CH_IN-1:0] generic_wchi;
   logic generic_clk;
   logic generic_wen_n;
   logic generic_cen_n;
@@ -126,7 +126,7 @@ module CIMVanillaMacroAdapter #(
   assign active_bit_idx = (init && mac) ? '0 : bit_idx;
   assign internal_compute = mac || flush_pending;
   assign generic_clk = mclk | wclk;  // Vanilla macro has one shared write/compute clock
-  assign generic_waddr = waddr;
+  assign generic_wchi = wchi;
   assign generic_wen_n = ~wen;
   assign generic_cen_n = ~internal_compute;
 
@@ -171,7 +171,7 @@ module CIMVanillaMacroAdapter #(
   always_comb begin
     generic_din = '0;
     for (int cho = 0; cho < CH_OUT; cho++) begin
-      generic_din[cho*B_WIDTH +: B_WIDTH] = b[cho][0];
+      generic_din[cho*B_WIDTH +: B_WIDTH] = b[0][cho];
     end
   end
 
@@ -183,7 +183,7 @@ module CIMVanillaMacroAdapter #(
   ) cim_macro (
       .IN(generic_in),
       .DIN(generic_din),
-      .WADDR(generic_waddr),
+      .WADDR(generic_wchi),
       .CLK(generic_clk),
       .WEN(generic_wen_n),
       .CEN(generic_cen_n),

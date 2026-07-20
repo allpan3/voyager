@@ -16,13 +16,13 @@ MODE_SERIAL = 1
 class Case:
     name: str
     prefix: str
-    a_cols: int
-    ch_out: int
+    k: int
+    n: int
     b_sets: int
     base_a_width: int
     base_b_width: int
     base_c_width: int
-    write_ch_in: int
+    bk: int
     mac_latency: int
     mode: int
     a_width: int
@@ -34,13 +34,13 @@ CASES = (
     Case(
         name="unsigned_parallel",
         prefix="VCIMElementCosimUnsignedParallel",
-        a_cols=4,
-        ch_out=2,
+        k=4,
+        n=2,
         b_sets=2,
         base_a_width=4,
         base_b_width=4,
         base_c_width=10,
-        write_ch_in=2,
+        bk=2,
         mac_latency=1,
         mode=MODE_PARALLEL,
         a_width=4,
@@ -50,13 +50,13 @@ CASES = (
     Case(
         name="signed_serial",
         prefix="VCIMElementCosimSignedSerial",
-        a_cols=4,
-        ch_out=4,
+        k=4,
+        n=2,
         b_sets=2,
         base_a_width=4,
         base_b_width=4,
         base_c_width=20,
-        write_ch_in=1,
+        bk=1,
         mac_latency=2,
         mode=MODE_SERIAL,
         a_width=8,
@@ -66,13 +66,13 @@ CASES = (
     Case(
         name="signed_wide_b_parallel",
         prefix="VCIMElementCosimSignedWideBParallel",
-        a_cols=5,
-        ch_out=4,
+        k=5,
+        n=2,
         b_sets=3,
         base_a_width=4,
         base_b_width=4,
         base_c_width=12,
-        write_ch_in=1,
+        bk=1,
         mac_latency=3,
         mode=MODE_PARALLEL,
         a_width=5,
@@ -82,17 +82,22 @@ CASES = (
 )
 
 
+# Return the number of physical macro output channels required by one case
+def ch_out(case: Case) -> int:
+    return case.n * (case.b_width // case.base_b_width)
+
+
 # Return one shell-safe Verilator parameter assignment list
 def verilator_params(case: Case) -> str:
     return " ".join(
         [
-            f"-GCH_IN={case.a_cols}",
-            f"-GCH_OUT={case.ch_out}",
+            f"-GCH_IN={case.k}",
+            f"-GCH_OUT={ch_out(case)}",
             f"-GB_SETS={case.b_sets}",
             f"-GBASE_A_WIDTH={case.base_a_width}",
             f"-GBASE_B_WIDTH={case.base_b_width}",
             f"-GBASE_C_WIDTH={case.base_c_width}",
-            f"-GWRITE_CH_IN={case.write_ch_in}",
+            f"-GWRITE_CH_IN={case.bk}",
             f"-GMAC_LATENCY={case.mac_latency}",
             f"-GMODE={case.mode}",
             f"-GA_WIDTH={case.a_width}",
@@ -121,9 +126,9 @@ def write_cpp_include(path: Path) -> None:
                 f"// Instantiate the generated {case.name} co-simulation case",
                 f"static void instantiate_{case.name}() {{",
                 f"  static CIMElementTbCase<{case.prefix}, "
-                f"{case.a_cols}, {case.ch_out}, {case.b_sets}, "
+                f"{case.k}, {case.n}, {case.b_sets}, "
                 f"{case.base_a_width}, {case.base_b_width}, "
-                f"{case.base_c_width}, {case.write_ch_in}, "
+                f"{case.base_c_width}, {case.bk}, "
                 f"{case.mac_latency}, {case.mode}, {case.a_width}, "
                 f"{case.b_width}, {signed_literal}>",
                 f'      {case.name}("{case.name}");',

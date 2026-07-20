@@ -10,7 +10,7 @@
 
 #include "CIMTile.h"
 
-// Verify that a width-matched bit-parallel tile accepts and retires every cycle
+// Verify aggregate A/B/C ports, tile-local B channel decoding, and consecutive retirements
 struct CIMTileTb : sc_module {
   static constexpr int CH_IN = 4;
   static constexpr int CH_OUT = 2;
@@ -24,38 +24,37 @@ struct CIMTileTb : sc_module {
   static constexpr int A_WIDTH = 4;
   static constexpr int B_WIDTH = 4;
   static constexpr bool IS_SIGNED = false;
-  static constexpr int TILE_INPUT_LANES = 2;
-  static constexpr int TILE_OUTPUT_LANES = 3;
+  static constexpr int INPUT_AXIS_ELEMENTS = 2;
+  static constexpr int OUTPUT_AXIS_ELEMENTS = 3;
   static constexpr int OPERATIONS = 6;
 
   using Dut = CIMTile<CH_IN, CH_OUT, B_SETS, BASE_A_WIDTH, BASE_B_WIDTH, BASE_C_WIDTH, WRITE_CH_IN, MAC_LATENCY, MODE,
-                      A_WIDTH, B_WIDTH, IS_SIGNED, TILE_INPUT_LANES, TILE_OUTPUT_LANES>;
-  using ElementAddr = typename Dut::ElementAddr;
-  using BSet = typename Dut::BSet;
-  using ElementAValue = typename Dut::ElementAValue;
-  using ElementBValue = typename Dut::ElementBValue;
-  using ElementAInput = typename Dut::ElementAInput;
-  using ElementBInput = typename Dut::ElementBInput;
-  using COutput = typename Dut::COutput;
-  using CValue = typename Dut::CValue;
+                      A_WIDTH, B_WIDTH, IS_SIGNED, INPUT_AXIS_ELEMENTS, OUTPUT_AXIS_ELEMENTS>;
+  using WSet = typename Dut::WSet;
+  using WChi = typename Dut::WChi;
+  using AValue = typename Dut::AValue;
+  using BValue = typename Dut::BValue;
+  using AData = typename Dut::AData;
+  using BData = typename Dut::BData;
+  using CData = typename Dut::CData;
 
-  // ExpectedResult holds one reduced tile result
+  // ExpectedResult holds every C channel produced by one tile
   struct ExpectedResult {
-    long long value[TILE_OUTPUT_LANES][Dut::ELEMENT_B_COLS];
+    long long value[Dut::N];
   };
 
   Dut dut;
   sc_clock clk;
   sc_signal<bool> rstn;
-  sc_signal<bool> wen[TILE_INPUT_LANES];
-  sc_signal<ElementAddr> waddr[TILE_INPUT_LANES];
-  sc_signal<BSet> wset[TILE_INPUT_LANES];
-  sc_signal<ElementBInput> b[TILE_INPUT_LANES][TILE_OUTPUT_LANES];
-  sc_signal<ElementAInput> a[TILE_INPUT_LANES];
-  sc_signal<BSet> mset;
+  sc_signal<bool> write;
+  sc_signal<WSet> wset;
+  sc_signal<WChi> wchi;
+  sc_signal<BData> b;
+  sc_signal<AData> a;
+  sc_signal<WSet> mset;
   sc_signal<bool> mac_issue;
   sc_signal<bool> mac_ready;
-  sc_signal<COutput> c[TILE_OUTPUT_LANES];
+  sc_signal<CData> c;
   sc_signal<bool> c_retire;
 
   std::deque<ExpectedResult> expected_results;
@@ -78,24 +77,16 @@ struct CIMTileTb : sc_module {
     dut.wclk(clk);
     dut.mclk(clk);
     dut.rstn(rstn);
+    dut.write(write);
+    dut.wset(wset);
+    dut.wchi(wchi);
+    dut.b(b);
+    dut.a(a);
     dut.mset(mset);
     dut.mac_issue(mac_issue);
     dut.mac_ready(mac_ready);
+    dut.c(c);
     dut.c_retire(c_retire);
-
-    for (int til = 0; til < TILE_INPUT_LANES; til++) {
-      dut.wen[til](wen[til]);
-      dut.waddr[til](waddr[til]);
-      dut.wset[til](wset[til]);
-      dut.a[til](a[til]);
-      for (int tol = 0; tol < TILE_OUTPUT_LANES; tol++) {
-        dut.b[til][tol](b[til][tol]);
-      }
-    }
-
-    for (int tol = 0; tol < TILE_OUTPUT_LANES; tol++) {
-      dut.c[tol](c[tol]);
-    }
 
     SC_THREAD(run);
   }
@@ -119,31 +110,32 @@ struct CIMTileTb : sc_module {
     }
   }
 
-  // Return deterministic activation data for one operation
-  ElementAValue activation_value(int operation, int til, int a_col) const {
-    return ElementAValue(1 + operation + til + a_col);
+  // Return deterministic A data
+  AValue a_value(int operation, int k) const {
+    const int input_element_idx = k / Dut::ELEMENT_K;
+    const int element_k = k % Dut::ELEMENT_K;
+    return AValue(1 + operation + input_element_idx + element_k);
   }
 
-  // Return deterministic resident weight data
-  ElementBValue weight_value(int set_idx, int til, int tol, int b_col, int chi) const {
-    return ElementBValue(1 + set_idx + til + tol + b_col + chi);
+  // Return deterministic resident B data
+  BValue b_value(int set_idx, int n, int k) const {
+    const int input_element_idx = k / Dut::ELEMENT_K;
+    const int element_k = k % Dut::ELEMENT_K;
+    const int output_element_idx = n / Dut::ELEMENT_N;
+    const int element_n = n % Dut::ELEMENT_N;
+    return BValue(1 + set_idx + input_element_idx + output_element_idx + element_n + element_k);
   }
 
-  // Compute the expected reduction for one operation
+  // Compute the expected input-axis reduction for one operation
   ExpectedResult expected_result(int operation) const {
     ExpectedResult expected;
     const int set_idx = operation % B_SETS;
-    for (int tol = 0; tol < TILE_OUTPUT_LANES; tol++) {
-      for (int b_col = 0; b_col < Dut::ELEMENT_B_COLS; b_col++) {
-        long long sum = 0;
-        for (int til = 0; til < TILE_INPUT_LANES; til++) {
-          for (int chi = 0; chi < CH_IN; chi++) {
-            sum +=
-                activation_value(operation, til, chi).to_int() * weight_value(set_idx, til, tol, b_col, chi).to_int();
-          }
-        }
-        expected.value[tol][b_col] = sum;
+    for (int n = 0; n < Dut::N; n++) {
+      long long sum = 0;
+      for (int k = 0; k < Dut::K; k++) {
+        sum += a_value(operation, k).to_int() * b_value(set_idx, n, k).to_int();
       }
+      expected.value[n] = sum;
     }
     return expected;
   }
@@ -157,13 +149,11 @@ struct CIMTileTb : sc_module {
 
     require(!expected_results.empty(), "unexpected tile retirement");
     const ExpectedResult& expected = expected_results.front();
-    for (int tol = 0; tol < TILE_OUTPUT_LANES; tol++) {
-      const COutput c_output = c[tol].read();
-      for (int b_col = 0; b_col < Dut::ELEMENT_B_COLS; b_col++) {
-        std::ostringstream context;
-        context << "result " << retirements << " lane " << tol << " column " << b_col;
-        require(c_output[b_col].to_int64() == expected.value[tol][b_col], context.str());
-      }
+    const CData c_data = c.read();
+    for (int n = 0; n < Dut::N; n++) {
+      std::ostringstream context;
+      context << "result " << retirements << " C channel " << n;
+      require(c_data[n].to_int64() == expected.value[n], context.str());
     }
 
     if (last_retire_cycle >= 0) {
@@ -175,7 +165,7 @@ struct CIMTileTb : sc_module {
     expected_results.pop_front();
   }
 
-  // Advance one tile clock and inspect its output
+  // Advance one tile clock and inspect C
   void tick() {
     wait(clk.posedge_event());
     settle();
@@ -183,34 +173,24 @@ struct CIMTileTb : sc_module {
     check_retirement();
   }
 
-  // Drive inactive values onto every tile input
-  void initialize_inputs() {
+  // Drive inactive values onto the tile ports
+  void initialize_ports() {
     rstn.write(false);
-    mac_issue.write(false);
+    write.write(false);
+    wset.write(0);
+    wchi.write(0);
+    BData zero_b;
+    clear_pack(zero_b);
+    b.write(zero_b);
+    AData zero_a;
+    clear_pack(zero_a);
+    a.write(zero_a);
     mset.write(0);
-    for (int til = 0; til < TILE_INPUT_LANES; til++) {
-      wen[til].write(false);
-      waddr[til].write(0);
-      wset[til].write(0);
-      ElementAInput a_input;
-      for (int a_col = 0; a_col < Dut::ELEMENT_A_COLS; a_col++) {
-        a_input[a_col] = 0;
-      }
-      a[til].write(a_input);
-      for (int tol = 0; tol < TILE_OUTPUT_LANES; tol++) {
-        ElementBInput b_input;
-        for (int b_col = 0; b_col < Dut::ELEMENT_B_COLS; b_col++) {
-          for (int b_row = 0; b_row < Dut::ELEMENT_B_WRITE_ROWS; b_row++) {
-            b_input[b_col][b_row] = 0;
-          }
-        }
-        b[til][tol].write(b_input);
-      }
-    }
+    mac_issue.write(false);
     settle();
   }
 
-  // Reset the tile while preserving its resetless weight storage
+  // Reset the tile while preserving its resetless B storage
   void apply_reset() {
     rstn.write(false);
     tick();
@@ -219,55 +199,49 @@ struct CIMTileTb : sc_module {
     seen_retire = c_retire.read();
   }
 
-  // Load all weight rows in both sets
-  void load_weights() {
+  // Load every BK-wide B block in both sets through the aggregate tile port
+  void load_b_sets() {
     for (int set_idx = 0; set_idx < B_SETS; set_idx++) {
-      for (int til = 0; til < TILE_INPUT_LANES; til++) {
-        for (int base_chi = 0; base_chi < CH_IN; base_chi += Dut::ELEMENT_B_WRITE_ROWS) {
-          wen[til].write(true);
-          waddr[til].write(base_chi);
-          wset[til].write(set_idx);
-          for (int tol = 0; tol < TILE_OUTPUT_LANES; tol++) {
-            ElementBInput b_input;
-            for (int b_col = 0; b_col < Dut::ELEMENT_B_COLS; b_col++) {
-              for (int b_row = 0; b_row < Dut::ELEMENT_B_WRITE_ROWS; b_row++) {
-                b_input[b_col][b_row] = weight_value(set_idx, til, tol, b_col, base_chi + b_row);
-              }
-            }
-            b[til][tol].write(b_input);
+      for (int base_k = 0; base_k < Dut::K; base_k += Dut::BK) {
+        BData b_data;
+        for (int bk = 0; bk < Dut::BK; bk++) {
+          for (int n = 0; n < Dut::N; n++) {
+            b_data[bk][n] = b_value(set_idx, n, base_k + bk);
           }
-          tick();
-          wen[til].write(false);
         }
+        wset.write(set_idx);
+        wchi.write(base_k);
+        b.write(b_data);
+        write.write(true);
+        tick();
+        write.write(false);
       }
     }
     tick();
   }
 
-  // Issue distinct operations on consecutive clock edges
+  // Issue distinct A vectors on consecutive clock edges
   void issue_back_to_back() {
     for (int operation = 0; operation < OPERATIONS; operation++) {
       require(mac_ready.read(), "tile was not ready for a consecutive issue");
+      AData a_data;
+      for (int k = 0; k < Dut::K; k++) {
+        a_data[k] = a_value(operation, k);
+      }
+      a.write(a_data);
       mset.write(operation % B_SETS);
       mac_issue.write(true);
-      for (int til = 0; til < TILE_INPUT_LANES; til++) {
-        ElementAInput a_input;
-        for (int a_col = 0; a_col < Dut::ELEMENT_A_COLS; a_col++) {
-          a_input[a_col] = activation_value(operation, til, a_col);
-        }
-        a[til].write(a_input);
-      }
       expected_results.push_back(expected_result(operation));
       tick();
     }
     mac_issue.write(false);
   }
 
-  // Run the timing and data test
+  // Run the tile timing and data test
   void run() {
-    initialize_inputs();
+    initialize_ports();
     apply_reset();
-    load_weights();
+    load_b_sets();
     issue_back_to_back();
 
     for (int drain_cycle = 0; drain_cycle < 20 && !expected_results.empty(); drain_cycle++) {
@@ -281,7 +255,7 @@ struct CIMTileTb : sc_module {
   }
 };
 
-// Elaborate the width-matched bit-parallel tile case
+// Elaborate the aggregate tile case
 int sc_main(int argc, char** argv) {
   (void)argc;
   (void)argv;

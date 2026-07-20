@@ -285,10 +285,6 @@ if {![info exists CIM_CH_IN]} {
   set CIM_CH_IN 64
 }
 
-if {![info exists CIM_A_COLS]} {
-  set CIM_A_COLS $CIM_CH_IN
-}
-
 if {![info exists CIM_CH_OUT]} {
   set CIM_CH_OUT 8
 }
@@ -325,44 +321,63 @@ if {![info exists CIM_SIGNED]} {
   set CIM_SIGNED true
 }
 
-if {![info exists CIM_TILE_INPUT_LANES]} {
-  set CIM_TILE_INPUT_LANES 1
+if {![info exists CIM_TILE_INPUT_AXIS_ELEMENTS]} {
+  set CIM_TILE_INPUT_AXIS_ELEMENTS 1
 }
 
-if {![info exists CIM_TILE_OUTPUT_LANES]} {
-  set CIM_TILE_OUTPUT_LANES 4
+if {![info exists CIM_TILE_OUTPUT_AXIS_ELEMENTS]} {
+  set CIM_TILE_OUTPUT_AXIS_ELEMENTS 4
 }
 
-if {![info exists CIM_REDUCTION_GROUPS]} {
-  set CIM_REDUCTION_GROUPS 1
+if {![info exists CIM_INPUT_AXIS_TILES]} {
+  set CIM_INPUT_AXIS_TILES 1
 }
 
-if {![info exists CIM_MULTICAST_GROUPS]} {
-  set CIM_MULTICAST_GROUPS 1
+if {![info exists CIM_OUTPUT_AXIS_TILES]} {
+  set CIM_OUTPUT_AXIS_TILES 1
 }
 
 if {![info exists CIM_A_PORT_TILES]} {
-  set CIM_A_PORT_TILES $CIM_REDUCTION_GROUPS
+  set CIM_A_PORT_TILES $CIM_INPUT_AXIS_TILES
 }
 
 if {![info exists CIM_B_PORT_TILES]} {
-  set CIM_B_PORT_TILES $CIM_MULTICAST_GROUPS
+  set CIM_B_PORT_TILES $CIM_OUTPUT_AXIS_TILES
 }
 
-if {![info exists CIM_C_PORT_ORIENTATION]} {
-  set CIM_C_PORT_ORIENTATION [expr {$MATRIX_BACKEND == $MATRIX_BACKEND_CIM ? 1 : 0}]
+if {![info exists CIM_C_BEAT_LAYOUT]} {
+  set CIM_C_BEAT_LAYOUT [expr {$MATRIX_BACKEND == $MATRIX_BACKEND_CIM ? 1 : 0}]
 }
 
-if {$CIM_C_PORT_ORIENTATION != 0 && $CIM_C_PORT_ORIENTATION != 1} {
-  error "CIM_C_PORT_ORIENTATION must be 0 (reduction-major) or 1 (multicast-major)"
+if {$CIM_C_BEAT_LAYOUT != 0 && $CIM_C_BEAT_LAYOUT != 1} {
+  error "CIM_C_BEAT_LAYOUT must be 0 (input-major) or 1 (output-major)"
 }
 
 if {![info exists CIM_C_PORT_TILES]} {
-  if {$CIM_C_PORT_ORIENTATION == 0} {
-    set CIM_C_PORT_TILES $CIM_REDUCTION_GROUPS
+  if {$CIM_C_BEAT_LAYOUT == 0} {
+    set CIM_C_PORT_TILES $CIM_INPUT_AXIS_TILES
   } else {
-    set CIM_C_PORT_TILES $CIM_MULTICAST_GROUPS
+    set CIM_C_PORT_TILES $CIM_OUTPUT_AXIS_TILES
   }
+}
+
+if {$CIM_TILE_INPUT_AXIS_ELEMENTS <= 0 || $CIM_TILE_OUTPUT_AXIS_ELEMENTS <= 0} {
+  error "CIM_TILE_INPUT_AXIS_ELEMENTS and CIM_TILE_OUTPUT_AXIS_ELEMENTS must be positive"
+}
+if {$CIM_INPUT_AXIS_TILES <= 0 || $CIM_OUTPUT_AXIS_TILES <= 0} {
+  error "CIM input and output axis tile counts must be positive"
+}
+if {$CIM_A_PORT_TILES != $CIM_INPUT_AXIS_TILES} {
+  error "CIM_A_PORT_TILES must currently span CIM_INPUT_AXIS_TILES"
+}
+if {$CIM_B_PORT_TILES <= 0 || $CIM_B_PORT_TILES > $CIM_OUTPUT_AXIS_TILES} {
+  error "CIM_B_PORT_TILES must be positive and no wider than CIM_OUTPUT_AXIS_TILES"
+}
+if {$CIM_OUTPUT_AXIS_TILES % $CIM_B_PORT_TILES != 0} {
+  error "CIM_B_PORT_TILES must evenly divide CIM_OUTPUT_AXIS_TILES"
+}
+if {$CIM_C_PORT_TILES <= 0} {
+  error "CIM_C_PORT_TILES must be positive"
 }
 
 if {$MATRIX_BACKEND == $MATRIX_BACKEND_CIM} {
@@ -381,11 +396,14 @@ if {$MATRIX_BACKEND == $MATRIX_BACKEND_CIM} {
   if {$CIM_B_SETS < 2} {
     error "CIMProcessor currently requires at least two resident B sets"
   }
-  if {$CIM_C_PORT_ORIENTATION != 1} {
-    error "CIMProcessor currently requires multicast-major C ports"
+  if {$CIM_C_BEAT_LAYOUT != 1} {
+    error "CIMProcessor currently requires output-major C ports"
+  }
+  if {$CIM_C_PORT_TILES != $CIM_OUTPUT_AXIS_TILES} {
+    error "CIMProcessor currently requires CIM_C_PORT_TILES to span the output axis"
   }
 
-  set cim_input_scalars [expr {$CIM_CH_IN * $CIM_TILE_INPUT_LANES * $CIM_REDUCTION_GROUPS}]
+  set cim_input_scalars [expr {$CIM_CH_IN * $CIM_TILE_INPUT_AXIS_ELEMENTS * $CIM_INPUT_AXIS_TILES}]
   if {$cim_input_scalars != $IC_DIMENSION} {
     error "CIMProcessor input extent $cim_input_scalars must equal IC_DIMENSION $IC_DIMENSION"
   }
@@ -394,8 +412,9 @@ if {$MATRIX_BACKEND == $MATRIX_BACKEND_CIM} {
   }
 
   set cim_b_slices [expr {$WEIGHT_DTYPE_WIDTH / $CIM_BASE_B_WIDTH}]
-  set cim_element_b_cols [expr {$CIM_CH_OUT / $cim_b_slices}]
-  set cim_output_scalars [expr {$cim_element_b_cols * $CIM_TILE_OUTPUT_LANES * $CIM_MULTICAST_GROUPS}]
+  set cim_element_ch_out [expr {$CIM_CH_OUT / $cim_b_slices}]
+  set cim_tile_ch_out [expr {$cim_element_ch_out * $CIM_TILE_OUTPUT_AXIS_ELEMENTS}]
+  set cim_output_scalars [expr {$cim_tile_ch_out * $CIM_OUTPUT_AXIS_TILES}]
   if {$cim_output_scalars != $OC_DIMENSION} {
     error "CIMProcessor output extent $cim_output_scalars must equal OC_DIMENSION $OC_DIMENSION"
   }

@@ -1,8 +1,4 @@
 // Combined SystemC and Catapult SCVerify tests for the standalone CIMArray
-//
-// Normal builds elaborate all deterministic SystemC cases. SCVerify builds
-// define SCVERIFY, wrap the DUT with CCS_DESIGN(), and elaborate only
-// the geometry synthesized by scverify-array
 
 #ifdef SCVERIFY
 #include <mc_scverify.h>
@@ -25,8 +21,12 @@
 static constexpr int CIM_MODE_BIT_PARALLEL_VALUE = 0;
 static constexpr int CIM_MODE_BIT_SERIAL_VALUE = 1;
 
-#ifndef CIM_TEST_C_PORT_ORIENTATION
-#define CIM_TEST_C_PORT_ORIENTATION CIM_C_PORT_REDUCTION_MAJOR
+#ifndef CIM_TEST_B_PORT_TILES
+#define CIM_TEST_B_PORT_TILES 3
+#endif
+
+#ifndef CIM_TEST_C_BEAT_LAYOUT
+#define CIM_TEST_C_BEAT_LAYOUT CIM_C_BEAT_INPUT_MAJOR
 #endif
 
 static int g_cases_remaining = 0;
@@ -34,73 +34,59 @@ static int g_cases_remaining = 0;
 // Return a mask covering the requested bit width
 static constexpr long long mask_for_width(int width) { return (1LL << width) - 1; }
 
-// One parameterized CIMArray SystemC test case
+// Exercise one parameterized CIMArray geometry using logical A/B/C coordinates
 template <int CH_IN, int CH_OUT, int B_SETS, int BASE_A_WIDTH, int BASE_B_WIDTH, int BASE_C_WIDTH, int WRITE_CH_IN,
-          int MAC_LATENCY, int MODE, int A_WIDTH, int B_WIDTH, bool IS_SIGNED, int TILE_INPUT_LANES,
-          int TILE_OUTPUT_LANES, int REDUCTION_GROUPS = 1, int MULTICAST_GROUPS = 1,
-          int A_PORT_TILES = REDUCTION_GROUPS, int B_PORT_TILES = MULTICAST_GROUPS, int C_PORT_TILES = REDUCTION_GROUPS,
-          int C_PORT_ORIENTATION = CIM_C_PORT_REDUCTION_MAJOR,
+          int MAC_LATENCY, int MODE, int A_WIDTH, int B_WIDTH, bool IS_SIGNED, int TILE_INPUT_AXIS_ELEMENTS,
+          int TILE_OUTPUT_AXIS_ELEMENTS, int INPUT_AXIS_TILES = 1, int OUTPUT_AXIS_TILES = 1,
+          int A_PORT_TILES = INPUT_AXIS_TILES, int B_PORT_TILES = OUTPUT_AXIS_TILES,
+          int C_PORT_TILES = INPUT_AXIS_TILES, int C_BEAT_LAYOUT = CIM_C_BEAT_INPUT_MAJOR,
           typename DutType =
               CIMArray<CH_IN, CH_OUT, B_SETS, BASE_A_WIDTH, BASE_B_WIDTH, BASE_C_WIDTH, WRITE_CH_IN, MAC_LATENCY, MODE,
-                       A_WIDTH, B_WIDTH, IS_SIGNED, TILE_INPUT_LANES, TILE_OUTPUT_LANES, REDUCTION_GROUPS,
-                       MULTICAST_GROUPS, A_PORT_TILES, B_PORT_TILES, C_PORT_TILES, C_PORT_ORIENTATION>>
+                       A_WIDTH, B_WIDTH, IS_SIGNED, TILE_INPUT_AXIS_ELEMENTS, TILE_OUTPUT_AXIS_ELEMENTS,
+                       INPUT_AXIS_TILES, OUTPUT_AXIS_TILES, A_PORT_TILES, B_PORT_TILES, C_PORT_TILES, C_BEAT_LAYOUT>>
 struct CIMArrayTbCase : sc_module {
   using Dut = DutType;
   using ABeat = typename Dut::ABeat;
   using CBeat = typename Dut::CBeat;
   using MACRequest = typename Dut::MACRequest;
-  using StoreRequest = typename Dut::StoreRequest;
-  using BSet = typename Dut::BSet;
-  using MulticastGroupIndex = typename Dut::MulticastGroupIndex;
-
-  static constexpr int INPUT_LANES = TILE_INPUT_LANES * REDUCTION_GROUPS;
-  static constexpr int OUTPUT_LANES = TILE_OUTPUT_LANES * MULTICAST_GROUPS;
-  static constexpr int MULTICAST_GROUP_LANES = Dut::MULTICAST_GROUP_LANES;
+  using WriteRequest = typename Dut::WriteRequest;
+  using Set = typename Dut::Set;
 
   static_assert(A_WIDTH < 31, "A_WIDTH must fit this unit test golden model");
   static_assert(B_WIDTH < 31, "B_WIDTH must fit this unit test golden model");
-  static_assert(Dut::RESULT_WIDTH < 62, "RESULT_WIDTH must fit this unit test golden model");
+  static_assert(Dut::C_WIDTH < 62, "C_WIDTH must fit this unit test golden model");
 
   CIMARRAY_DUT_TYPE(Dut) dut;
   sc_clock clk;
   sc_signal<bool> rstn;
   Connections::Combinational<MACRequest> mac_request_channel;
-  Connections::Combinational<ABeat> a_channel;
-  Connections::Combinational<ABeat> pending_a_channel;
-  Connections::SyncChannel a_transfer_done;
-  Connections::Combinational<StoreRequest> store_channel;
+  Connections::Combinational<WriteRequest> write_request_channel;
   Connections::Combinational<CBeat> result_channel;
 
-  ac_int<B_WIDTH, false> expected_weights[B_SETS][Dut::ELEMENTS][Dut::ELEMENT_B_COLS][CH_IN];
+  ac_int<B_WIDTH, false> expected_b[B_SETS][Dut::K][Dut::N];
 
-  // ExpectedBeat mirrors the selected C-port tile axis in issue order
+  // ExpectedBeat mirrors one C-port beat in issue order
   struct ExpectedBeat {
-    long long value[C_PORT_TILES][MULTICAST_GROUP_LANES][Dut::ELEMENT_B_COLS];
+    long long value[C_PORT_TILES][Dut::TILE_N];
   };
   std::deque<ExpectedBeat> expected_beats;
 
   SC_HAS_PROCESS(CIMArrayTbCase);
 
   // Construct one case and bind the standalone CIMArray ports
-  explicit CIMArrayTbCase(sc_module_name name)
-      : sc_module(name), dut("dut"), clk("clk", 10, SC_NS), a_transfer_done("a_transfer_done") {
+  explicit CIMArrayTbCase(sc_module_name name) : sc_module(name), dut("dut"), clk("clk", 10, SC_NS) {
     g_cases_remaining++;
 
     dut.clk(clk);
     dut.rstn(rstn);
     dut.mac_request_channel(mac_request_channel);
-    dut.a_channel(a_channel);
-    dut.store_channel(store_channel);
+    dut.write_request_channel(write_request_channel);
     dut.result_channel(result_channel);
 
     clear_expected_state();
 
     SC_THREAD(run);
     sensitive << clk.posedge_event();
-
-    SC_THREAD(drive_a);
-    sensitive << clk.posedge_event();
-    async_reset_signal_is(rstn, false);
 
     SC_THREAD(watchdog);
   }
@@ -117,13 +103,13 @@ struct CIMArrayTbCase : sc_module {
     SC_REPORT_FATAL("CIMArrayTb", report.c_str());
   }
 
-  // Stop a lost request or A transfer with a bounded simulation failure
+  // Stop a lost request with a bounded simulation failure
   void watchdog() {
     wait(100, SC_US);
     require(false, "timed out waiting for CIMArray completion");
   }
 
-  // Wait enough delta cycles for combinational output methods to settle
+  // Wait enough delta cycles for combinational methods to settle
   void settle() {
     for (int delta = 0; delta < 4; delta++) {
       wait(SC_ZERO_TIME);
@@ -139,38 +125,15 @@ struct CIMArrayTbCase : sc_module {
   // Reset the testbench-side Connections endpoints
   void reset_channels() {
     mac_request_channel.ResetWrite();
-    pending_a_channel.ResetWrite();
-    a_transfer_done.ResetRead();
-    store_channel.ResetWrite();
+    write_request_channel.ResetWrite();
     result_channel.ResetRead();
-  }
-
-  // Serialize every testbench A transfer through one Connections writer
-  void drive_a() {
-    pending_a_channel.ResetRead();
-    a_channel.ResetWrite();
-    a_transfer_done.ResetWrite();
-
-    wait();
-
-    while (true) {
-      a_channel.Push(pending_a_channel.Pop());
-      a_transfer_done.SyncPush();
-    }
-  }
-
-  // Send one A beat and wait until the array accepts its issue transfer
-  void push_a_beat(const ABeat& beat) {
-    pending_a_channel.Push(beat);
-    a_transfer_done.SyncPop();
   }
 
   // Encode one integer as an unsigned ac_int bit pattern
   template <int WIDTH>
   ac_int<WIDTH, false> encode_value(long long value) const {
     const long long mask = mask_for_width(WIDTH);
-    const long long raw = value & mask;
-    return ac_int<WIDTH, false>(raw);
+    return ac_int<WIDTH, false>(value & mask);
   }
 
   // Decode one unsigned ac_int bit pattern using the case signedness
@@ -183,58 +146,38 @@ struct CIMArrayTbCase : sc_module {
     }
 
     const long long sign_bit = 1LL << (WIDTH - 1);
-    if ((raw & sign_bit) == 0) {
-      return raw;
-    }
-    return raw | ~mask;
+    return (raw & sign_bit) == 0 ? raw : raw | ~mask;
   }
 
-  // Return a flat element index from its logical lane coordinates
-  static constexpr int element_index(int input_lane_idx, int output_lane_idx) {
-    return (input_lane_idx * OUTPUT_LANES) + output_lane_idx;
-  }
-
-  // Create deterministic activation data for one MAC request
-  ac_int<A_WIDTH, false> activation_value(int input_lane_idx, int chi, int phase) const {
+  // Create deterministic A data for one array input channel
+  ac_int<A_WIDTH, false> a_value(int k, int phase) const {
     if (IS_SIGNED) {
-      return encode_value<A_WIDTH>(((input_lane_idx * 5 + chi * 3 + phase) % 13) - 6);
+      return encode_value<A_WIDTH>(((k * 5 + phase) % 13) - 6);
     }
-    return encode_value<A_WIDTH>((input_lane_idx + 2) * (chi + 1) + phase);
+    return encode_value<A_WIDTH>((k + 2) * 3 + phase);
   }
 
-  // Create deterministic weight data for one B write request
-  ac_int<B_WIDTH, false> weight_value(int input_lane_idx, int chunk, int output_lane_idx, int col, int lane,
-                                      int phase) const {
+  // Create deterministic B data for one logical matrix coordinate
+  ac_int<B_WIDTH, false> b_value(int k, int n, int phase) const {
     if (IS_SIGNED) {
-      const int value = ((input_lane_idx * 13 + chunk * 7 + output_lane_idx * 5 + col * 3 + lane + phase) % 11) - 5;
-      return encode_value<B_WIDTH>(value);
+      return encode_value<B_WIDTH>(((k * 13 + n * 5 + phase) % 11) - 5);
     }
-    return encode_value<B_WIDTH>((input_lane_idx + 1) * (chunk + 2) + (output_lane_idx * 5) + (col * 3) + lane + phase);
+    return encode_value<B_WIDTH>((k + 1) * 2 + n * 3 + phase);
   }
 
-  // Clear independent B storage and pending expected beats
+  // Clear resident B state and pending expected C beats
   void clear_expected_state() {
     for (int set_idx = 0; set_idx < B_SETS; set_idx++) {
-      for (int element_idx = 0; element_idx < Dut::ELEMENTS; element_idx++) {
-        for (int col = 0; col < Dut::ELEMENT_B_COLS; col++) {
-          for (int chi = 0; chi < CH_IN; chi++) {
-            expected_weights[set_idx][element_idx][col][chi] = 0;
-          }
+      for (int k = 0; k < Dut::K; k++) {
+        for (int n = 0; n < Dut::N; n++) {
+          expected_b[set_idx][k][n] = 0;
         }
       }
     }
-
     expected_beats.clear();
   }
 
-  // Drive inactive defaults onto all inputs
-  void initialize_inputs() {
-    rstn.write(false);
-    reset_channels();
-    settle();
-  }
-
-  // Apply reset and release into B-loading phase
+  // Apply reset and release into the B-loading phase
   void apply_reset() {
     rstn.write(false);
     reset_channels();
@@ -244,442 +187,368 @@ struct CIMArrayTbCase : sc_module {
     tick();
   }
 
-  // Drive one store request and mirror it into the expected weight model
-  void drive_store(BSet set, int input_lane_idx, int chunk, int phase) {
-    StoreRequest request;
-    request.set = set;
-    request.lane = input_lane_idx;
-    request.waddr = chunk * Dut::ELEMENT_B_WRITE_ROWS;
-    request.fanout = 0;
+  // Drive one direct B-port span and mirror it into the logical B model
+  void drive_write_direct(Set wset, int input_axis_idx, int output_axis_tile_base, int tile_wchi, int phase) {
+    WriteRequest request;
+    request.wset = wset;
+    request.input_axis_idx = input_axis_idx;
+    request.output_axis_tile_base = output_axis_tile_base;
+    request.wchi = tile_wchi;
+    request.replicate = 0;
 
-    for (int output_lane_idx = 0; output_lane_idx < OUTPUT_LANES; output_lane_idx++) {
-      for (int col = 0; col < Dut::ELEMENT_B_COLS; col++) {
-        for (int lane = 0; lane < Dut::ELEMENT_B_WRITE_ROWS; lane++) {
-          request.data[output_lane_idx][col][lane] =
-              weight_value(input_lane_idx, chunk, output_lane_idx, col, lane, phase);
+    for (int port_tile_idx = 0; port_tile_idx < B_PORT_TILES; port_tile_idx++) {
+      for (int tile_n = 0; tile_n < Dut::TILE_N; tile_n++) {
+        for (int tile_bk = 0; tile_bk < Dut::TILE_BK; tile_bk++) {
+          const int k = input_axis_idx * Dut::TILE_K + tile_wchi + tile_bk;
+          const int n = (output_axis_tile_base + port_tile_idx) * Dut::TILE_N + tile_n;
+          request.data[port_tile_idx][tile_bk][tile_n] = b_value(k, n, phase);
+          expected_b[wset.to_int()][k][n] = request.data[port_tile_idx][tile_bk][tile_n];
         }
       }
     }
 
-    const int set_idx = set.to_int();
-    const int base_chi = chunk * Dut::ELEMENT_B_WRITE_ROWS;
-    for (int output_lane_idx = 0; output_lane_idx < OUTPUT_LANES; output_lane_idx++) {
-      const int element_idx = element_index(input_lane_idx, output_lane_idx);
-      for (int col = 0; col < Dut::ELEMENT_B_COLS; col++) {
-        for (int lane = 0; lane < Dut::ELEMENT_B_WRITE_ROWS; lane++) {
-          const int chi = base_chi + lane;
-          if (chi < CH_IN) {
-            expected_weights[set_idx][element_idx][col][chi] = request.data[output_lane_idx][col][lane];
-          }
-        }
-      }
-    }
-
-    store_channel.Push(request);
+    write_request_channel.Push(request);
     settle();
   }
 
-  // Load every B transfer required for one CIMArray transaction
-  void load_b_operands(BSet set, int phase) {
-    for (int chunk = 0; chunk < Dut::ELEMENT_B_BEATS; chunk++) {
-      for (int input_lane_idx = 0; input_lane_idx < INPUT_LANES; input_lane_idx++) {
-        drive_store(set, input_lane_idx, chunk, phase);
-      }
-    }
-    tick();  // commit the final write before a same-row MAC can be issued
-  }
+  // Drive one replicated B tile and mirror beat tile zero across the output axis
+  void drive_write_replicate(Set wset, int input_axis_idx, int tile_wchi, int phase) {
+    WriteRequest request;
+    request.wset = wset;
+    request.input_axis_idx = input_axis_idx;
+    request.output_axis_tile_base = 0;
+    request.wchi = tile_wchi;
+    request.replicate = 1;
 
-  // Load B operands with an empty cycle after every store request
-  void load_b_operands_with_idle(BSet set, int phase) {
-    for (int chunk = 0; chunk < Dut::ELEMENT_B_BEATS; chunk++) {
-      for (int input_lane_idx = 0; input_lane_idx < INPUT_LANES; input_lane_idx++) {
-        drive_store(set, input_lane_idx, chunk, phase);
-        tick();  // allow the pushed request to be accepted
-        tick();  // leave the following empty cycle visible to the DUT
-      }
-    }
-  }
-
-  // Drive one fanout store and mirror the replicated tile into every multicast group
-  void drive_store_fanout(BSet set, int base_lane, int chunk, int phase) {
-    StoreRequest request;
-    request.set = set;
-    request.lane = base_lane;
-    request.waddr = chunk * Dut::ELEMENT_B_WRITE_ROWS;
-    request.fanout = 1;
-
-    for (int section = 0; section < MULTICAST_GROUPS; section++) {
-      for (int group_lane = 0; group_lane < MULTICAST_GROUP_LANES; group_lane++) {
-        for (int col = 0; col < Dut::ELEMENT_B_COLS; col++) {
-          for (int lane = 0; lane < Dut::ELEMENT_B_WRITE_ROWS; lane++) {
-            request.data[section * MULTICAST_GROUP_LANES + group_lane][col][lane] =
-                weight_value(base_lane + section, chunk, group_lane, col, lane, phase);
-          }
+    for (int port_tile_idx = 0; port_tile_idx < B_PORT_TILES; port_tile_idx++) {
+      for (int tile_n = 0; tile_n < Dut::TILE_N; tile_n++) {
+        for (int tile_bk = 0; tile_bk < Dut::TILE_BK; tile_bk++) {
+          const int k = input_axis_idx * Dut::TILE_K + tile_wchi + tile_bk;
+          const int source_n = port_tile_idx * Dut::TILE_N + tile_n;
+          request.data[port_tile_idx][tile_bk][tile_n] = b_value(k, source_n, phase);
         }
       }
     }
 
-    const int set_idx = set.to_int();
-    const int base_chi = chunk * Dut::ELEMENT_B_WRITE_ROWS;
-    for (int section = 0; section < MULTICAST_GROUPS; section++) {
-      const int input_lane_idx = base_lane + section;
-      for (int group_idx = 0; group_idx < MULTICAST_GROUPS; group_idx++) {
-        for (int group_lane = 0; group_lane < MULTICAST_GROUP_LANES; group_lane++) {
-          const int output_lane_idx = group_idx * MULTICAST_GROUP_LANES + group_lane;
-          const int element_idx = element_index(input_lane_idx, output_lane_idx);
-          for (int col = 0; col < Dut::ELEMENT_B_COLS; col++) {
-            for (int lane = 0; lane < Dut::ELEMENT_B_WRITE_ROWS; lane++) {
-              const int chi = base_chi + lane;
-              if (chi < CH_IN) {
-                expected_weights[set_idx][element_idx][col][chi] =
-                    request.data[section * MULTICAST_GROUP_LANES + group_lane][col][lane];
-              }
-            }
-          }
+    for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES; output_axis_idx++) {
+      for (int tile_n = 0; tile_n < Dut::TILE_N; tile_n++) {
+        for (int tile_bk = 0; tile_bk < Dut::TILE_BK; tile_bk++) {
+          const int k = input_axis_idx * Dut::TILE_K + tile_wchi + tile_bk;
+          const int n = output_axis_idx * Dut::TILE_N + tile_n;
+          expected_b[wset.to_int()][k][n] = request.data[0][tile_bk][tile_n];
         }
       }
     }
 
-    store_channel.Push(request);
+    write_request_channel.Push(request);
     settle();
   }
 
-  // Load a replicated tile through fanout writes covering all input lanes
-  void load_b_operands_fanout(BSet set, int phase) {
-    for (int chunk = 0; chunk < Dut::ELEMENT_B_BEATS; chunk++) {
-      for (int base_lane = 0; base_lane < INPUT_LANES; base_lane += MULTICAST_GROUPS) {
-        drive_store_fanout(set, base_lane, chunk, phase);
+  // Load every direct B-port span required by one resident weight set
+  void load_weight_set(Set wset, int phase, bool insert_idle = false) {
+    for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES; input_axis_idx++) {
+      for (int tile_wchi = 0; tile_wchi < Dut::TILE_K; tile_wchi += Dut::TILE_BK) {
+        for (int output_axis_tile_base = 0; output_axis_tile_base < OUTPUT_AXIS_TILES;
+             output_axis_tile_base += B_PORT_TILES) {
+          drive_write_direct(wset, input_axis_idx, output_axis_tile_base, tile_wchi, phase);
+          if (insert_idle) {
+            tick();
+            tick();
+          }
+        }
       }
     }
-    tick();  // commit the final write before a same-row MAC can be issued
+    tick();
   }
 
-  // Load fanout B operands with an empty cycle after every store request
-  void load_b_operands_fanout_with_idle(BSet set, int phase) {
-    for (int chunk = 0; chunk < Dut::ELEMENT_B_BEATS; chunk++) {
-      for (int base_lane = 0; base_lane < INPUT_LANES; base_lane += MULTICAST_GROUPS) {
-        drive_store_fanout(set, base_lane, chunk, phase);
-        tick();  // allow the pushed request to be accepted
-        tick();  // leave the following empty cycle visible to the DUT
+  // Load one weight set by replicating beat tile zero
+  void load_weight_set_replicate(Set wset, int phase, bool insert_idle = false) {
+    for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES; input_axis_idx++) {
+      for (int tile_wchi = 0; tile_wchi < Dut::TILE_K; tile_wchi += Dut::TILE_BK) {
+        drive_write_replicate(wset, input_axis_idx, tile_wchi, phase);
+        if (insert_idle) {
+          tick();
+          tick();
+        }
       }
     }
+    tick();
   }
 
-  // Compute one tile's expected result for one MAC request
-  void compute_expected_tile(ExpectedBeat& beat, int port_tile_idx, BSet set, int reduce_idx, int group_idx,
+  // Compute one tile C vector for an expected beat
+  void compute_expected_tile(ExpectedBeat& beat, int port_tile_idx, Set mset, int input_axis_idx, int output_axis_idx,
                              int phase) const {
-    const int set_idx = set.to_int();
-    for (int group_lane = 0; group_lane < MULTICAST_GROUP_LANES; group_lane++) {
-      const int output_lane_idx = group_idx * MULTICAST_GROUP_LANES + group_lane;
-      for (int col = 0; col < Dut::ELEMENT_B_COLS; col++) {
-        long long sum = 0;
-        for (int til = 0; til < TILE_INPUT_LANES; til++) {
-          const int input_lane_idx = reduce_idx * TILE_INPUT_LANES + til;
-          const int element_idx = element_index(input_lane_idx, output_lane_idx);
-          for (int chi = 0; chi < CH_IN; chi++) {
-            const long long a_value = decode_value<A_WIDTH>(activation_value(input_lane_idx, chi, phase));
-            const long long b_value = decode_value<B_WIDTH>(expected_weights[set_idx][element_idx][col][chi]);
-            sum += a_value * b_value;
-          }
-        }
-        beat.value[port_tile_idx][group_lane][col] += sum;
+    for (int tile_n = 0; tile_n < Dut::TILE_N; tile_n++) {
+      const int n = output_axis_idx * Dut::TILE_N + tile_n;
+      long long sum = 0;
+      for (int tile_k = 0; tile_k < Dut::TILE_K; tile_k++) {
+        const int k = input_axis_idx * Dut::TILE_K + tile_k;
+        const long long a = decode_value<A_WIDTH>(a_value(k, phase));
+        const long long b = decode_value<B_WIDTH>(expected_b[mset.to_int()][k][n]);
+        sum += a * b;
       }
+      beat.value[port_tile_idx][tile_n] += sum;
     }
   }
 
-  // Queue the C beats produced by one targeted or broadcast request
-  void queue_expected_beats(BSet set, bool bcast, int target_group, bool reduce_groups, int phase) {
-    if constexpr (C_PORT_ORIENTATION == CIM_C_PORT_REDUCTION_MAJOR) {
-      for (int group_idx = 0; group_idx < MULTICAST_GROUPS; group_idx++) {
-        if (bcast || group_idx == target_group) {
-          ExpectedBeat beat = {};
-          for (int reduce_idx = 0; reduce_idx < REDUCTION_GROUPS; reduce_idx++) {
-            const int port_tile_idx = reduce_groups ? 0 : reduce_idx;
-            compute_expected_tile(beat, port_tile_idx, set, reduce_idx, group_idx, phase);
-          }
-          expected_beats.push_back(beat);
-        }
-      }
-    } else if (reduce_groups) {
+  // Queue the C beats produced by one targeted or multicast MAC request
+  void queue_expected_beats(Set mset, bool multicast, int target_output_axis_idx, bool reduce, int phase) {
+    const int selected_output_tiles = multicast ? OUTPUT_AXIS_TILES : 1;
+    const int logical_results = reduce ? selected_output_tiles : selected_output_tiles * INPUT_AXIS_TILES;
+    const int result_beats = (logical_results + C_PORT_TILES - 1) / C_PORT_TILES;
+    for (int result_beat_idx = 0; result_beat_idx < result_beats; result_beat_idx++) {
       ExpectedBeat beat = {};
-      for (int group_idx = 0; group_idx < MULTICAST_GROUPS; group_idx++) {
-        if (bcast || group_idx == target_group) {
-          for (int reduce_idx = 0; reduce_idx < REDUCTION_GROUPS; reduce_idx++) {
-            compute_expected_tile(beat, group_idx, set, reduce_idx, group_idx, phase);
+      for (int port_idx = 0; port_idx < C_PORT_TILES; port_idx++) {
+        const int logical_idx = result_beat_idx * C_PORT_TILES + port_idx;
+        if (logical_idx >= logical_results) {
+          continue;
+        }
+
+        int output_axis_ordinal = 0;
+        int input_axis_idx = 0;
+        if (reduce) {
+          output_axis_ordinal = logical_idx;
+        } else if constexpr (C_BEAT_LAYOUT == CIM_C_BEAT_INPUT_MAJOR) {
+          output_axis_ordinal = logical_idx / INPUT_AXIS_TILES;
+          input_axis_idx = logical_idx % INPUT_AXIS_TILES;
+        } else if (multicast) {
+          input_axis_idx = logical_idx / OUTPUT_AXIS_TILES;
+          output_axis_ordinal = logical_idx % OUTPUT_AXIS_TILES;
+        } else {
+          input_axis_idx = logical_idx;
+        }
+        const int output_axis_idx = multicast ? output_axis_ordinal : target_output_axis_idx;
+
+        if (reduce) {
+          for (int sum_input_axis_idx = 0; sum_input_axis_idx < INPUT_AXIS_TILES; sum_input_axis_idx++) {
+            compute_expected_tile(beat, port_idx, mset, sum_input_axis_idx, output_axis_idx, phase);
           }
+        } else {
+          compute_expected_tile(beat, port_idx, mset, input_axis_idx, output_axis_idx, phase);
         }
       }
       expected_beats.push_back(beat);
-    } else {
-      for (int reduce_idx = 0; reduce_idx < REDUCTION_GROUPS; reduce_idx++) {
-        ExpectedBeat beat = {};
-        for (int group_idx = 0; group_idx < MULTICAST_GROUPS; group_idx++) {
-          if (bcast || group_idx == target_group) {
-            compute_expected_tile(beat, group_idx, set, reduce_idx, group_idx, phase);
-          }
-        }
-        expected_beats.push_back(beat);
-      }
     }
   }
 
-  // Build narrow MAC metadata for one request
-  MACRequest build_mac_request(BSet set) const {
+  // Build one complete A beat for a deterministic phase
+  ABeat build_a_beat(int phase) const {
+    ABeat beat;
+    for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES; input_axis_idx++) {
+      for (int tile_k = 0; tile_k < Dut::TILE_K; tile_k++) {
+        const int k = input_axis_idx * Dut::TILE_K + tile_k;
+        beat[input_axis_idx][tile_k] = a_value(k, phase);
+      }
+    }
+    return beat;
+  }
+
+  // Build one atomic MAC request with its deterministic A beat
+  MACRequest build_mac_request(Set mset, int phase) const {
     MACRequest request;
-    request.set = set;
-    request.group = 0;
-    request.bcast = 0;
-    request.reduce_groups = 0;
+    request.mset = mset;
+    request.output_axis_idx = 0;
+    request.multicast = 0;
+    request.reduce = 0;
+    request.a = build_a_beat(phase);
     return request;
   }
 
-  // Build the shared A beat for one deterministic phase
-  ABeat build_a_beat(int phase) const {
-    ABeat a_beat;
-    for (int input_lane_idx = 0; input_lane_idx < INPUT_LANES; input_lane_idx++) {
-      for (int chi = 0; chi < CH_IN; chi++) {
-        a_beat[input_lane_idx][chi] = activation_value(input_lane_idx, chi, phase);
-      }
-    }
-    return a_beat;
-  }
-
-  // Drive one group-addressed MAC request and queue its expected beat
-  void drive_mac_group(BSet set, int group_idx, int phase, bool reduce_groups = false) {
-    MACRequest request = build_mac_request(set);
-    request.group = group_idx;
-    request.reduce_groups = reduce_groups;
-
-    queue_expected_beats(set, false, group_idx, reduce_groups, phase);
-
+  // Drive one targeted MAC request and queue its expected C beats
+  void drive_targeted_mac(Set mset, int output_axis_idx, int phase, bool reduce = false) {
+    MACRequest request = build_mac_request(mset, phase);
+    request.output_axis_idx = output_axis_idx;
+    request.reduce = reduce;
+    queue_expected_beats(mset, false, output_axis_idx, reduce, phase);
     mac_request_channel.Push(request);
-    push_a_beat(build_a_beat(phase));
     settle();
   }
 
-  // Drive one broadcast MAC request and queue expected beats for every group
-  void drive_mac_bcast(BSet set, int phase, bool reduce_groups = false) {
-    MACRequest request = build_mac_request(set);
-    request.bcast = 1;
-    request.reduce_groups = reduce_groups;
-
-    queue_expected_beats(set, true, 0, reduce_groups, phase);
-
+  // Drive one multicast MAC request and queue its expected C beats
+  void drive_multicast_mac(Set mset, int phase, bool reduce = false) {
+    MACRequest request = build_mac_request(mset, phase);
+    request.multicast = 1;
+    request.reduce = reduce;
+    queue_expected_beats(mset, true, 0, reduce, phase);
     mac_request_channel.Push(request);
-    push_a_beat(build_a_beat(phase));
     settle();
   }
 
   // Pop one C beat and compare it against the oldest expected beat
   void pop_and_check() {
-    require(!expected_beats.empty(), "c beat popped with no expected beat");
+    require(!expected_beats.empty(), "C beat popped with no expected beat");
 
     const CBeat actual = result_channel.Pop();
     const ExpectedBeat expected = expected_beats.front();
     expected_beats.pop_front();
 
     for (int port_tile_idx = 0; port_tile_idx < C_PORT_TILES; port_tile_idx++) {
-      for (int group_lane = 0; group_lane < MULTICAST_GROUP_LANES; group_lane++) {
-        for (int col = 0; col < Dut::ELEMENT_B_COLS; col++) {
-          const ac_int<Dut::RESULT_WIDTH, false> expected_bits =
-              encode_value<Dut::RESULT_WIDTH>(expected.value[port_tile_idx][group_lane][col]);
-          if (actual[port_tile_idx][group_lane][col] == expected_bits) {
-            continue;
-          }
-
-          std::ostringstream text;
-          text << "unexpected c beat[" << port_tile_idx << "][" << group_lane << "][" << col << "] got "
-               << actual[port_tile_idx][group_lane][col].to_int() << " expected " << expected_bits.to_int();
-          require(false, text.str());
+      for (int tile_n = 0; tile_n < Dut::TILE_N; tile_n++) {
+        const ac_int<Dut::C_WIDTH, false> expected_bits =
+            encode_value<Dut::C_WIDTH>(expected.value[port_tile_idx][tile_n]);
+        if (actual[port_tile_idx][tile_n] == expected_bits) {
+          continue;
         }
+
+        std::ostringstream text;
+        text << "unexpected C beat[" << port_tile_idx << "][" << tile_n << "] got "
+             << actual[port_tile_idx][tile_n].to_int() << " expected " << expected_bits.to_int();
+        require(false, text.str());
       }
     }
     settle();
   }
 
-  // Pop and check every outstanding expected beat
+  // Pop and check every outstanding expected C beat
   void drain_expected_beats() {
     while (!expected_beats.empty()) {
       pop_and_check();
     }
   }
 
-  // Return a valid B set for one deterministic transaction phase
-  BSet transaction_set(int phase) const { return BSet(phase % B_SETS); }
+  // Return a valid weight set for one deterministic transaction phase
+  Set transaction_wset(int phase) const { return Set(phase % B_SETS); }
 
-  // Run one broadcast transaction with optional idle and backpressure cycles
-  void run_bcast_transaction(int phase, bool insert_idle_cycles, int c_backpressure_cycles) {
-    const BSet set = transaction_set(phase);
-    load_b_operands(set, phase);
-
+  // Run one multicast transaction with optional idle and backpressure cycles
+  void run_multicast_transaction(int phase, bool insert_idle_cycles, int c_backpressure_cycles) {
+    const Set wset = transaction_wset(phase);
+    load_weight_set(wset, phase);
     if (insert_idle_cycles) {
       tick();
     }
-
-    drive_mac_bcast(set, phase + 3);
-
+    drive_multicast_mac(wset, phase + 3);
     if (insert_idle_cycles) {
       tick();
     }
-
     for (int cycle = 0; cycle < c_backpressure_cycles; cycle++) {
       tick();
     }
-
     drain_expected_beats();
   }
 
-  // Run the basic load/MAC/result path with and without extra idle spacing
+  // Check direct B loading and C backpressure with and without idle spacing
   void run_basic_transaction_checks() {
-    run_bcast_transaction(1, true, 3);
-    run_bcast_transaction(13, false, 3);
+    run_multicast_transaction(1, true, 3);
+    run_multicast_transaction(13, false, 3);
   }
 
-  // Check optional array-boundary reduction for broadcast and targeted requests
+  // Check optional reduction for multicast and targeted requests
   void run_reduced_result_check() {
-    const BSet set = transaction_set(17);
-    load_b_operands(set, 17);
-
-    drive_mac_bcast(set, 19, true);
+    const Set wset = transaction_wset(17);
+    load_weight_set(wset, 17);
+    drive_multicast_mac(wset, 19, true);
     drain_expected_beats();
-
-    drive_mac_group(set, MULTICAST_GROUPS - 1, 23, true);
+    drive_targeted_mac(wset, OUTPUT_AXIS_TILES - 1, 23, true);
     drain_expected_beats();
   }
 
-  // Check B loads across explicit idle gaps between store requests
-  void run_gapped_store_check() {
-    const BSet direct_set = transaction_set(117);
-    load_b_operands_with_idle(direct_set, 117);
-    drive_mac_bcast(direct_set, 121);
+  // Check direct and replicated B requests separated by empty cycles
+  void run_gapped_write_check() {
+    const Set direct_wset = transaction_wset(117);
+    load_weight_set(direct_wset, 117, true);
+    drive_multicast_mac(direct_wset, 121);
     drain_expected_beats();
 
-    if constexpr ((INPUT_LANES % MULTICAST_GROUPS) == 0) {
-      const BSet fanout_set = transaction_set(127);
-      load_b_operands_fanout_with_idle(fanout_set, 127);
-      drive_mac_bcast(fanout_set, 131);
+    const Set replicate_wset = transaction_wset(127);
+    load_weight_set_replicate(replicate_wset, 127, true);
+    drive_multicast_mac(replicate_wset, 131);
+    drain_expected_beats();
+  }
+
+  // Check that distinct weight sets remain independently addressable
+  void run_set_retention_check() {
+    const Set first_wset = Set(0);
+    const Set second_wset = Set((B_SETS > 1) ? 1 : 0);
+    load_weight_set(first_wset, 21);
+    load_weight_set(second_wset, 29);
+    drive_multicast_mac(first_wset, 35);
+    drain_expected_beats();
+    drive_multicast_mac(second_wset, 39);
+    drain_expected_beats();
+    drive_multicast_mac(first_wset, 43);
+    drain_expected_beats();
+  }
+
+  // Check aligned B-port spans and preservation of an untouched span
+  void run_b_port_span_retention_check() {
+    if constexpr (OUTPUT_AXIS_TILES > B_PORT_TILES) {
+      const Set wset = transaction_wset(137);
+      load_weight_set(wset, 137);
+      for (int tile_wchi = 0; tile_wchi < Dut::TILE_K; tile_wchi += Dut::TILE_BK) {
+        drive_write_direct(wset, 0, 0, tile_wchi, 149);
+      }
+      tick();
+      drive_multicast_mac(wset, 151);
       drain_expected_beats();
     }
   }
 
-  // Check that loaded rows remain independently addressable across later loads
-  void run_set_retention_check() {
-    const BSet first_set = BSet(0);
-    const BSet second_set = BSet((B_SETS > 1) ? 1 : 0);
-
-    load_b_operands(first_set, 21);
-    load_b_operands(second_set, 29);
-
-    drive_mac_bcast(first_set, 35);
-    drain_expected_beats();
-
-    drive_mac_bcast(second_set, 39);
-    drain_expected_beats();
-
-    drive_mac_bcast(first_set, 43);
-    drain_expected_beats();
-  }
-
-  // Check per-group issue of distinct phases to every group back to back
-  void run_group_issue_check() {
-    const BSet set = transaction_set(47);
-    load_b_operands(set, 47);
-
-    // Issue one request per chunk without collecting in between
-    for (int group_idx = 0; group_idx < MULTICAST_GROUPS; group_idx++) {
-      drive_mac_group(set, group_idx, 49 + group_idx);
+  // Check targeted issue to every output-axis tile back to back
+  void run_targeted_issue_check() {
+    const Set mset = transaction_wset(47);
+    load_weight_set(mset, 47);
+    for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES; output_axis_idx++) {
+      drive_targeted_mac(mset, output_axis_idx, 49 + output_axis_idx);
     }
-
     drain_expected_beats();
   }
 
-  // Check request and A backpressure around one retained request
+  // Check that one retained result backpressures a second request to the same tile
   void run_issue_handshake_check() {
-    const BSet set = transaction_set(53);
-    load_b_operands(set, 53);
+    const Set mset = transaction_wset(53);
+    load_weight_set(mset, 53);
 
-    MACRequest first_request = build_mac_request(set);
-    first_request.group = 0;
-    queue_expected_beats(set, false, 0, false, 59);
+    MACRequest first_request = build_mac_request(mset, 59);
+    first_request.output_axis_idx = 0;
+    queue_expected_beats(mset, false, 0, false, 59);
     mac_request_channel.Push(first_request);
+    settle();
 
-    MACRequest blocked_request = build_mac_request(set);
-    blocked_request.group = (MULTICAST_GROUPS > 1) ? 1 : 0;
-    require(!mac_request_channel.PushNB(blocked_request), "accepted a second request while the first awaited A");
+    MACRequest second_request = build_mac_request(mset, 61);
+    second_request.output_axis_idx = 0;
+    require(!mac_request_channel.PushNB(second_request), "accepted a second request before releasing tile credit");
 
-    push_a_beat(build_a_beat(59));
+    constexpr int kTargetedRawBeats = (INPUT_AXIS_TILES + C_PORT_TILES - 1) / C_PORT_TILES;
+    for (int beat = 0; beat < kTargetedRawBeats; beat++) {
+      pop_and_check();
+    }
 
-    MACRequest second_request = build_mac_request(set);
-    second_request.group = 0;
-    queue_expected_beats(set, false, 0, false, 61);
+    queue_expected_beats(mset, false, 0, false, 61);
     mac_request_channel.Push(second_request);
-
-    const ABeat second_beat = build_a_beat(61);
-    pending_a_channel.Push(second_beat);
-
-    constexpr int kTargetedRawBeats = (C_PORT_ORIENTATION == CIM_C_PORT_REDUCTION_MAJOR) ? 1 : REDUCTION_GROUPS;
-    for (int beat = 0; beat < kTargetedRawBeats; beat++) {
-      pop_and_check();
-    }
-    a_transfer_done.SyncPop();
     for (int beat = 0; beat < kTargetedRawBeats; beat++) {
       pop_and_check();
     }
   }
 
-  // Load a replicated tile via fanout writes, then verify per-group and broadcast MACs
-  void run_fanout_write_check() {
-    if constexpr ((INPUT_LANES % MULTICAST_GROUPS) != 0) {
-      return;
-    }
-
-    const BSet set = transaction_set(107);
-    load_b_operands_fanout(set, 107);
-
-    // Groups hold identical tiles; distinct phases verify per-group A delivery
-    for (int group_idx = 0; group_idx < MULTICAST_GROUPS; group_idx++) {
-      drive_mac_group(set, group_idx, 109 + group_idx);
+  // Replicate beat tile zero, then verify targeted and multicast requests
+  void run_replicate_write_check() {
+    const Set mset = transaction_wset(107);
+    load_weight_set_replicate(mset, 107);
+    for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES; output_axis_idx++) {
+      drive_targeted_mac(mset, output_axis_idx, 109 + output_axis_idx);
     }
     drain_expected_beats();
-
-    drive_mac_bcast(set, 113);
+    drive_multicast_mac(mset, 113);
     drain_expected_beats();
   }
 
-  // Check long C-channel backpressure after all elements have produced results
-  void run_long_c_backpressure_check() {
-    const BSet set = transaction_set(67);
-
-    load_b_operands(set, 67);
-    drive_mac_bcast(set, 71);
-
-    for (int cycle = 0; cycle < 9; cycle++) {
-      tick();
-    }
-
+  // Check writes to another weight set while a MAC is in flight
+  void run_write_during_mac_check() {
+    const Set mset = Set(0);
+    const Set wset = Set((B_SETS > 1) ? 1 : 0);
+    load_weight_set(mset, 79);
+    drive_multicast_mac(mset, 83);
+    load_weight_set(wset, 89);
     drain_expected_beats();
-  }
-
-  // Check stores to another set while a MAC is already in flight
-  void run_store_during_mac_check() {
-    const BSet mac_set = BSet(0);
-    const BSet store_set = BSet((B_SETS > 1) ? 1 : 0);
-
-    load_b_operands(mac_set, 79);
-    drive_mac_bcast(mac_set, 83);
-
-    load_b_operands(store_set, 89);
-    drain_expected_beats();
-
-    drive_mac_bcast(store_set, 97);
+    drive_multicast_mac(wset, 97);
     drain_expected_beats();
   }
 
   // Reset an in-flight transaction and confirm the next one completes cleanly
   void run_reset_recovery_check() {
-    const BSet set = transaction_set(31);
-    load_b_operands(set, 31);
-    drive_mac_group(set, 0, 37);
+    const Set mset = transaction_wset(31);
+    load_weight_set(mset, 31);
+    drive_targeted_mac(mset, 0, 37);
 
     rstn.write(false);
     reset_channels();
@@ -689,24 +558,23 @@ struct CIMArrayTbCase : sc_module {
     rstn.write(true);
     tick();
 
-    run_bcast_transaction(103, true, 3);
+    run_multicast_transaction(103, true, 3);
   }
 
   // Run the full case sequence
   void run() {
-    initialize_inputs();
     apply_reset();
     clear_expected_state();
 
     run_basic_transaction_checks();
     run_reduced_result_check();
-    run_gapped_store_check();
+    run_gapped_write_check();
     run_set_retention_check();
-    run_group_issue_check();
+    run_b_port_span_retention_check();
+    run_targeted_issue_check();
     run_issue_handshake_check();
-    run_fanout_write_check();
-    run_long_c_backpressure_check();
-    run_store_during_mac_check();
+    run_replicate_write_check();
+    run_write_during_mac_check();
     run_reset_recovery_check();
 
     std::cout << "[PASS] " << name() << std::endl;
@@ -723,35 +591,38 @@ int sc_main(int argc, char** argv) {
   (void)argv;
 
 #ifndef SCVERIFY
-  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, false, 2, 3, 1, 1> bcast_dense_unsigned(
-      "bcast_dense_unsigned");
+  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, false, 2, 3, 1, 1> dense_unsigned(
+      "dense_unsigned");
 
   CIMArrayTbCase<5, 2, 3, 4, 4, 16, 1, 4, CIM_MODE_BIT_PARALLEL_VALUE, 5, 4, true, 3, 2, 1, 1>
-      reduce_input_lanes_signed("reduce_input_lanes_signed");
+      tile_input_reduction_signed("tile_input_reduction_signed");
 
-  CIMArrayTbCase<4, 4, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 8, true, 2, 2, 1, 1> wider_b_width_signed(
-      "wider_b_width_signed");
+  CIMArrayTbCase<4, 4, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 8, true, 2, 2, 1, 1> wider_b_signed(
+      "wider_b_signed");
 
-  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, true, 2, 2, 1, 2> grouped_parallel_signed(
-      "grouped_parallel_signed");
+  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, true, 2, 2, 1, 2>
+      output_axis_parallel_signed("output_axis_parallel_signed");
 
-  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_SERIAL_VALUE, 4, 4, false, 2, 1, 1, 2> grouped_serial_unsigned(
-      "grouped_serial_unsigned");
+  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_SERIAL_VALUE, 4, 4, false, 2, 1, 1, 2>
+      output_axis_serial_unsigned("output_axis_serial_unsigned");
 
-  // Two reduction-group rows by two multicast-group columns of 2 x 2 tiles
-  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, true, 2, 2, 2, 2>
-      segmented_parallel_signed("segmented_parallel_signed");
+  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, true, 2, 2, 2, 2> two_axis_parallel_signed(
+      "two_axis_parallel_signed");
 
-  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_SERIAL_VALUE, 4, 4, false, 2, 2, 2, 2> segmented_serial_unsigned(
-      "segmented_serial_unsigned");
+  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_SERIAL_VALUE, 4, 4, false, 2, 2, 2, 2> two_axis_serial_unsigned(
+      "two_axis_serial_unsigned");
 
-  // Multicast-major C beats span three groups and stream two reduction rows
-  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, true, 2, 2, 2, 3, 2, 3, 3,
-                 CIM_C_PORT_MULTICAST_MAJOR>
-      multicast_major_signed("multicast_major_signed");
+  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, true, 2, 2, 2, 3, 2, 3, 2,
+                 CIM_C_BEAT_OUTPUT_MAJOR>
+      output_major_signed("output_major_signed");
+
+  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, true, 2, 2, 2, 4, 2, 2, 4,
+                 CIM_C_BEAT_OUTPUT_MAJOR>
+      narrow_b_port_signed("narrow_b_port_signed");
 #else
-  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, false, 2, 2, 2, 3, 2, 3,
-                 (CIM_TEST_C_PORT_ORIENTATION == CIM_C_PORT_REDUCTION_MAJOR) ? 2 : 3, CIM_TEST_C_PORT_ORIENTATION>
+  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, false, 2, 2, 2, 3, 2,
+                 CIM_TEST_B_PORT_TILES, (CIM_TEST_C_BEAT_LAYOUT == CIM_C_BEAT_INPUT_MAJOR) ? 2 : 3,
+                 CIM_TEST_C_BEAT_LAYOUT>
       cim_array_scverify("cim_array_scverify");
 #endif
 

@@ -1,7 +1,7 @@
 // CIM macro wrapper and behavioral implementations for stored-B matrix-vector MAC operations
 //
 // The model is intentionally resetless to match the physical macro.
-// The public CIMIntMacroWrapper interface stays stable while implementations sit behind it
+// The public CIMIntMacroWrapper interface stays canonical while implementations sit behind it
 
 `include "cim_typedefs.svh"
 
@@ -84,13 +84,13 @@ module CIMIntMacroWrapper #(
     input  logic                  wclk,
     input  logic                  mclk,
     input  logic [A_WIDTH-1:0]    a [CH_IN],               // Activation operand sampled directly while mac is high
-    input  logic [B_WIDTH-1:0]    b [CH_OUT][WRITE_CH_IN],    // Stored operand to be written
+    input  logic [B_WIDTH-1:0]    b [WRITE_CH_IN][CH_OUT],    // Row-major stored-operand block to be written
     input  logic                  wen,
     input  logic                  mac,                     // Signals the start of an MAC op, no need to stay high for the mac pipeline; for bit-serial, this performs one-bit mac; for bit-parallel, this performs an A_WIDTHxB_WIDTH mac
     input  logic                  init,                    // Bit-serial: marks the first partial result when mac is high; ignored by bit-parallel
     input  logic                  a_signed,
     input  logic                  b_signed [CH_OUT],       // Each output channel can have different signedness, which is needed to support wider signed B computation
-    input  logic [BITS_CH_IN-1:0] waddr,                    // Address of the slot (bank) within a set for writing b
+    input  logic [BITS_CH_IN-1:0] wchi,                    // First input channel written across all output channels
     input  logic [BITS_SET-1:0]   wset,                    // Index of the B set to write
     input  logic [BITS_SET-1:0]   mset,                    // Index of the B set used for MAC computation
     output logic [C_WIDTH-1:0]    c [CH_OUT]
@@ -121,7 +121,7 @@ module CIMIntMacroWrapper #(
           .init(init),
           .a_signed(a_signed),
           .b_signed(b_signed),
-          .waddr(waddr),
+          .wchi(wchi),
           .wrow(wset),
           .mrow(mset),
           .c(c)
@@ -147,7 +147,7 @@ module CIMIntMacroWrapper #(
           .init(init),
           .a_signed(a_signed),
           .b_signed(b_signed),
-          .waddr(waddr),
+          .wchi(wchi),
           .wset(wset),
           .mset(mset),
           .c(c)

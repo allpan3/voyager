@@ -1,4 +1,4 @@
-// SystemC test for the strict INT8 CIMProcessor matrix-backend contract
+// SystemC tests for the strict INT8 CIMProcessor matrix-backend contract
 
 #ifdef SCVERIFY
 #include <mc_scverify.h>
@@ -11,45 +11,83 @@
 #include <mc_connections.h>
 #include <systemc.h>
 
+#include <deque>
 #include <iostream>
 #include <sstream>
+#include <string>
+#include <vector>
 
 #include "CIMProcessor.h"
 
+#ifndef CIM_PROCESSOR_LARGE_TEST
+#define CIM_PROCESSOR_LARGE_TEST 0
+#endif
+
+#if CIM_PROCESSOR_LARGE_TEST
+static constexpr int CH_IN = 64;
+static constexpr int CH_OUT = 64;
+static constexpr int B_SETS = 4;
+static constexpr int BASE_A_WIDTH = 4;
+static constexpr int BASE_B_WIDTH = 4;
+static constexpr int BASE_C_WIDTH = 20;
+static constexpr int TILE_INPUT_AXIS_ELEMENTS = 1;
+static constexpr int TILE_OUTPUT_AXIS_ELEMENTS = 2;
+static constexpr int INPUT_AXIS_TILES = 1;
+static constexpr int OUTPUT_AXIS_TILES = 2;
+#else
 static constexpr int CH_IN = 2;
 static constexpr int CH_OUT = 2;
 static constexpr int B_SETS = 2;
 static constexpr int BASE_A_WIDTH = 4;
 static constexpr int BASE_B_WIDTH = 4;
 static constexpr int BASE_C_WIDTH = 12;
+static constexpr int TILE_INPUT_AXIS_ELEMENTS = 2;
+static constexpr int TILE_OUTPUT_AXIS_ELEMENTS = 1;
+static constexpr int INPUT_AXIS_TILES = 2;
+static constexpr int OUTPUT_AXIS_TILES = 3;
+#endif
+
 static constexpr int WRITE_CH_IN = 1;
 static constexpr int MAC_LATENCY = 1;
 static constexpr int MODE = 0;
 static constexpr int A_WIDTH = 8;
 static constexpr int B_WIDTH = 8;
 static constexpr bool SIGNED = true;
-static constexpr int TILE_INPUT_LANES = 2;
-static constexpr int TILE_OUTPUT_LANES = 1;
-static constexpr int REDUCTION_GROUPS = 2;
-static constexpr int MULTICAST_GROUPS = 3;
-static constexpr int ROWS = CH_IN * TILE_INPUT_LANES * REDUCTION_GROUPS;
-static constexpr int ELEMENT_B_COLS = CH_OUT / (B_WIDTH / BASE_B_WIDTH);
-static constexpr int COLS = ELEMENT_B_COLS * TILE_OUTPUT_LANES * MULTICAST_GROUPS;
+static constexpr int A_PORT_TILES = INPUT_AXIS_TILES;
+static constexpr int B_PORT_TILES = OUTPUT_AXIS_TILES;
+static constexpr int C_PORT_TILES = OUTPUT_AXIS_TILES;
+static constexpr int K = CH_IN * TILE_INPUT_AXIS_ELEMENTS * INPUT_AXIS_TILES;
+static constexpr int TILE_N =
+    (CH_OUT / (B_WIDTH / BASE_B_WIDTH)) * TILE_OUTPUT_AXIS_ELEMENTS;
+static constexpr int N = TILE_N * OUTPUT_AXIS_TILES;
+static constexpr int BUFFER_DEPTH = 16;
 
 using Processor =
-    CIMProcessor<std::tuple<DataTypes::int8>, std::tuple<DataTypes::int8>, DataTypes::int8, DataTypes::int8,
-                 DataTypes::int24, DataTypes::int24, DataTypes::fp8_e8m0, ROWS, COLS, 16, CH_IN, CH_OUT, B_SETS,
-                 BASE_A_WIDTH, BASE_B_WIDTH, BASE_C_WIDTH, WRITE_CH_IN, MAC_LATENCY, MODE, A_WIDTH, B_WIDTH, SIGNED,
-                 TILE_INPUT_LANES, TILE_OUTPUT_LANES, REDUCTION_GROUPS, MULTICAST_GROUPS, REDUCTION_GROUPS,
-                 MULTICAST_GROUPS, MULTICAST_GROUPS, CIM_C_PORT_MULTICAST_MAJOR>;
+    CIMProcessor<std::tuple<DataTypes::int8>, std::tuple<DataTypes::int8>,
+                 DataTypes::int8, DataTypes::int8, DataTypes::int24,
+                 DataTypes::int24, DataTypes::fp8_e8m0, K, N, BUFFER_DEPTH,
+                 CH_IN, CH_OUT, B_SETS, BASE_A_WIDTH, BASE_B_WIDTH,
+                 BASE_C_WIDTH, WRITE_CH_IN, MAC_LATENCY, MODE, A_WIDTH, B_WIDTH,
+                 SIGNED, TILE_INPUT_AXIS_ELEMENTS, TILE_OUTPUT_AXIS_ELEMENTS,
+                 INPUT_AXIS_TILES, OUTPUT_AXIS_TILES, A_PORT_TILES,
+                 B_PORT_TILES, C_PORT_TILES, CIM_C_BEAT_OUTPUT_MAJOR>;
 
 using Dut = CIMPROCESSOR_DUT_TYPE(Processor);
 using Buffer = DataTypes::int24;
-using BufferVector = Pack1D<Buffer, COLS>;
+using BufferVector = Pack1D<Buffer, N>;
+using WriteRequest = BufferWriteRequest<BufferVector>;
 
-// CIMProcessorTb checks full-vector spatial reduction and buffer-backed
-// accumulation
+// CIMProcessorTb checks scheduling, resident-weight reuse, backpressure, and
+// persistent accumulation
 SC_MODULE(CIMProcessorTb) {
+  // One queued result lets the consumer independently delay ready and
+  // backpressure the processor
+  struct ExpectedOutput {
+    std::string label;
+    BufferVector values;
+    int stall_cycles;
+  };
+
   Dut dut;
   sc_clock clk;
   sc_signal<bool> rstn;
@@ -61,25 +99,47 @@ SC_MODULE(CIMProcessorTb) {
   Connections::Combinational<BufferVector> output_channel;
   Connections::SyncChannel start_channel;
 
-  Connections::Combinational<ac_int<16, false>> accumulation_read_address;
-  Connections::Combinational<BufferVector> accumulation_read_data;
-  Connections::Combinational<BufferWriteRequest<BufferVector>> accumulation_write_request;
+  Connections::Combinational<ac_int<16, false>> accumulation_read_address_0;
+  Connections::Combinational<BufferVector> accumulation_read_data_0;
+  Connections::Combinational<WriteRequest> accumulation_write_request_0;
+#if DOUBLE_BUFFERED_ACCUM_BUFFER
+  Connections::Combinational<ac_int<16, false>> accumulation_read_address_1;
+  Connections::Combinational<BufferVector> accumulation_read_data_1;
+  Connections::Combinational<WriteRequest> accumulation_write_request_1;
+  Connections::SyncChannel accumulation_done_0;
+  Connections::SyncChannel accumulation_done_1;
+#endif
 
-  BufferVector accumulation_memory[16];
-  int read_count;
-  int write_count;
+  BufferVector accumulation_memory[Processor::ACCUM_BUFFER_BANKS][BUFFER_DEPTH];
+  bool pending_read[Processor::ACCUM_BUFFER_BANKS];
+  ac_int<16, false> pending_read_address[Processor::ACCUM_BUFFER_BANKS];
+  unsigned long pending_read_ready_cycle[Processor::ACCUM_BUFFER_BANKS];
+  int read_count[Processor::ACCUM_BUFFER_BANKS];
+  int write_count[Processor::ACCUM_BUFFER_BANKS];
+  int done_count[Processor::ACCUM_BUFFER_BANKS];
+  unsigned long buffer_cycle;
+
+  std::deque<ExpectedOutput> expected_outputs;
+  std::deque<BufferVector> pending_biases;
+  sc_event expected_output_event;
+  sc_event bias_event;
+  int checked_outputs;
   bool test_failed;
 
   SC_HAS_PROCESS(CIMProcessorTb);
 
-  // Construct the processor and its behavioral accumulation-buffer peer
+  // Construct the processor and independent ready/valid peers around it
   explicit CIMProcessorTb(sc_module_name name)
       : sc_module(name),
         dut("dut"),
         clk("clk", 10, SC_NS),
         start_channel("start_channel"),
-        read_count(0),
-        write_count(0),
+#if DOUBLE_BUFFERED_ACCUM_BUFFER
+        accumulation_done_0("accumulation_done_0"),
+        accumulation_done_1("accumulation_done_1"),
+#endif
+        buffer_cycle(0),
+        checked_outputs(0),
         test_failed(false) {
     dut.clk(clk);
     dut.rstn(rstn);
@@ -89,12 +149,27 @@ SC_MODULE(CIMProcessorTb) {
     dut.params_in(params_channel);
     dut.output_channel(output_channel);
     dut.start(start_channel);
-    dut.accumulation_buffer_read_address[0](accumulation_read_address);
-    dut.accumulation_buffer_read_data[0](accumulation_read_data);
-    dut.accumulation_buffer_write_request[0](accumulation_write_request);
+    dut.accumulation_buffer_read_address[0](accumulation_read_address_0);
+    dut.accumulation_buffer_read_data[0](accumulation_read_data_0);
+    dut.accumulation_buffer_write_request[0](accumulation_write_request_0);
+#if DOUBLE_BUFFERED_ACCUM_BUFFER
+    dut.accumulation_buffer_read_address[1](accumulation_read_address_1);
+    dut.accumulation_buffer_read_data[1](accumulation_read_data_1);
+    dut.accumulation_buffer_write_request[1](accumulation_write_request_1);
+    dut.accumulation_buffer_done[0](accumulation_done_0);
+    dut.accumulation_buffer_done[1](accumulation_done_1);
+#endif
 
-    for (int address = 0; address < 16; address++) {
-      accumulation_memory[address] = BufferVector::zero();
+    for (int bank = 0; bank < Processor::ACCUM_BUFFER_BANKS; bank++) {
+      pending_read[bank] = false;
+      pending_read_address[bank] = 0;
+      pending_read_ready_cycle[bank] = 0;
+      read_count[bank] = 0;
+      write_count[bank] = 0;
+      done_count[bank] = 0;
+      for (int address = 0; address < BUFFER_DEPTH; address++) {
+        accumulation_memory[bank][address] = BufferVector::zero();
+      }
     }
 
     SC_THREAD(run);
@@ -103,8 +178,19 @@ SC_MODULE(CIMProcessorTb) {
     SC_THREAD(drive_bias);
     sensitive << clk.posedge_event();
 
+    SC_THREAD(check_outputs);
+    sensitive << clk.posedge_event();
+
     SC_THREAD(run_accumulation_buffer);
     sensitive << clk.posedge_event();
+
+#if DOUBLE_BUFFERED_ACCUM_BUFFER
+    SC_THREAD(consume_done_0);
+    sensitive << clk.posedge_event();
+
+    SC_THREAD(consume_done_1);
+    sensitive << clk.posedge_event();
+#endif
 
     SC_THREAD(watchdog);
   }
@@ -124,15 +210,15 @@ SC_MODULE(CIMProcessorTb) {
     test_failed = true;
   }
 
-  // Stop an issue-handshake or result-backpressure deadlock with a bounded failure
+  // Stop a ready/valid or scheduling deadlock with a bounded failure
   void watchdog() {
-    wait(100, SC_US);
+    wait(1, SC_MS);
     require(false, "timed out waiting for CIMProcessor completion");
     sc_stop();
   }
 
-  // Create the two-address, two-reduction schedule used by this test
-  MatrixParams make_params() const {
+  // Initialize mapper loop indices shared by all scenarios
+  MatrixParams make_base_params() const {
     MatrixParams params;
     for (int level = 0; level < 2; level++) {
       for (int loop = 0; loop < 6; loop++) {
@@ -140,12 +226,14 @@ SC_MODULE(CIMProcessorTb) {
       }
     }
 
-    params.x_loop_idx[0] = 1;
+    // Level 0 orders output Y, output X, weights, filter Y, then reduction
     params.y_loop_idx[0] = 0;
+    params.x_loop_idx[0] = 1;
     params.weight_loop_idx[0] = 2;
-    params.reduction_loop_idx[0] = 4;
     params.fy_loop_idx[0] = 3;
+    params.reduction_loop_idx[0] = 4;
 
+    // Level 1 orders filter Y/X, output Y, weights, output X, then reduction
     params.fy_loop_idx[1] = 0;
     params.fx_loop_idx = 1;
     params.y_loop_idx[1] = 2;
@@ -153,48 +241,145 @@ SC_MODULE(CIMProcessorTb) {
     params.x_loop_idx[1] = 4;
     params.reduction_loop_idx[1] = 5;
 
-    params.loops[1][params.x_loop_idx[1]] = 2;
-    params.loops[1][params.reduction_loop_idx[1]] = 2;
     params.weight_reuse_idx[0] = 0;
     params.weight_reuse_idx[1] = 1;
-    params.has_bias = true;
     params.use_input_codebook = false;
     params.use_weight_codebook = false;
     return params;
   }
 
-  // Pack signed activations with one negative lane into the CIM input word
-  ac_int<INPUT_BUFFER_WIDTH, false> make_inputs() const {
+  // Create two output-X addresses with two temporal contributions each
+  MatrixParams make_accumulation_params(bool has_bias) const {
+    MatrixParams params = make_base_params();
+    params.loops[1][params.x_loop_idx[1]] = 2;
+    params.loops[1][params.reduction_loop_idx[1]] = 2;
+    params.has_bias = has_bias;
+    return params;
+  }
+
+  // Create output-X or output-Y traversal inside one resident-weight lifetime
+  MatrixParams make_weight_reuse_params(bool traverse_x) const {
+    MatrixParams params = make_base_params();
+    params.weight_loop_idx[0] = 1;
+    params.x_loop_idx[0] = traverse_x ? 2 : 0;
+    params.y_loop_idx[0] = traverse_x ? 0 : 2;
+    params.fy_loop_idx[0] = 3;
+    params.reduction_loop_idx[0] = 4;
+    params.loops[0][traverse_x ? params.x_loop_idx[0] : params.y_loop_idx[0]] =
+        4;
+    params.has_bias = false;
+    return params;
+  }
+
+  // Create one output address with two contributions for the backpressure case
+  MatrixParams make_backpressure_params() const {
+    MatrixParams params = make_base_params();
+    params.loops[1][params.reduction_loop_idx[1]] = 2;
+    params.has_bias = true;
+    return params;
+  }
+
+  // Create one result redirected into the selected accumulation-buffer bank
+  MatrixParams make_double_buffer_params() const {
+    MatrixParams params = make_base_params();
+    params.has_bias = false;
+    params.write_output_to_accum_buffer = true;
+    return params;
+  }
+
+  // Return one signed activation pattern so heterogeneous jobs cannot alias
+  int input_value(int input_pattern, int k) const {
+    return k == 0 ? -(input_pattern + 2) : input_pattern + 1;
+  }
+
+  // Return one deterministic signed weight from a logical B row
+  int weight_value(int weight_pattern, int k, int n) const {
+    const int output_axis_idx = n / TILE_N;
+    return weight_pattern + 1 + output_axis_idx + k;
+  }
+
+  // Pack one complete signed A vector
+  ac_int<INPUT_BUFFER_WIDTH, false> make_inputs(int input_pattern) const {
     ac_int<INPUT_BUFFER_WIDTH, false> inputs = 0;
-    for (int row = 0; row < ROWS; row++) {
-      const ac_int<A_WIDTH, true> value = row == 0 ? -2 : 1;
-      inputs.set_slc(row * A_WIDTH, value.template slc<A_WIDTH>(0));
+    for (int k = 0; k < K; k++) {
+      const ac_int<A_WIDTH, true> value = input_value(input_pattern, k);
+      inputs.set_slc(k * A_WIDTH, value.template slc<A_WIDTH>(0));
     }
     return inputs;
   }
 
-  // Pack one deterministic output vector for a resident CIM weight row
-  ac_int<WEIGHT_BUFFER_WIDTH, false> make_weights(int operation, int input_row) const {
+  // Pack one complete logical B row
+  ac_int<WEIGHT_BUFFER_WIDTH, false> make_weights(int weight_pattern, int k)
+      const {
     ac_int<WEIGHT_BUFFER_WIDTH, false> weights = 0;
-    for (int output = 0; output < COLS; output++) {
-      const int value = operation + 1 + (output % 3) + input_row;
-      weights.set_slc(output * B_WIDTH, ac_int<B_WIDTH, false>(value));
+    for (int n = 0; n < N; n++) {
+      const ac_int<B_WIDTH, true> value = weight_value(weight_pattern, k, n);
+      weights.set_slc(n * B_WIDTH, value.template slc<B_WIDTH>(0));
     }
     return weights;
   }
 
-  // Return the expected final value for one output address and lane
-  int expected_value(int job, int address, int output) const {
-    const int lane_offset = output % 3;
-    const int first_operation = job * 4 + address * 2;
-    const int input_sum = ROWS - 3;
-    const int input_row_sum = ROWS * (ROWS - 1) / 2;
-    const int first_partial = input_sum * (first_operation + 1 + lane_offset) + input_row_sum;
-    const int second_partial = input_sum * (first_operation + 2 + lane_offset) + input_row_sum;
-    return output + first_partial + second_partial;
+  // Compute one complete golden MAC result
+  BufferVector expected_partial(int input_pattern, int weight_pattern) const {
+    BufferVector expected = BufferVector::zero();
+    for (int n = 0; n < N; n++) {
+      int value = 0;
+      for (int k = 0; k < K; k++) {
+        value +=
+            input_value(input_pattern, k) * weight_value(weight_pattern, k, n);
+      }
+      expected[n] = Buffer(value);
+    }
+    return expected;
   }
 
-  // Supply one reusable bias vector for each back-to-back parameter job
+  // Add one vector into another with the processor's Buffer arithmetic
+  void add_vector(BufferVector & destination, const BufferVector &source)
+      const {
+    for (int n = 0; n < N; n++) {
+      destination[n] += source[n];
+    }
+  }
+
+  // Queue one bias vector for the independent bias producer
+  BufferVector queue_bias(int base) {
+    BufferVector bias = BufferVector::zero();
+    for (int n = 0; n < N; n++) {
+      bias[n] = Buffer(base + n);
+    }
+    pending_biases.push_back(bias);
+    bias_event.notify(SC_ZERO_TIME);
+    return bias;
+  }
+
+  // Queue one expected output and its deliberate ready stall
+  void expect_output(const std::string &label, const BufferVector &values,
+                     int stall_cycles) {
+    expected_outputs.push_back(ExpectedOutput{label, values, stall_cycles});
+    expected_output_event.notify(SC_ZERO_TIME);
+  }
+
+  // Send one mapper job with an exact resident-weight load schedule
+  void send_job(const MatrixParams &params,
+                const std::vector<int> &weight_patterns,
+                const std::vector<bool> &load_weights, int input_pattern) {
+    require(weight_patterns.size() == load_weights.size(),
+            "test job vectors must have equal lengths");
+    params_channel.Push(params);
+    start_channel.SyncPop();
+
+    for (std::size_t operation = 0; operation < weight_patterns.size();
+         operation++) {
+      if (load_weights[operation]) {
+        for (int k = 0; k < K; k++) {
+          weight_channel.Push(make_weights(weight_patterns[operation], k));
+        }
+      }
+      input_channel.Push(make_inputs(input_pattern));
+    }
+  }
+
+  // Drive queued biases only when the processor requests them
   void drive_bias() {
     bias_channel.ResetWrite();
     wait();
@@ -202,43 +387,156 @@ SC_MODULE(CIMProcessorTb) {
       wait();
     }
 
-    BufferVector bias = BufferVector::zero();
-    for (int output = 0; output < COLS; output++) {
-      bias[output] = Buffer(output);
+    while (true) {
+      if (pending_biases.empty()) {
+        wait(bias_event);
+        continue;
+      }
+      const BufferVector bias = pending_biases.front();
+      pending_biases.pop_front();
+      bias_channel.Push(bias);
     }
-    bias_channel.Push(bias);
-    bias_channel.Push(bias);
   }
 
-  // Model the persistent MatrixUnit accumulation buffer
+  // Delay output ready to prove result-channel backpressure is lossless
+  void check_outputs() {
+    output_channel.ResetRead();
+    wait();
+    while (!rstn.read()) {
+      wait();
+    }
+
+    while (true) {
+      if (expected_outputs.empty()) {
+        wait(expected_output_event);
+        continue;
+      }
+
+      const ExpectedOutput expected = expected_outputs.front();
+      expected_outputs.pop_front();
+      for (int cycle = 0; cycle < expected.stall_cycles; cycle++) {
+        wait();
+      }
+
+      const BufferVector result = output_channel.Pop();
+      for (int n = 0; n < N; n++) {
+        std::ostringstream message;
+        message << expected.label << " n " << n << " expected "
+                << expected.values[n].int_val.to_int() << " got "
+                << result[n].int_val.to_int();
+        require(
+            result[n].int_val.to_int() == expected.values[n].int_val.to_int(),
+            message.str());
+      }
+      checked_outputs++;
+    }
+  }
+
+  // Apply deterministic read-address and write-request backpressure to bank 0
+  void service_bank_0() {
+    if (pending_read[0] && buffer_cycle >= pending_read_ready_cycle[0]) {
+      accumulation_read_data_0.Push(
+          accumulation_memory[0][pending_read_address[0].to_int()]);
+      pending_read[0] = false;
+    }
+
+    ac_int<16, false> address;
+    if (!pending_read[0] && buffer_cycle % 3 == 0 &&
+        accumulation_read_address_0.PopNB(address)) {
+      pending_read[0] = true;
+      pending_read_address[0] = address;
+      pending_read_ready_cycle[0] = buffer_cycle + 2;
+      read_count[0]++;
+    }
+
+    WriteRequest write;
+    if (buffer_cycle % 4 == 0 && accumulation_write_request_0.PopNB(write)) {
+      accumulation_memory[0][write.address.to_int()] = write.data;
+      write_count[0]++;
+    }
+  }
+
+#if DOUBLE_BUFFERED_ACCUM_BUFFER
+  // Apply a different deterministic backpressure phase to bank 1
+  void service_bank_1() {
+    if (pending_read[1] && buffer_cycle >= pending_read_ready_cycle[1]) {
+      accumulation_read_data_1.Push(
+          accumulation_memory[1][pending_read_address[1].to_int()]);
+      pending_read[1] = false;
+    }
+
+    ac_int<16, false> address;
+    if (!pending_read[1] && buffer_cycle % 3 == 1 &&
+        accumulation_read_address_1.PopNB(address)) {
+      pending_read[1] = true;
+      pending_read_address[1] = address;
+      pending_read_ready_cycle[1] = buffer_cycle + 2;
+      read_count[1]++;
+    }
+
+    WriteRequest write;
+    if (buffer_cycle % 4 == 1 && accumulation_write_request_1.PopNB(write)) {
+      accumulation_memory[1][write.address.to_int()] = write.data;
+      write_count[1]++;
+    }
+  }
+#endif
+
+  // Emulate MatrixUnit's persistent accumulation memory and ready/valid ports
   void run_accumulation_buffer() {
-    accumulation_read_address.ResetRead();
-    accumulation_read_data.ResetWrite();
-    accumulation_write_request.ResetRead();
+    accumulation_read_address_0.ResetRead();
+    accumulation_read_data_0.ResetWrite();
+    accumulation_write_request_0.ResetRead();
+#if DOUBLE_BUFFERED_ACCUM_BUFFER
+    accumulation_read_address_1.ResetRead();
+    accumulation_read_data_1.ResetWrite();
+    accumulation_write_request_1.ResetRead();
+#endif
     wait();
 
     while (true) {
-      BufferWriteRequest<BufferVector> write;
-      if (accumulation_write_request.PopNB(write)) {
-        accumulation_memory[write.address.to_int()] = write.data;
-        write_count++;
-      }
-
-      ac_int<16, false> address;
-      if (accumulation_read_address.PopNB(address)) {
-        read_count++;
-        accumulation_read_data.Push(accumulation_memory[address.to_int()]);
-      }
+      service_bank_0();
+#if DOUBLE_BUFFERED_ACCUM_BUFFER
+      service_bank_1();
+#endif
+      buffer_cycle++;
       wait();
     }
   }
 
-  // Drive one complete matrix operation and check both completed outputs
+#if DOUBLE_BUFFERED_ACCUM_BUFFER
+  // Consume the bank-0 completion handshake
+  void consume_done_0() {
+    accumulation_done_0.ResetRead();
+    wait();
+    while (!rstn.read()) {
+      wait();
+    }
+    while (true) {
+      accumulation_done_0.SyncPop();
+      done_count[0]++;
+    }
+  }
+
+  // Consume the bank-1 completion handshake
+  void consume_done_1() {
+    accumulation_done_1.ResetRead();
+    wait();
+    while (!rstn.read()) {
+      wait();
+    }
+    while (true) {
+      accumulation_done_1.SyncPop();
+      done_count[1]++;
+    }
+  }
+#endif
+
+  // Drive heterogeneous jobs without draining prior results first
   void run() {
     params_channel.ResetWrite();
     input_channel.ResetWrite();
     weight_channel.ResetWrite();
-    output_channel.ResetRead();
     start_channel.ResetRead();
 
     rstn.write(false);
@@ -247,40 +545,110 @@ SC_MODULE(CIMProcessorTb) {
     rstn.write(true);
     tick();
 
-    for (int job = 0; job < 2; job++) {
-      params_channel.Push(make_params());
-      start_channel.SyncPop();
+    const BufferVector nominal_bias = queue_bias(0);
+    BufferVector nominal_0 = nominal_bias;
+    add_vector(nominal_0, expected_partial(0, 0));
+    add_vector(nominal_0, expected_partial(0, 1));
+    BufferVector nominal_1 = nominal_bias;
+    add_vector(nominal_1, expected_partial(0, 2));
+    add_vector(nominal_1, expected_partial(0, 3));
+    expect_output("nominal address 0", nominal_0, 0);
+    expect_output("nominal address 1", nominal_1, 0);
+    send_job(make_accumulation_params(true), {0, 1, 2, 3},
+             {true, true, true, true}, 0);
 
-      for (int operation = 0; operation < 4; operation++) {
-        for (int row = 0; row < ROWS; row++) {
-          weight_channel.Push(make_weights(job * 4 + operation, row));
-        }
-        input_channel.Push(make_inputs());
-      }
-
-      for (int address = 0; address < 2; address++) {
-        const BufferVector result = output_channel.Pop();
-        for (int output = 0; output < COLS; output++) {
-          std::ostringstream message;
-          message << "job " << job << " address " << address << " output " << output << " expected "
-                  << expected_value(job, address, output) << " got " << result[output].int_val.to_int();
-          require(result[output].int_val.to_int() == expected_value(job, address, output), message.str());
-        }
-      }
+    const BufferVector reused_x = expected_partial(1, 20);
+    for (int output_x = 0; output_x < 4; output_x++) {
+      std::ostringstream label;
+      label << "resident-weight reuse output X " << output_x;
+      expect_output(label.str(), reused_x, 3);
     }
+    send_job(make_weight_reuse_params(true), {20, 20, 20, 20},
+             {true, false, false, false}, 1);
 
-    tick();
-    require(write_count == 4, "expected one intermediate write per job and output address");
-    require(read_count == 4, "expected one accumulation read per job and output address");
+    const BufferVector reused_y = expected_partial(2, 30);
+    for (int output_y = 0; output_y < 4; output_y++) {
+      std::ostringstream label;
+      label << "resident-weight reuse output Y " << output_y;
+      expect_output(label.str(), reused_y, 3);
+    }
+    send_job(make_weight_reuse_params(false), {30, 30, 30, 30},
+             {true, false, false, false}, 2);
+
+    const BufferVector backpressure_bias = queue_bias(100);
+    BufferVector backpressured = backpressure_bias;
+    add_vector(backpressured, expected_partial(3, 40));
+    add_vector(backpressured, expected_partial(3, 41));
+    expect_output("backpressured temporal accumulation", backpressured, 25);
+    send_job(make_backpressure_params(), {40, 41}, {true, true}, 3);
+
+    const int expected_output_count = 11;
+    while (checked_outputs < expected_output_count) {
+      tick();
+    }
+    while (write_count[0] < 3 || read_count[0] < 3) {
+      tick();
+    }
+    require(write_count[0] == 3,
+            "expected three intermediate writes before double-buffered jobs");
+    require(read_count[0] == 3,
+            "expected three accumulation reads before double-buffered jobs");
+
+#if DOUBLE_BUFFERED_ACCUM_BUFFER
+    const BufferVector bank_0_expected = expected_partial(4, 50);
+    send_job(make_double_buffer_params(), {50}, {true}, 4);
+    const BufferVector bank_1_expected = expected_partial(5, 55);
+    send_job(make_double_buffer_params(), {55}, {true}, 5);
+
+    while (done_count[0] < 1 || done_count[1] < 1 || write_count[0] < 4 ||
+           write_count[1] < 1) {
+      tick();
+    }
+    std::ostringstream bank_0_write_message;
+    bank_0_write_message
+        << "expected four writes into accumulation bank 0, got "
+        << write_count[0];
+    require(write_count[0] == 4, bank_0_write_message.str());
+    std::ostringstream bank_1_write_message;
+    bank_1_write_message << "expected one write into accumulation bank 1, got "
+                         << write_count[1];
+    require(write_count[1] == 1, bank_1_write_message.str());
+    for (int n = 0; n < N; n++) {
+      std::ostringstream bank_0_data_message;
+      bank_0_data_message << "bank 0 n " << n << " expected "
+                          << bank_0_expected[n].int_val.to_int() << " got "
+                          << accumulation_memory[0][0][n].int_val.to_int();
+      require(accumulation_memory[0][0][n].int_val.to_int() ==
+                  bank_0_expected[n].int_val.to_int(),
+              bank_0_data_message.str());
+      std::ostringstream bank_1_data_message;
+      bank_1_data_message << "bank 1 n " << n << " expected "
+                          << bank_1_expected[n].int_val.to_int() << " got "
+                          << accumulation_memory[1][0][n].int_val.to_int();
+      require(accumulation_memory[1][0][n].int_val.to_int() ==
+                  bank_1_expected[n].int_val.to_int(),
+              bank_1_data_message.str());
+    }
+#endif
 
     if (!test_failed) {
-      std::cout << "[PASS] cim_processor_int8" << std::endl;
+      std::cout << "[PASS] cim_processor_nominal_accumulation" << std::endl;
+      std::cout << "[PASS] cim_processor_weight_reuse" << std::endl;
+      std::cout << "[PASS] cim_processor_backpressure" << std::endl;
+      std::cout << "[PASS] cim_processor_heterogeneous_jobs" << std::endl;
+#if DOUBLE_BUFFERED_ACCUM_BUFFER
+      std::cout << "[PASS] cim_processor_double_buffered_accumulation"
+                << std::endl;
+#endif
+#if CIM_PROCESSOR_LARGE_TEST
+      std::cout << "[PASS] cim_processor_large_64x64_macro" << std::endl;
+#endif
     }
     sc_stop();
   }
 };
 
-// Elaborate the focused current CIMProcessor test
+// Elaborate the selected CIMProcessor geometry and scenario set
 int sc_main(int argc, char **argv) {
   (void)argc;
   (void)argv;

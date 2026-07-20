@@ -7,6 +7,21 @@
 //   2. CIM element-level B_WIDTH can be wider than the macro wrapper's BASE_B_WIDTH.
 //      The element splits each B value across multiple macro wrapper output channels, then
 //      combines the partial results from those channels in the external accumulator.
+//
+// Workload geometry:
+//
+//                         N
+//                   +-----------+
+//               K   |  B[K][N]  |
+//                   +-----------+
+//       K                 N
+//   +---------+       +-----------+
+// M | A[M][K] |  x  = | C[M][N]  |
+//   +---------+       +-----------+
+//
+// M is temporal: one issue consumes A[m][0:K] and produces C[m][0:N]
+// BK is a fraction of K in a B block write, so b[bk][n] writes B[wchi + bk][n]
+// The macro mapping is CH_IN=K, WRITE_CH_IN=BK, and CH_OUT=N*NUM_B_SLICES
 
 `include "cim_typedefs.svh"
 
@@ -31,32 +46,31 @@ module CIMIntElement #(
     parameter int unsigned B_WIDTH = 8,
     parameter bit SIGNED = 1'b0,
 
-    localparam int unsigned A_COLS = CH_IN,
-    localparam int unsigned SUM_GUARD_WIDTH = (A_COLS <= 1) ? 1 : $clog2(A_COLS),
+    localparam int unsigned K = CH_IN,
+    localparam int unsigned BK = WRITE_CH_IN,
+    localparam int unsigned SUM_GUARD_WIDTH = (K <= 1) ? 1 : $clog2(K),
 
     // One B value is split across NUM_B_SLICES physical macro wrapper output channels
     localparam int unsigned NUM_B_SLICES = B_WIDTH / BASE_B_WIDTH,
-    localparam int unsigned B_COLS = CH_OUT / NUM_B_SLICES,
-    localparam int unsigned B_ROWS = WRITE_CH_IN,
+    localparam int unsigned N = CH_OUT / NUM_B_SLICES,
 
     // C_WIDTH is the result width depending on the operand widths and the vector length
     localparam int unsigned C_WIDTH = A_WIDTH + B_WIDTH + SUM_GUARD_WIDTH,
-    localparam int unsigned BITS_CH_IN = (CH_IN <= 1) ? 1 : $clog2(CH_IN),
+    localparam int unsigned BITS_K = (K <= 1) ? 1 : $clog2(K),
     localparam int unsigned BITS_SET = (B_SETS <= 1) ? 1 : $clog2(B_SETS)
 ) (
     input  logic                       wclk,
     input  logic                       mclk,
     input  logic                       rstn,
 
-    // Logical A operand is a vector of length A_COLS. a and mset must remain
+    // Logical A operand is one temporal row with K values. a and mset must remain
     // stable from an accepted issue until mac_ready returns high (the issue window)
-    input  logic [A_WIDTH-1:0]         a [A_COLS],
+    input  logic [A_WIDTH-1:0]         a [K],
 
-    // Logical B operand data for one write event. B_COLS is the number of B matrix
-    // columns provided, and B_ROWS is the number of matrix rows written in this cycle
-    input  logic [B_WIDTH-1:0]         b [B_COLS][B_ROWS],
+    // One B write provides BK consecutive rows for all N columns
+    input  logic [B_WIDTH-1:0]         b [BK][N],
     input  logic                       wen,
-    input  logic [BITS_CH_IN-1:0]      waddr,
+    input  logic [BITS_K-1:0]          wchi,
     input  logic [BITS_SET-1:0]        wset,
 
     // mac_issue pulses to begin a MAC when mac_ready is high; issues while not
@@ -64,7 +78,7 @@ module CIMIntElement #(
     input  logic                       mac_issue,
     input  logic [BITS_SET-1:0]        mset,
 
-    output logic [C_WIDTH-1:0]         c [B_COLS],  // registered result, stable until the next retire
+    output logic [C_WIDTH-1:0]         c [N],  // registered result, stable until the next retire
     output logic                       c_retire,   // toggles once per retired result
     output logic                       mac_ready   // high when an issue presented this cycle is accepted
 );
@@ -254,8 +268,8 @@ module CIMIntElement #(
   // are declared ahead of the functions/always_comb below because reduce_b_slices
   // reads macro_wrapper_c; VCS rejects referencing a module variable declared
   // later in the module (Verilator accepts the forward reference).
-  logic [BASE_A_WIDTH-1:0] macro_wrapper_a [A_COLS];
-  logic [BASE_B_WIDTH-1:0] macro_wrapper_b [CH_OUT][WRITE_CH_IN];
+  logic [BASE_A_WIDTH-1:0] macro_wrapper_a [CH_IN];
+  logic [BASE_B_WIDTH-1:0] macro_wrapper_b [WRITE_CH_IN][CH_OUT];
   logic macro_wrapper_b_signed [CH_OUT];
   logic [BASE_C_WIDTH-1:0] macro_wrapper_c [CH_OUT];
 
@@ -316,7 +330,7 @@ module CIMIntElement #(
   endfunction
 
   function automatic logic [C_WIDTH-1:0] reduce_b_slices(
-      input int unsigned cho
+      input int unsigned n
   );
     int unsigned phys_cho;
     int unsigned b_shift;
@@ -324,7 +338,7 @@ module CIMIntElement #(
     begin
       reduce_b_slices = '0;
       for (int b_slice = 0; b_slice < NUM_B_SLICES; b_slice++) begin
-        phys_cho = cho * NUM_B_SLICES + b_slice;
+        phys_cho = n * NUM_B_SLICES + b_slice;
         b_shift = (NUM_B_SLICES - 1 - b_slice) * BASE_B_WIDTH;
         result_is_signed = SIGNED && (retiring_first_a_slice || (b_slice == 0));
         reduce_b_slices += extend_macro_wrapper_c(macro_wrapper_c[phys_cho], result_is_signed) << b_shift;
@@ -333,33 +347,33 @@ module CIMIntElement #(
   endfunction
 
   always_comb begin
-    for (int chi = 0; chi < A_COLS; chi++) begin
-      macro_wrapper_a[chi] = select_a_window(a[chi], macro_wrapper_a_slice_idx, issue_a_window_idx);
+    for (int k = 0; k < K; k++) begin
+      macro_wrapper_a[k] = select_a_window(a[k], macro_wrapper_a_slice_idx, issue_a_window_idx);
     end
   end
 
   // b (logical):
-  //       col0         col1         col2         col3
-  // row0  b[0][0]      b[1][0]      b[2][0]      b[3][0]
-  // row1  b[0][1]      b[1][1]      b[2][1]      b[3][1]
+  //       n0           n1           n2           n3
+  // bk0   b[0][0]      b[0][1]      b[0][2]      b[0][3]
+  // bk1   b[1][0]      b[1][1]      b[1][2]      b[1][3]
   //
   // macro_wrapper_b (physical):
   //       cho0         cho1         cho2         cho3         cho4         cho5         cho6         cho7
-  // chi0  b[0][0].sl0  b[0][0].sl1  b[1][0].sl0  b[1][0].sl1  b[2][0].sl0  b[2][0].sl1  b[3][0].sl0  b[3][0].sl1
-  // chi1  b[0][1].sl0  b[0][1].sl1  b[1][1].sl0  b[1][1].sl1  b[2][1].sl0  b[2][1].sl1  b[3][1].sl0  b[3][1].sl1
+  // chi0  b[0][0].sl0  b[0][0].sl1  b[0][1].sl0  b[0][1].sl1  b[0][2].sl0  b[0][2].sl1  b[0][3].sl0  b[0][3].sl1
+  // chi1  b[1][0].sl0  b[1][0].sl1  b[1][1].sl0  b[1][1].sl1  b[1][2].sl0  b[1][2].sl1  b[1][3].sl0  b[1][3].sl1
   always_comb begin
     for (int cho = 0; cho < CH_OUT; cho++) begin
-      int unsigned col;
+      int unsigned n;
       int unsigned slice_idx;
 
-      col = cho / NUM_B_SLICES;
+      n = cho / NUM_B_SLICES;
       slice_idx = cho % NUM_B_SLICES;
       // Only the MSB slice needs to be signed
       macro_wrapper_b_signed[cho] = SIGNED && (slice_idx == 0);
 
-      // row in the B matrix
-      for (int row = 0; row < B_ROWS; row++) begin
-        macro_wrapper_b[cho][row] = select_b_slice(b[col][row], slice_idx);
+      // Position within the current BK-wide write block
+      for (int bk = 0; bk < BK; bk++) begin
+        macro_wrapper_b[bk][cho] = select_b_slice(b[bk][n], slice_idx);
       end
     end
   end
@@ -390,7 +404,7 @@ module CIMIntElement #(
       .init(macro_wrapper_init),
       .a_signed(macro_wrapper_a_signed),
       .b_signed(macro_wrapper_b_signed),
-      .waddr(waddr),
+      .wchi(wchi),
       .wset(wset),
       .mset(mset),
       .c(macro_wrapper_c)
@@ -401,35 +415,35 @@ module CIMIntElement #(
   // ---------------------------------------------------------------------------
 
   // Hold partial results while the element walks across multiple A slices
-  logic [C_WIDTH-1:0] acc [B_COLS];
+  logic [C_WIDTH-1:0] acc [N];
   // Next accumulator value shared by the accumulator and the retire capture
-  logic [C_WIDTH-1:0] acc_next [B_COLS];
+  logic [C_WIDTH-1:0] acc_next [N];
   // Registered output stage keeps a retired result stable while the next op accumulates
-  logic [C_WIDTH-1:0] c_out [B_COLS];
+  logic [C_WIDTH-1:0] c_out [N];
   assign c = c_out;
 
   always_comb begin
-    for (int cho = 0; cho < B_COLS; cho++) begin
+    for (int n = 0; n < N; n++) begin
       // The first retiring slice restarts the accumulation, so back-to-back ops need no clear
-      acc_next[cho] = (retiring_first_a_slice ? {C_WIDTH{1'b0}} : (acc[cho] << SLICE_WIDTH)) + reduce_b_slices(cho);
+      acc_next[n] = (retiring_first_a_slice ? {C_WIDTH{1'b0}} : (acc[n] << SLICE_WIDTH)) + reduce_b_slices(n);
     end
   end
 
   always_ff @(posedge mclk or negedge rstn) begin
     if (!rstn) begin
       c_retire <= 1'b0;
-      for (int cho = 0; cho < B_COLS; cho++) begin
-        acc[cho] <= '0;
-        c_out[cho] <= '0;
+      for (int n = 0; n < N; n++) begin
+        acc[n] <= '0;
+        c_out[n] <= '0;
       end
     end else if (slice_result_ready) begin
-      for (int cho = 0; cho < B_COLS; cho++) begin
-        acc[cho] <= acc_next[cho];
+      for (int n = 0; n < N; n++) begin
+        acc[n] <= acc_next[n];
       end
       if (retire_op) begin
         c_retire <= !c_retire;
-        for (int cho = 0; cho < B_COLS; cho++) begin
-          c_out[cho] <= acc_next[cho];
+        for (int n = 0; n < N; n++) begin
+          c_out[n] <= acc_next[n];
         end
       end
     end
@@ -486,17 +500,17 @@ module CIMIntElementPacked #(
     parameter int unsigned B_WIDTH = 8,
     parameter bit SIGNED = 1'b0,
 
-    localparam int unsigned A_COLS = CH_IN,
-    localparam int unsigned SUM_GUARD_WIDTH = (A_COLS <= 1) ? 1 : $clog2(A_COLS),
+    localparam int unsigned K = CH_IN,
+    localparam int unsigned BK = WRITE_CH_IN,
+    localparam int unsigned SUM_GUARD_WIDTH = (K <= 1) ? 1 : $clog2(K),
     localparam int unsigned NUM_B_SLICES = B_WIDTH / BASE_B_WIDTH,
-    localparam int unsigned B_COLS = CH_OUT / NUM_B_SLICES,
-    localparam int unsigned B_ROWS = WRITE_CH_IN,
+    localparam int unsigned N = CH_OUT / NUM_B_SLICES,
     localparam int unsigned C_WIDTH = A_WIDTH + B_WIDTH + SUM_GUARD_WIDTH,
-    localparam int unsigned BITS_CH_IN = (CH_IN <= 1) ? 1 : $clog2(CH_IN),
+    localparam int unsigned BITS_K = (K <= 1) ? 1 : $clog2(K),
     localparam int unsigned BITS_SET = (B_SETS <= 1) ? 1 : $clog2(B_SETS),
-    localparam int unsigned A_BUS_WIDTH = A_COLS * A_WIDTH,
-    localparam int unsigned B_BUS_WIDTH = B_COLS * B_ROWS * B_WIDTH,
-    localparam int unsigned C_BUS_WIDTH = B_COLS * C_WIDTH
+    localparam int unsigned A_BUS_WIDTH = K * A_WIDTH,
+    localparam int unsigned B_BUS_WIDTH = N * BK * B_WIDTH,
+    localparam int unsigned C_BUS_WIDTH = N * C_WIDTH
 ) (
     input  logic                         wclk,
     input  logic                         mclk,
@@ -505,7 +519,7 @@ module CIMIntElementPacked #(
     input  logic [A_BUS_WIDTH-1:0]       a_bus,
     input  logic [B_BUS_WIDTH-1:0]       b_bus,
     input  logic                         wen,
-    input  logic [BITS_CH_IN-1:0]        waddr,
+    input  logic [BITS_K-1:0]            wchi,
     input  logic [BITS_SET-1:0]          wset,
 
     input  logic                         mac_issue,
@@ -516,24 +530,23 @@ module CIMIntElementPacked #(
     output logic                         mac_ready
 );
 
-  logic [A_WIDTH-1:0] a [A_COLS];
-  logic [B_WIDTH-1:0] b [B_COLS][B_ROWS];
-  logic [C_WIDTH-1:0] c [B_COLS];
+  logic [A_WIDTH-1:0] a [K];
+  logic [B_WIDTH-1:0] b [BK][N];
+  logic [C_WIDTH-1:0] c [N];
 
   always_comb begin
-    for (int a_col = 0; a_col < A_COLS; a_col++) begin
-      a[a_col] = a_bus[a_col * A_WIDTH +: A_WIDTH];
+    for (int k = 0; k < K; k++) begin
+      a[k] = a_bus[k * A_WIDTH +: A_WIDTH];
     end
 
-    for (int b_col = 0; b_col < B_COLS; b_col++) begin
-      for (int b_row = 0; b_row < B_ROWS; b_row++) begin
-        b[b_col][b_row] =
-            b_bus[((b_col * B_ROWS) + b_row) * B_WIDTH +: B_WIDTH];
+    for (int bk = 0; bk < BK; bk++) begin
+      for (int n = 0; n < N; n++) begin
+        b[bk][n] = b_bus[((bk * N) + n) * B_WIDTH +: B_WIDTH];
       end
     end
 
-    for (int b_col = 0; b_col < B_COLS; b_col++) begin
-      c_bus[b_col * C_WIDTH +: C_WIDTH] = c[b_col];
+    for (int n = 0; n < N; n++) begin
+      c_bus[n * C_WIDTH +: C_WIDTH] = c[n];
     end
   end
 
@@ -558,7 +571,7 @@ module CIMIntElementPacked #(
       .a(a),
       .b(b),
       .wen(wen),
-      .waddr(waddr),
+      .wchi(wchi),
       .wset(wset),
       .mac_issue(mac_issue),
       .mset(mset),
