@@ -345,18 +345,6 @@ if {![info exists CIM_B_PORT_TILES]} {
   set CIM_B_PORT_TILES $CIM_OUTPUT_AXIS_TILES
 }
 
-# One WeightController write. The CIM backend narrows this to one array B-port
-# beat so a partial row can be committed early; the systolic backend writes a
-# whole buffer word. The beat is macro geometry: WRITE_CH_IN rows by
-# B_PORT_TILES tiles by TILE_OUTPUT_AXIS_ELEMENTS elements by CH_OUT columns,
-# each column holding BASE_B_WIDTH bits
-if {$MATRIX_BACKEND == $MATRIX_BACKEND_CIM} {
-  set WEIGHT_WRITE_WIDTH [expr {$CIM_WRITE_CH_IN * $CIM_B_PORT_TILES \
-      * $CIM_TILE_OUTPUT_AXIS_ELEMENTS * $CIM_CH_OUT * $CIM_BASE_B_WIDTH}]
-} else {
-  set WEIGHT_WRITE_WIDTH $WEIGHT_BUFFER_WIDTH
-}
-
 if {![info exists CIM_C_BEAT_LAYOUT]} {
   set CIM_C_BEAT_LAYOUT [expr {$MATRIX_BACKEND == $MATRIX_BACKEND_CIM ? 1 : 0}]
 }
@@ -462,6 +450,15 @@ if {![info exists WEIGHT_BUFFER_SIZE]} {
 
 if {![info exists WEIGHT_BUFFER_WIDTH]} {
   set WEIGHT_BUFFER_WIDTH [expr {$OC_DIMENSION * $WEIGHT_DTYPE_WIDTH}]
+}
+
+# One processor weight-channel transfer
+# Systolic transfers one buffer row; CIM transfers one physical B-port beat
+if {$MATRIX_BACKEND == $MATRIX_BACKEND_CIM} {
+  set WEIGHT_WRITE_WIDTH [expr {$CIM_WRITE_CH_IN * $CIM_B_PORT_TILES \
+      * $CIM_TILE_OUTPUT_AXIS_ELEMENTS * $CIM_CH_OUT * $CIM_BASE_B_WIDTH}]
+} else {
+  set WEIGHT_WRITE_WIDTH $WEIGHT_BUFFER_WIDTH
 }
 
 if {![info exists ACCUM_BUFFER_SIZE]} {

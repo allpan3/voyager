@@ -7,40 +7,44 @@
 #include "ArchitectureParams.h"
 
 template <typename WeightTypeTuple, typename Bias, int rows, int cols,
-          int port_width, int buffer_width, int write_width = buffer_width>
+          int port_width, int buffer_width,
+          int weight_channel_width = buffer_width>
 struct WeightController;
 
 template <typename... WeightTypes, typename Bias, int rows, int cols,
-          int port_width, int buffer_width, int write_width>
+          int port_width, int buffer_width, int weight_channel_width>
 struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
-                        port_width, buffer_width, write_width>
+                        port_width, buffer_width, weight_channel_width>
     : public sc_module {
   static constexpr int LOOP_WIDTH = 10;
+  // Derive one scalar value's width from a cols-wide resident weight row
   static constexpr int DATA_WIDTH = buffer_width / cols;
-  // A row is delivered as WRITES_PER_ROW writes. The systolic backend writes a
-  // whole buffer word at once; the CIM backend narrows this to one array
-  // B-port beat so a partial row can be committed early
-  //
-  // WIRE FORMAT (CIM). This is a convention with CIMProcessor that no compiler
-  // check enforces - see the matching diagram on
-  // CIMProcessor::write_weight_beat and change both together
-  // One unpacked row holds the output channels ascending, lowest bits first:
-  //
-  //   row: [n=0][n=1][n=2] ... [n=cols-1]        each B_WIDTH wide
-  //         \______ beat 0 ______/\____ beat 1 ____/   at WRITES_PER_ROW = 2
-  //
-  // Beat b is the contiguous slice starting at b * write_width, so it carries
-  // output channels [b * lanes, (b+1) * lanes) with lanes = write_width /
-  // B_WIDTH, and is addressed row * WRITES_PER_ROW + b. The consumer maps that
-  // span onto B_PORT_TILES output tiles
-  //
-  // WRITE_CH_IN > 1 will stage that many rows and slice the staged block
-  // instead; the slice would then interleave rows per the order chosen there
-  static constexpr int WRITES_PER_ROW = buffer_width / write_width;
-  static_assert(buffer_width % write_width == 0,
-                "One buffer word must split into whole writes");
+#if MATRIX_BACKEND == MATRIX_BACKEND_CIM
+  // A transposed source row holds *rows* scalars and becomes one resident
+  // column
+  static constexpr int SOURCE_ROW_WIDTH = rows * DATA_WIDTH;
+  static constexpr int WEIGHT_BEATS_PER_ROW =
+      buffer_width / weight_channel_width;
+  static_assert(rows == CIM_ARRAY_K_DIMENSION,
+                "WeightController rows must match the CIM array K dimension");
+  static_assert(cols == CIM_ARRAY_N_DIMENSION,
+                "WeightController cols must match the CIM array N dimension");
+  static_assert(buffer_width % weight_channel_width == 0,
+                "One logical weight row must split into whole channel beats");
+#else
+  static_assert(weight_channel_width == buffer_width,
+                "The systolic weight channel must carry one buffer row");
+#endif
+#if MATRIX_BACKEND == MATRIX_BACKEND_CIM
+  // packed_bits holds a cols-wide weight row or rows-wide transposed source row
+  static constexpr int MAX_FETCH_WIDTH = std::max(
+      {dtype_fetch_config<WeightTypes, rows, port_width>::max_fetch_width...,
+       dtype_fetch_config<WeightTypes, cols, port_width>::max_fetch_width...});
+#else
+  // The systolic path fetches cols-wide rows for both normal and square tiles
   static constexpr int MAX_FETCH_WIDTH = std::max(
       {dtype_fetch_config<WeightTypes, cols, port_width>::max_fetch_width...});
+#endif
 
   sc_in<bool> CCS_INIT_S1(clk);
   sc_in<bool> CCS_INIT_S1(rstn);
@@ -48,24 +52,26 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
   Connections::Out<MemoryRequest> CCS_INIT_S1(weight_req);
   Connections::In<ac_int<port_width, false>> CCS_INIT_S1(weight_resp);
 
-  // For the CIM backend the two write_request ports address the two resident
-  // weight sets directly (bank = wset, address = wchi)
-  Connections::Out<BufferWriteRequest<ac_int<write_width, false>>>
+#if MATRIX_BACKEND == MATRIX_BACKEND_CIM
+  // Stream one physical weight-port beat using the weight_channel protocol
+  Connections::Out<ac_int<weight_channel_width, false>> CCS_INIT_S1(
+      weight_channel);
+#else
+  Connections::Out<BufferWriteRequest<ac_int<buffer_width, false>>>
       write_request[2];
-#if MATRIX_BACKEND != MATRIX_BACKEND_CIM
   Connections::Out<BufferReadRequest> read_request[2];
 #endif
 
   Connections::Out<MemoryRequest> CCS_INIT_S1(bias_req);
-  Connections::In<ac_int<OC_PORT_WIDTH, false>> CCS_INIT_S1(bias_resp);
+  Connections::In<ac_int<port_width, false>> CCS_INIT_S1(bias_resp);
   Connections::Out<Pack1D<Bias, cols>> CCS_INIT_S1(bias_data);
 
   Connections::In<MatrixParams> CCS_INIT_S1(params_in);
-  Connections::Combinational<MatrixParams> CCS_INIT_S1(fetcher_params);
-  Connections::Combinational<MatrixParams> CCS_INIT_S1(writer_params);
 #if MATRIX_BACKEND != MATRIX_BACKEND_CIM
-  Connections::Combinational<MatrixParams> CCS_INIT_S1(reader_params);
+  Connections::Combinational<MatrixParams> CCS_INIT_S1(fetcher_params);
 #endif
+  Connections::Combinational<MatrixParams> CCS_INIT_S1(writer_params);
+  Connections::Combinational<MatrixParams> CCS_INIT_S1(reader_params);
   Connections::Combinational<MatrixParams> CCS_INIT_S1(weight_packer_params);
   Connections::Combinational<MatrixParams> CCS_INIT_S1(transposer_params);
   Connections::Combinational<MatrixParams> CCS_INIT_S1(bias_fetcher_params);
@@ -74,10 +80,13 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
   sc_fifo<bool> fetcher_done;
   sc_fifo<bool> fetcher_done_2;
 
+  // Carry one assembled memory fetch into the datatype unpacker
   Connections::Combinational<ac_int<MAX_FETCH_WIDTH, false>> packed_bits;
+  // Carry one complete logical weight row after optional transposition
   Connections::Combinational<ac_int<buffer_width, false>> transpose_out;
 #if MATRIX_BACKEND == MATRIX_BACKEND_CIM
   Connections::Combinational<ac_int<4, false>> packing_indices;
+  sc_fifo<bool> reader_tile_valid;
 #endif
 
   SC_CTOR(WeightController) {
@@ -85,15 +94,15 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
     sensitive << clk.pos();
     async_reset_signal_is(rstn, false);
 
+#if MATRIX_BACKEND != MATRIX_BACKEND_CIM
     SC_THREAD(fetcher);
     sensitive << clk.pos();
     async_reset_signal_is(rstn, false);
+#endif
 
-#if MATRIX_BACKEND != MATRIX_BACKEND_CIM
     SC_THREAD(reader);
     sensitive << clk.pos();
     async_reset_signal_is(rstn, false);
-#endif
 
     SC_THREAD(writer);
     sensitive << clk.pos();
@@ -117,318 +126,55 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
   }
 
 #if MATRIX_BACKEND == MATRIX_BACKEND_CIM
-  // Fetch one resident tile at each compute-schedule demand point
-  void fetcher() {
-    weight_req.Reset();
-    fetcher_params.ResetRead();
-    packing_indices.ResetWrite();
-
-    wait();
-
-    while (true) {
-      const MatrixParams params = fetcher_params.Pop();
-
-      ac_int<LOOP_WIDTH, false> loop_counters[2][6];
-      ac_int<LOOP_WIDTH, false> loop_bounds[2][6];
-
-#pragma hls_unroll yes
-      for (int i = 0; i < 2; i++) {
-#pragma hls_unroll yes
-        for (int j = 0; j < 6; j++) {
-          loop_bounds[i][j] = params.loops[i][j];
-        }
-      }
-
-      loop_bounds[1][params.weight_reuse_idx[0]] = 1;
-      loop_bounds[1][params.weight_reuse_idx[1]] = 1;
-
-      const ac_int<LOOP_WIDTH, false> K2 =
-          params.weight_addr_loops[0][params.weight_addr_weight_loop_idx[0]];
-      const ac_int<LOOP_WIDTH, false> C2 =
-          params.weight_addr_loops[0][params.weight_addr_reduction_loop_idx[0]];
-      const ac_int<LOOP_WIDTH, false> C1 =
-          params.weight_addr_loops[1][params.weight_addr_reduction_loop_idx[1]];
-      const ac_int<LOOP_WIDTH, false> C0 =
-          params.weight_addr_loops[1][params.weight_addr_reduction_loop_idx[2]];
-      const ac_int<LOOP_WIDTH, false> FX =
-          params.weight_addr_loops[1][params.weight_addr_fx_idx];
-      const ac_int<LOOP_WIDTH, false> FY1 =
-          params.weight_addr_loops[0][params.weight_addr_fy_idx[0]];
-      ac_int<LOOP_WIDTH, false> K1 =
-          params.weight_addr_loops[1][params.weight_addr_weight_loop_idx[1]];
-      K1 >>= params.weight_pack_factor_lg2;
-
-      const ac_int<16, false> k_stride = cols << params.weight_pack_factor_lg2;
-      const ac_int<24, false> c_stride = K2 * K1 * k_stride;
-      const ac_int<24, false> fx_stride = C2 * C1 * C0 * c_stride;
-      const ac_int<24, false> fy_stride = FX * fx_stride;
-
-      const ac_int<LOOP_WIDTH, false> compute_fy1 =
-          params.loops[0][params.fy_loop_idx[0]];
-      const ac_int<LOOP_WIDTH, false> compute_c2 =
-          params.loops[0][params.reduction_loop_idx[0]];
-      const ac_int<LOOP_WIDTH, false> compute_fy0 =
-          params.loops[1][params.fy_loop_idx[1]];
-      const ac_int<LOOP_WIDTH, false> compute_fx =
-          params.loops[1][params.fx_loop_idx];
-      const ac_int<LOOP_WIDTH, false> compute_c1 =
-          params.loops[1][params.reduction_loop_idx[1]];
-      const ac_int<LOOP_WIDTH, false> compute_k1 =
-          params.loops[1][params.weight_loop_idx[1]];
-      const bool reuse_weights = compute_fy1 == 1 && compute_c2 == 1 &&
-                                 compute_fy0 == 1 && compute_fx == 1 &&
-                                 compute_c1 == 1 && compute_k1 == 1;
-
-      ac_int<LOOP_WIDTH, false> spatial_reuse_bound = 1;
-      if (compute_c2 == 1) {
-        if (params.weight_loop_idx[0] < params.x_loop_idx[0]) {
-          if (!reuse_weights) {
-            spatial_reuse_bound = loop_bounds[0][params.x_loop_idx[0]];
-          }
-          loop_bounds[0][params.x_loop_idx[0]] = 1;
-        }
-        if (params.weight_loop_idx[0] < params.y_loop_idx[0]) {
-          if (!reuse_weights) {
-            spatial_reuse_bound *= loop_bounds[0][params.y_loop_idx[0]];
-          }
-          loop_bounds[0][params.y_loop_idx[0]] = 1;
-        }
-      }
-
-#pragma hls_pipeline_init_interval 1
-#pragma hls_pipeline_stall_mode flush
-      for (loop_counters[0][0] = 0;; loop_counters[0][0]++) {
-        for (loop_counters[0][1] = 0;; loop_counters[0][1]++) {
-          for (loop_counters[0][2] = 0;; loop_counters[0][2]++) {
-            for (loop_counters[0][3] = 0;; loop_counters[0][3]++) {
-              for (loop_counters[0][4] = 0;; loop_counters[0][4]++) {
-                for (ac_int<LOOP_WIDTH, false> spatial_reuse_idx = 0;;
-                     spatial_reuse_idx++) {
-                  for (loop_counters[1][0] = 0;; loop_counters[1][0]++) {
-                    for (loop_counters[1][1] = 0;; loop_counters[1][1]++) {
-                      for (loop_counters[1][2] = 0;; loop_counters[1][2]++) {
-                        for (loop_counters[1][3] = 0;; loop_counters[1][3]++) {
-                          for (loop_counters[1][4] = 0;;
-                               loop_counters[1][4]++) {
-                            for (loop_counters[1][5] = 0;;
-                                 loop_counters[1][5]++) {
-                              const ac_int<LOOP_WIDTH, false> k2 =
-                                  loop_counters[0][params.weight_loop_idx[0]];
-                              const ac_int<LOOP_WIDTH, false> c2 =
-                                  loop_counters[0]
-                                               [params.reduction_loop_idx[0]];
-                              const ac_int<LOOP_WIDTH, false> c1 =
-                                  loop_counters[1]
-                                               [params.reduction_loop_idx[1]];
-                              const ac_int<LOOP_WIDTH, false> fx =
-                                  loop_counters[1][params.fx_loop_idx];
-                              const ac_int<LOOP_WIDTH, false> fy0 =
-                                  loop_counters[1][params.fy_loop_idx[1]];
-                              const ac_int<LOOP_WIDTH, false> fy1 =
-                                  loop_counters[0][params.fy_loop_idx[0]];
-                              const ac_int<LOOP_WIDTH, false> k1 =
-                                  loop_counters[1][params.weight_loop_idx[1]];
-                              const ac_int<LOOP_WIDTH, false> packed_k1 =
-                                  k1 >> params.weight_pack_factor_lg2;
-                              const ac_int<4, false> packing_index =
-                                  k1 -
-                                  (packed_k1 << params.weight_pack_factor_lg2);
-
-                              for (int row = 0; row < rows; row++) {
-                                if (row < C0) {
-                                  const ac_int<16, false> k =
-                                      (k2 * K1 + packed_k1) * k_stride;
-                                  const ac_int<16, false> c =
-                                      (c2 * C1 + c1) * C0 + row;
-                                  const ac_int<16, false> fy = fy0 * FY1 + fy1;
-                                  const ac_int<32, false> address =
-                                      fy * fy_stride + fx * fx_stride +
-                                      c * c_stride + k;
-
-                                  send_packed_request<WeightTypes...>(
-                                      params.weight_dtype, params.weight_offset,
-                                      address, params.weight_burst_size,
-                                      weight_req);
-                                  packing_indices.Push(packing_index);
-                                  fetcher_done.write(false);
-                                  fetcher_done_2.write(false);
-                                }
-                              }
-
-                              if (loop_counters[1][5] == loop_bounds[1][5] - 1)
-                                break;
-                            }
-                            if (loop_counters[1][4] == loop_bounds[1][4] - 1)
-                              break;
-                          }
-                          if (loop_counters[1][3] == loop_bounds[1][3] - 1)
-                            break;
-                        }
-                        if (loop_counters[1][2] == loop_bounds[1][2] - 1) break;
-                      }
-                      if (loop_counters[1][1] == loop_bounds[1][1] - 1) break;
-                    }
-                    if (loop_counters[1][0] == loop_bounds[1][0] - 1) break;
-                  }
-                  if (spatial_reuse_idx == spatial_reuse_bound - 1) break;
-                }
-                if (loop_counters[0][4] == loop_bounds[0][4] - 1) break;
-              }
-              if (loop_counters[0][3] == loop_bounds[0][3] - 1) break;
-            }
-            if (loop_counters[0][2] == loop_bounds[0][2] - 1) break;
-          }
-          if (loop_counters[0][1] == loop_bounds[0][1] - 1) break;
-        }
-        if (loop_counters[0][0] == loop_bounds[0][0] - 1) break;
-      }
-      fetcher_done.write(true);
-      fetcher_done_2.write(true);
-    }
-  }
-
-  // Emit one complete, zero-filled resident tile per compute demand
+  // Zero-fill and slice logical weight rows into physical weight-port beats
   void writer() {
     writer_params.ResetRead();
     transpose_out.ResetRead();
-    write_request[0].Reset();
-    write_request[1].Reset();
-
-    bool bank_sel = 0;
+    weight_channel.Reset();
 
     wait();
 
     while (true) {
       const MatrixParams params = writer_params.Pop();
-
-      ac_int<LOOP_WIDTH, false> loop_counters[2][6];
-      ac_int<LOOP_WIDTH, false> loop_bounds[2][6];
-
-#pragma hls_unroll yes
-      for (int i = 0; i < 2; i++) {
-#pragma hls_unroll yes
-        for (int j = 0; j < 6; j++) {
-          loop_bounds[i][j] = params.loops[i][j];
-        }
-      }
-
-      loop_bounds[1][params.weight_reuse_idx[0]] = 1;
-      loop_bounds[1][params.weight_reuse_idx[1]] = 1;
-
+      // weight_addr_loops desribes how weights are laid out and fetched from
+      // memory
       const ac_int<LOOP_WIDTH, false> C0 =
           params.weight_addr_loops[1][params.weight_addr_reduction_loop_idx[2]];
-      const ac_int<LOOP_WIDTH, false> compute_fy1 =
-          params.loops[0][params.fy_loop_idx[0]];
-      const ac_int<LOOP_WIDTH, false> compute_c2 =
-          params.loops[0][params.reduction_loop_idx[0]];
-      const ac_int<LOOP_WIDTH, false> compute_fy0 =
-          params.loops[1][params.fy_loop_idx[1]];
-      const ac_int<LOOP_WIDTH, false> compute_fx =
-          params.loops[1][params.fx_loop_idx];
-      const ac_int<LOOP_WIDTH, false> compute_c1 =
-          params.loops[1][params.reduction_loop_idx[1]];
-      const ac_int<LOOP_WIDTH, false> compute_k1 =
-          params.loops[1][params.weight_loop_idx[1]];
-      const bool reuse_weights = compute_fy1 == 1 && compute_c2 == 1 &&
-                                 compute_fy0 == 1 && compute_fx == 1 &&
-                                 compute_c1 == 1 && compute_k1 == 1;
-
-      ac_int<LOOP_WIDTH, false> spatial_reuse_bound = 1;
-      if (compute_c2 == 1) {
-        if (params.weight_loop_idx[0] < params.x_loop_idx[0]) {
-          if (!reuse_weights) {
-            spatial_reuse_bound = loop_bounds[0][params.x_loop_idx[0]];
-          }
-          loop_bounds[0][params.x_loop_idx[0]] = 1;
-        }
-        if (params.weight_loop_idx[0] < params.y_loop_idx[0]) {
-          if (!reuse_weights) {
-            spatial_reuse_bound *= loop_bounds[0][params.y_loop_idx[0]];
-          }
-          loop_bounds[0][params.y_loop_idx[0]] = 1;
-        }
-      }
-
       const ac_int<6, false> dtype_width =
           get_type_width<WeightTypes...>(params.weight_dtype);
-      ac_int<LOOP_WIDTH, false> valid_cols =
-          params.weight_burst_size * 8 / dtype_width;
-      valid_cols >>= params.weight_pack_factor_lg2;
-      if (valid_cols > cols) valid_cols = cols;
+
+      // Normal fetches may pack multiple rows, so recover one row's valid cols
+      // The transposer always emits a complete cols-wide resident row
+      ac_int<LOOP_WIDTH, false> valid_cols = cols;
+      if (!params.weight_transpose) {
+        // Convert burst bytes into the total fetched scalar count
+        valid_cols = params.weight_burst_size * 8 / dtype_width;
+        // Divide by the number of logical rows packed into the fetch
+        valid_cols >>= params.weight_pack_factor_lg2;
+        if (valid_cols > cols) valid_cols = cols;
+      }
 
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
-      for (loop_counters[0][0] = 0;; loop_counters[0][0]++) {
-        for (loop_counters[0][1] = 0;; loop_counters[0][1]++) {
-          for (loop_counters[0][2] = 0;; loop_counters[0][2]++) {
-            for (loop_counters[0][3] = 0;; loop_counters[0][3]++) {
-              for (loop_counters[0][4] = 0;; loop_counters[0][4]++) {
-                for (ac_int<LOOP_WIDTH, false> spatial_reuse_idx = 0;;
-                     spatial_reuse_idx++) {
-                  for (loop_counters[1][0] = 0;; loop_counters[1][0]++) {
-                    for (loop_counters[1][1] = 0;; loop_counters[1][1]++) {
-                      for (loop_counters[1][2] = 0;; loop_counters[1][2]++) {
-                        for (loop_counters[1][3] = 0;; loop_counters[1][3]++) {
-                          for (loop_counters[1][4] = 0;;
-                               loop_counters[1][4]++) {
-                            for (loop_counters[1][5] = 0;;
-                                 loop_counters[1][5]++) {
-                              for (int row = 0; row < rows; row++) {
-                                ac_int<buffer_width, false> data = 0;
-                                if (row < C0) {
-                                  const ac_int<buffer_width, false> fetched =
-                                      transpose_out.Pop();
+      while (reader_tile_valid.read()) {
+        for (int row = 0; row < rows; row++) {
+          // Every resident set receives a complete rows-by-cols weight tile
+          ac_int<buffer_width, false> data = 0;
+          if (params.weight_transpose || row < C0) {
+            const ac_int<buffer_width, false> fetched = transpose_out.Pop();
 #pragma hls_unroll yes
-                                  for (int col = 0; col < cols; col++) {
-                                    if (col < valid_cols) {
-                                      data.set_slc(
-                                          col * DATA_WIDTH,
-                                          fetched.template slc<DATA_WIDTH>(
-                                              col * DATA_WIDTH));
-                                    }
-                                  }
-                                }
-
-                                for (int beat = 0; beat < WRITES_PER_ROW;
-                                     beat++) {
-                                  BufferWriteRequest<ac_int<write_width, false>>
-                                      req;
-                                  req.address = row * WRITES_PER_ROW + beat;
-                                  req.data = data.template slc<write_width>(
-                                      beat * write_width);
-                                  req.last = row == rows - 1 &&
-                                             beat == WRITES_PER_ROW - 1;
-                                  write_request[bank_sel].Push(req);
-                                }
-                              }
-                              bank_sel = !bank_sel;
-
-                              if (loop_counters[1][5] == loop_bounds[1][5] - 1)
-                                break;
-                            }
-                            if (loop_counters[1][4] == loop_bounds[1][4] - 1)
-                              break;
-                          }
-                          if (loop_counters[1][3] == loop_bounds[1][3] - 1)
-                            break;
-                        }
-                        if (loop_counters[1][2] == loop_bounds[1][2] - 1) break;
-                      }
-                      if (loop_counters[1][1] == loop_bounds[1][1] - 1) break;
-                    }
-                    if (loop_counters[1][0] == loop_bounds[1][0] - 1) break;
-                  }
-                  if (spatial_reuse_idx == spatial_reuse_bound - 1) break;
-                }
-                if (loop_counters[0][4] == loop_bounds[0][4] - 1) break;
+            for (int col = 0; col < cols; col++) {
+              if (col < valid_cols) {
+                data.set_slc(col * DATA_WIDTH, fetched.template slc<DATA_WIDTH>(
+                                                   col * DATA_WIDTH));
               }
-              if (loop_counters[0][3] == loop_bounds[0][3] - 1) break;
             }
-            if (loop_counters[0][2] == loop_bounds[0][2] - 1) break;
           }
-          if (loop_counters[0][1] == loop_bounds[0][1] - 1) break;
+          for (int beat = 0; beat < WEIGHT_BEATS_PER_ROW; beat++) {
+            weight_channel.Push(data.template slc<weight_channel_width>(
+                beat * weight_channel_width));
+          }
         }
-        if (loop_counters[0][0] == loop_bounds[0][0] - 1) break;
       }
     }
   }
@@ -644,16 +390,11 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
                                 loop_counters[1][0] == loop_bounds[1][0] &&
                                 pack == pack_offset_bound;
 
-                            for (int beat = 0; beat < WRITES_PER_ROW; beat++) {
-                              BufferWriteRequest<ac_int<write_width, false>>
-                                  req;
-                              req.address = address * WRITES_PER_ROW + beat;
-                              req.data = data.template slc<write_width>(
-                                  beat * write_width);
-                              req.last =
-                                  last_word && beat == WRITES_PER_ROW - 1;
-                              write_request[bank_sel].Push(req);
-                            }
+                            BufferWriteRequest<ac_int<buffer_width, false>> req;
+                            req.address = address;
+                            req.data = data;
+                            req.last = last_word;
+                            write_request[bank_sel].Push(req);
 
                             if (pack == pack_offset_bound) break;
                           }
@@ -682,14 +423,19 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
   }
 #endif
 
-#if MATRIX_BACKEND != MATRIX_BACKEND_CIM
+  // Schedule weight demand in the same compute-loop order for every backend
   void reader() {
     reader_params.ResetRead();
 
+#if MATRIX_BACKEND == MATRIX_BACKEND_CIM
+    weight_req.Reset();
+    packing_indices.ResetWrite();
+#else
     read_request[0].Reset();
     read_request[1].Reset();
 
     bool bank_sel = 0;
+#endif
 
     wait();
 
@@ -724,12 +470,14 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
       // extra loop to control reuse which only occurs during transpose and
       // when cols > rows
       int transpose_reuse_bound = 1;
+#if MATRIX_BACKEND != MATRIX_BACKEND_CIM
       constexpr int ratio = cols > rows ? cols / rows : 1;
       if (ratio > 1 && params.weight_transpose && C2 >= ratio) {
         // we can reuse the weights already in the buffer
         loop_bounds[0][params.reduction_loop_idx[0]] = C2 / ratio;
         transpose_reuse_bound = ratio;
       }
+#endif
 
       bool reuse_weights =
           FY1 == 1 && C2 == 1 && FY0 == 1 && FX == 1 && C1 == 1 && K1 == 1;
@@ -755,10 +503,34 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
         }
       }
 
+#if MATRIX_BACKEND == MATRIX_BACKEND_CIM
+      const ac_int<LOOP_WIDTH, false> weight_K2 =
+          params.weight_addr_loops[0][params.weight_addr_weight_loop_idx[0]];
+      const ac_int<LOOP_WIDTH, false> weight_C2 =
+          params.weight_addr_loops[0][params.weight_addr_reduction_loop_idx[0]];
+      const ac_int<LOOP_WIDTH, false> weight_C1 =
+          params.weight_addr_loops[1][params.weight_addr_reduction_loop_idx[1]];
+      const ac_int<LOOP_WIDTH, false> weight_C0 =
+          params.weight_addr_loops[1][params.weight_addr_reduction_loop_idx[2]];
+      const ac_int<LOOP_WIDTH, false> weight_FX =
+          params.weight_addr_loops[1][params.weight_addr_fx_idx];
+      const ac_int<LOOP_WIDTH, false> weight_FY1 =
+          params.weight_addr_loops[0][params.weight_addr_fy_idx[0]];
+      ac_int<LOOP_WIDTH, false> weight_K1 =
+          params.weight_addr_loops[1][params.weight_addr_weight_loop_idx[1]];
+      weight_K1 >>= params.weight_pack_factor_lg2;
+
+      const ac_int<16, false> k_stride = cols << params.weight_pack_factor_lg2;
+      const ac_int<24, false> c_stride = weight_K2 * weight_K1 * k_stride;
+      const ac_int<24, false> weight_fx_stride =
+          weight_C2 * weight_C1 * weight_C0 * c_stride;
+      const ac_int<24, false> weight_fy_stride = weight_FX * weight_fx_stride;
+#else
       ac_int<16, false> fx_stride = rows * C1 * K1;
       ac_int<16, false> fy_stride = FX * fx_stride;
       ac_int<16, false> fx_stride_with_repl = fx_stride * transpose_reuse_bound;
       ac_int<16, false> fy_stride_with_repl = fy_stride * transpose_reuse_bound;
+#endif
 
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
@@ -781,6 +553,69 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
                                  loop_counters[1][4]++) {
                               for (loop_counters[1][5] = 0;;
                                    loop_counters[1][5]++) {
+#if MATRIX_BACKEND == MATRIX_BACKEND_CIM
+                                const ac_int<LOOP_WIDTH, false> k2 =
+                                    loop_counters[0][params.weight_loop_idx[0]];
+                                const ac_int<LOOP_WIDTH, false> c2 =
+                                    loop_counters[0]
+                                                 [params.reduction_loop_idx[0]];
+                                const ac_int<LOOP_WIDTH, false> c1 =
+                                    loop_counters[1]
+                                                 [params.reduction_loop_idx[1]];
+                                const ac_int<LOOP_WIDTH, false> fx =
+                                    loop_counters[1][params.fx_loop_idx];
+                                const ac_int<LOOP_WIDTH, false> fy0 =
+                                    loop_counters[1][params.fy_loop_idx[1]];
+                                const ac_int<LOOP_WIDTH, false> fy1 =
+                                    loop_counters[0][params.fy_loop_idx[0]];
+                                const ac_int<LOOP_WIDTH, false> k1 =
+                                    loop_counters[1][params.weight_loop_idx[1]];
+                                const ac_int<LOOP_WIDTH, false> packed_k1 =
+                                    k1 >> params.weight_pack_factor_lg2;
+                                const ac_int<4, false> packing_index =
+                                    k1 - (packed_k1
+                                          << params.weight_pack_factor_lg2);
+
+                                reader_tile_valid.write(true);
+                                // Fetch one source row per resident weight row
+                                // Transposition instead fetches one per column
+                                for (int row = 0;
+                                     row < (rows > cols ? rows : cols); row++) {
+                                  const bool active_row =
+                                      params.weight_transpose ? row < cols
+                                                              : row < rows;
+                                  if (active_row && row < weight_C0) {
+                                    const ac_int<16, false> k =
+                                        (k2 * weight_K1 + packed_k1) * k_stride;
+                                    const ac_int<16, false> c =
+                                        (c2 * weight_C1 + c1) * weight_C0 + row;
+                                    const ac_int<16, false> fy =
+                                        fy0 * weight_FY1 + fy1;
+                                    ac_int<32, false> address =
+                                        fy * weight_fy_stride +
+                                        fx * weight_fx_stride + c * c_stride +
+                                        k;
+
+                                    if (params.weight_transpose) {
+                                      // The transposed source is row-major
+                                      // Rows select output; columns reduction
+                                      // Each row spans C2 * C1 * rows values
+                                      address =
+                                          ((k + row) * weight_C2 * weight_C1 +
+                                           c2 * weight_C1 + c1) *
+                                          rows;
+                                    }
+
+                                    send_packed_request<WeightTypes...>(
+                                        params.weight_dtype,
+                                        params.weight_offset, address,
+                                        params.weight_burst_size, weight_req);
+                                    packing_indices.Push(packing_index);
+                                    fetcher_done.write(false);
+                                    fetcher_done_2.write(false);
+                                  }
+                                }
+#else
                                 ac_int<LOOP_WIDTH, false> c1 =
                                     loop_counters[1]
                                                  [params.reduction_loop_idx[1]];
@@ -900,6 +735,7 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
                                                  transpose_reuse_bound - 1;
                                   read_request[bank_sel].Push(req);
                                 }
+#endif
 
                                 if (loop_counters[1][5] ==
                                     loop_bounds[1][5] - 1)
@@ -922,7 +758,9 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
                   }
                   if (spatial_reuse_idx == spatial_reuse_bound - 1) break;
                 }
+#if MATRIX_BACKEND != MATRIX_BACKEND_CIM
                 bank_sel = !bank_sel;
+#endif
                 if (loop_counters[0][4] == loop_bounds[0][4] - 1) break;
               }
               if (loop_counters[0][3] == loop_bounds[0][3] - 1) break;
@@ -933,9 +771,13 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
         }
         if (loop_counters[0][0] == loop_bounds[0][0] - 1) break;
       }
+#if MATRIX_BACKEND == MATRIX_BACKEND_CIM
+      reader_tile_valid.write(false);
+      fetcher_done.write(true);
+      fetcher_done_2.write(true);
+#endif
     }
   }
-#endif
 
   void weight_packer() {
     weight_packer_params.ResetRead();
@@ -963,7 +805,7 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
   }
 
 #if MATRIX_BACKEND == MATRIX_BACKEND_CIM
-  // Select the packed sub-tile requested by the compute schedule
+  // Unpack weight rows or transpose [cols][rows] into [rows][cols]
   void transposer() {
     transposer_params.ResetRead();
     packed_bits.ResetRead();
@@ -975,33 +817,77 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
     while (true) {
       const MatrixParams params = transposer_params.Pop();
 
-#ifndef __SYNTHESIS__
       if (params.weight_transpose) {
-        SC_REPORT_FATAL("WeightController",
-                        "CIM direct weights do not support transpose");
-      }
-#endif
+        // Each source row becomes one column of the resident weight tile
+        ac_int<DATA_WIDTH, false> transpose_buffer[rows][cols];
 
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
-      while (!fetcher_done_2.read()) {
-        const ac_int<MAX_FETCH_WIDTH, false> bits = packed_bits.Pop();
-        const ac_int<4, false> packing_index = packing_indices.Pop();
-        ac_int<buffer_width, false> outputs = 0;
-        const bool handled =
-            (unpack_bits<WeightTypes, cols, buffer_width, MAX_FETCH_WIDTH,
-                         WeightTypes...>(params.weight_dtype, bits, outputs,
-                                         packing_index) ||
-             ...);
+        while (!fetcher_done_2.read()) {
+          for (int source_col = 0; source_col < cols; source_col++) {
+            if (source_col != 0) {
+              const bool tile_done = fetcher_done_2.read();
+#ifndef __SYNTHESIS__
+              if (tile_done) {
+                SC_REPORT_FATAL("WeightController",
+                                "incomplete CIM transposed weight tile");
+              }
+#endif
+            }
+
+            const ac_int<MAX_FETCH_WIDTH, false> bits = packed_bits.Pop();
+            const ac_int<4, false> packing_index = packing_indices.Pop();
+            // Hold one transposed source row before scattering it by row
+            ac_int<SOURCE_ROW_WIDTH, false> source_values = 0;
+            const bool handled =
+                (unpack_bits<WeightTypes, rows, SOURCE_ROW_WIDTH,
+                             MAX_FETCH_WIDTH, WeightTypes...>(
+                     params.weight_dtype, bits, source_values, packing_index) ||
+                 ...);
 
 #ifndef __SYNTHESIS__
-        if (!handled) {
-          throw std::runtime_error("Unsupported dtype for matrix weight: " +
-                                   std::to_string(params.weight_dtype));
-        }
+            if (!handled) {
+              throw std::runtime_error("Unsupported dtype for matrix weight: " +
+                                       std::to_string(params.weight_dtype));
+            }
 #endif
 
-        transpose_out.Push(outputs);
+            for (int row = 0; row < rows; row++) {
+              transpose_buffer[row][source_col] =
+                  source_values.template slc<DATA_WIDTH>(row * DATA_WIDTH);
+            }
+          }
+
+          for (int row = 0; row < rows; row++) {
+            ac_int<buffer_width, false> transposed = 0;
+            for (int col = 0; col < cols; col++) {
+              transposed.set_slc(col * DATA_WIDTH, transpose_buffer[row][col]);
+            }
+            transpose_out.Push(transposed);
+          }
+        }
+      } else {
+#pragma hls_pipeline_init_interval 1
+#pragma hls_pipeline_stall_mode flush
+        while (!fetcher_done_2.read()) {
+          const ac_int<MAX_FETCH_WIDTH, false> bits = packed_bits.Pop();
+          const ac_int<4, false> packing_index = packing_indices.Pop();
+          ac_int<buffer_width, false> outputs = 0;
+          const bool handled =
+              (unpack_bits<WeightTypes, cols, buffer_width, MAX_FETCH_WIDTH,
+                           WeightTypes...>(params.weight_dtype, bits, outputs,
+                                           packing_index) ||
+               ...);
+
+#ifndef __SYNTHESIS__
+          if (!handled) {
+            throw std::runtime_error("Unsupported dtype for matrix weight: " +
+                                     std::to_string(params.weight_dtype));
+          }
+#endif
+
+          transpose_out.Push(outputs);
+        }
       }
     }
   }
@@ -1263,11 +1149,11 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
 
   void read_params() {
     params_in.Reset();
-    fetcher_params.ResetWrite();
-    writer_params.ResetWrite();
 #if MATRIX_BACKEND != MATRIX_BACKEND_CIM
-    reader_params.ResetWrite();
+    fetcher_params.ResetWrite();
 #endif
+    writer_params.ResetWrite();
+    reader_params.ResetWrite();
     transposer_params.ResetWrite();
     weight_packer_params.ResetWrite();
     bias_fetcher_params.ResetWrite();
@@ -1278,11 +1164,11 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
     while (true) {
       const MatrixParams params = params_in.Pop();
 
-      fetcher_params.Push(params);
-      writer_params.Push(params);
 #if MATRIX_BACKEND != MATRIX_BACKEND_CIM
-      reader_params.Push(params);
+      fetcher_params.Push(params);
 #endif
+      writer_params.Push(params);
+      reader_params.Push(params);
       transposer_params.Push(params);
       weight_packer_params.Push(params);
 

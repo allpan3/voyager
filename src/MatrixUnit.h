@@ -47,11 +47,10 @@ SC_MODULE(MatrixUnit) {
       CIM_SIGNED, CIM_TILE_INPUT_AXIS_ELEMENTS, CIM_TILE_OUTPUT_AXIS_ELEMENTS,
       CIM_INPUT_AXIS_TILES, CIM_OUTPUT_AXIS_TILES, CIM_A_PORT_TILES,
       CIM_B_PORT_TILES, CIM_C_PORT_TILES, CIM_C_BEAT_LAYOUT>;
-  // The CIM weight path is sized by the macro row, not by a weight buffer, and
-  // each row is delivered as array B-port beats
+  // Assemble complete rows before slicing them into physical B-port beats
   static constexpr int WEIGHT_BUFFER_WORD_WIDTH =
       ActiveMatrixProcessor::WEIGHT_ROW_WIDTH;
-  static constexpr int WEIGHT_WRITE_WIDTH =
+  static constexpr int WEIGHT_CHANNEL_WIDTH =
       ActiveMatrixProcessor::WEIGHT_WRITE_WIDTH;
 #else
   using ActiveMatrixProcessor =
@@ -60,7 +59,7 @@ SC_MODULE(MatrixUnit) {
                       SCALE_DATATYPE, IC_DIMENSION, OC_DIMENSION,
                       ACCUM_BUFFER_SIZE>;
   static constexpr int WEIGHT_BUFFER_WORD_WIDTH = WEIGHT_BUFFER_WIDTH;
-  static constexpr int WEIGHT_WRITE_WIDTH = WEIGHT_BUFFER_WIDTH;
+  static constexpr int WEIGHT_CHANNEL_WIDTH = WEIGHT_BUFFER_WIDTH;
 #endif
 
   MatrixParamsDeserializer<0, PARAMS_MODULE_COUNT> CCS_INIT_S1(
@@ -102,28 +101,22 @@ SC_MODULE(MatrixUnit) {
 
   WeightController<WeightTypeList, ACCUM_BUFFER_DATATYPE, IC_DIMENSION,
                    OC_DIMENSION, OC_PORT_WIDTH, WEIGHT_BUFFER_WORD_WIDTH,
-                   WEIGHT_WRITE_WIDTH>
+                   WEIGHT_CHANNEL_WIDTH>
       CCS_INIT_S1(weight_controller);
 
   Connections::Out<MemoryRequest> CCS_INIT_S1(weight_req);
   Connections::In<ac_int<OC_PORT_WIDTH, false>> CCS_INIT_S1(weight_resp);
   Connections::Out<MemoryRequest> CCS_INIT_S1(bias_req);
   Connections::In<ac_int<OC_PORT_WIDTH, false>> CCS_INIT_S1(bias_resp);
-#if MATRIX_BACKEND == MATRIX_BACKEND_CIM
-  // CIM macros are the resident weight store, so no weight buffer exists; the
-  // controller's addressed writes go straight to the processor (bank = set)
-  Connections::Combinational<
-      BufferWriteRequest<ac_int<WEIGHT_WRITE_WIDTH, false>>>
-      weight_set_write[2];
-#else
+  Connections::Combinational<ac_int<WEIGHT_CHANNEL_WIDTH, false>> CCS_INIT_S1(
+      weight_channel);
+#if MATRIX_BACKEND != MATRIX_BACKEND_CIM
   DoubleBuffer<WEIGHT_BUFFER_SIZE, WEIGHT_BUFFER_WIDTH> CCS_INIT_S1(
       weight_buffer);
   Connections::Combinational<
       BufferWriteRequest<ac_int<WEIGHT_BUFFER_WIDTH, false>>>
       weight_buffer_write_req[2];
   Connections::Combinational<BufferReadRequest> weight_buffer_read_req[2];
-  Connections::Combinational<ac_int<WEIGHT_BUFFER_WIDTH, false>> CCS_INIT_S1(
-      weight_buffer_read_resp);
 #endif
 
 #if SUPPORT_MX
@@ -240,10 +233,7 @@ SC_MODULE(MatrixUnit) {
     weight_controller.bias_data(bias_data);
 
 #if MATRIX_BACKEND == MATRIX_BACKEND_CIM
-    for (int i = 0; i < 2; i++) {
-      weight_controller.write_request[i](weight_set_write[i]);
-      matrix_processor.weight_write[i](weight_set_write[i]);
-    }
+    weight_controller.weight_channel(weight_channel);
 #else
     weight_buffer.clk(clk);
     weight_buffer.rstn(rstn);
@@ -254,7 +244,7 @@ SC_MODULE(MatrixUnit) {
       weight_buffer.write_request[i](weight_buffer_write_req[i]);
       weight_buffer.read_request[i](weight_buffer_read_req[i]);
     }
-    weight_buffer.output(weight_buffer_read_resp);
+    weight_buffer.output(weight_channel);
 #endif
 
 #if SUPPORT_MX
@@ -279,9 +269,7 @@ SC_MODULE(MatrixUnit) {
     matrix_processor.clk(clk);
     matrix_processor.rstn(rstn);
     matrix_processor.input_channel(window_buffer_out);
-#if MATRIX_BACKEND != MATRIX_BACKEND_CIM
-    matrix_processor.weight_channel(weight_buffer_read_resp);
-#endif
+    matrix_processor.weight_channel(weight_channel);
     matrix_processor.bias_channel(bias_data);
     matrix_processor.params_in(matrix_params[2]);
     matrix_processor.start(start);

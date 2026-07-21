@@ -15,9 +15,9 @@
 // controllers: it loads a resident weight set at each schedule swap point, then
 // issues the associated A beat. Its result controller unpacks array results and
 // uses MatrixUnit's buffer for temporal sums rows and cols preserve the
-// MatrixProcessor signature; K and N are their internal matrix-dimension
-// aliases buffer_size mirrors the MatrixProcessor backend signature; MatrixUnit
-// owns the storage
+// MatrixProcessor template positions; the CIM array interprets them as its
+// resident B[K][N] shape MatrixUnit owns the storage, while buffer_size mirrors
+// the MatrixProcessor backend signature
 template <typename InputTypeTuple, typename WeightTypeTuple, typename Input,
           typename Weight, typename Psum, typename Buffer, typename Scale,
           int rows, int cols, int buffer_size, int CH_IN, int CH_OUT,
@@ -44,17 +44,12 @@ SC_MODULE(CIMProcessor) {
   using MACRequest = typename Array::MACRequest;
   using WriteRequest = typename Array::WriteRequest;
 
-  // One array B-port write. Array::BBeat already folds in both WRITE_CH_IN
-  // (rows along the input axis) and B_PORT_TILES (span along the output axis),
-  // so this stays correct when either widens
+  // One array B-port write
   static constexpr int WEIGHT_WRITE_WIDTH = Array::BBeat::width;
-  // One logical B row spans the complete output axis; the controller assembles
-  // rows from memory and slices them into B-port beats
+  // One logical B row matches MatrixProcessor's weight-channel convention
   static constexpr int WEIGHT_ROW_WIDTH = N * B_WIDTH;
-  // Narrowing the B port splits a row into more beats, which is what lets the
-  // controller deliver part of a row early
+  // Narrowing the B port splits one row into more array writes
   static constexpr int WEIGHT_BEATS_PER_ROW = OUTPUT_AXIS_TILES / B_PORT_TILES;
-  static constexpr int WEIGHT_WRITES_PER_SET = K * WEIGHT_BEATS_PER_ROW;
 
   static constexpr int LOOP_WIDTH = 10;
 #if DOUBLE_BUFFERED_ACCUM_BUFFER
@@ -90,13 +85,17 @@ SC_MODULE(CIMProcessor) {
   static_assert(
       B_SETS >= 2,
       "CIMProcessor currently alternates at least two resident weight sets");
-  static_assert(rows == Array::K, "CIM K extent must match IC_DIMENSION");
+  static_assert(K == Array::K, "CIMProcessor K must match the CIM input axis");
+  static_assert(K == CIM_ARRAY_K_DIMENSION,
+                "CIMProcessor rows must match the CIM array K dimension");
   // InputController explicitly defines packing, boundary, and
   // replication-unroll rules for these extents
   static_assert(K == 4 || K == 8 || K == 16 || K == 32 || K == 64,
                 "CIMProcessor currently requires an InputController-supported "
                 "input extent");
-  static_assert(cols == Array::N, "CIM N extent must match OC_DIMENSION");
+  static_assert(N == Array::N, "CIMProcessor N must match the CIM output axis");
+  static_assert(N == CIM_ARRAY_N_DIMENSION,
+                "CIMProcessor cols must match the CIM array N dimension");
   static_assert(buffer_size > 0,
                 "CIM accumulation buffer depth must be positive");
   static_assert(INPUT_BUFFER_WIDTH == ABeat::width,
@@ -124,10 +123,9 @@ SC_MODULE(CIMProcessor) {
   sc_in<bool> CCS_INIT_S1(rstn);
 
   Connections::In<ac_int<INPUT_BUFFER_WIDTH, false>> CCS_INIT_S1(input_channel);
-  // Addressed weight writes mirroring the systolic weight buffer's two banks:
-  // the port index is the resident set and the request address is the row
-  Connections::In<BufferWriteRequest<ac_int<WEIGHT_WRITE_WIDTH, false>>>
-      weight_write[2];
+  // Retain MatrixProcessor's weight_channel protocol at physical B-beat width
+  Connections::In<ac_int<WEIGHT_WRITE_WIDTH, false>> CCS_INIT_S1(
+      weight_channel);
   Connections::In<Pack1D<Buffer, N>> CCS_INIT_S1(bias_channel);
   Connections::In<MatrixParams> CCS_INIT_S1(params_in);
 
@@ -287,79 +285,51 @@ SC_MODULE(CIMProcessor) {
     return step == 0 || (inner && (!reuse_weights || outer));
   }
 
-  // Commit one B-port beat straight to the array
-  // The address encodes the row and the output-axis span:
-  //   row  = address / WEIGHT_BEATS_PER_ROW
-  //   span = address % WEIGHT_BEATS_PER_ROW  (B_PORT_TILES tiles from tile
-  //          span * B_PORT_TILES)
-  // WIRE FORMAT of one beat. Nothing checks this at compile time: the producer
-  // (WeightController's writer) slices a row by bit offset and the consumer
-  // here rebuilds lanes by index, so both sides must agree by construction
+  // Commit one ordered weight-channel beat to the selected resident set
+  // WEIGHT CHANNEL CONTRACT. Width is checked, but stream and lane order are
+  // conventions shared with WeightController and must change on both sides
   //
-  //   address = row * WEIGHT_BEATS_PER_ROW + span
+  // One resident set arrives in row-major order, with output-axis spans inside
+  // each input-axis row:
   //
-  //   bit 0                                            WEIGHT_WRITE_WIDTH-1
-  //   |                                                                   |
-  //   [ bk=0 ................................ ][ bk=1 ................... ]
-  //     [ tile 0    ][ tile 1    ] ... [ tile B_PORT_TILES-1 ]
-  //       [n0][n1]...  [n0][n1]...
-  //        ^   ^
-  //        |   +-- TILE_N lanes per output tile, ascending n
-  //        +------ lane bit offset = ((bk * B_PORT_TILES + port_tile)
-  //                                   * TILE_N + tile_n) * B_WIDTH
+  //   [ k=0 span=0 ][ k=0 span=1 ] ... [ k=K-1 span=last ]
   //
-  //   The output channel a lane feeds is
-  //     n = (span * B_PORT_TILES + port_tile) * TILE_N + tile_n
-  //   and the input-channel row it belongs to is base_k + bk
+  //   bit 0                              WEIGHT_WRITE_WIDTH - 1
+  //   |                                                         |
+  //   [ port tile 0 ][ port tile 1 ] ... [ port tile B_PORT_TILES-1 ]
+  //       [n0][n1]...      [n0][n1]...       TILE_N lanes per tile
   //
-  // At WRITE_CH_IN == 1 there is a single bk block, so a beat is just the
-  // row's span in ascending output-channel order and a narrower B port only
-  // changes how many beats a row takes
+  //   request.data[port_tile][0][tile_n]
+  //       = beat[(port_tile * TILE_N + tile_n) * B_WIDTH]
+  //   request.output_axis_tile_base = span * B_PORT_TILES
   //
-  // At WRITE_CH_IN > 1 the bk-major choice above is NOT Array::BBeat's own
-  // marshalled order (its nesting is [port tile][bk][tile lane], so it packs
-  // port-tile-major). Pick the order with the weight memory layout: bk-major
-  // keeps each fetched row's span contiguous, which suits gathering strided
-  // rows in the controller; port-tile-major suits a k-interleaved layout where
-  // one burst already holds the bk values per output channel
-  void write_weight_beat(Set wset, ac_int<16, false> address,
+  // WRITE_CH_IN is currently constrained to one, so every request writes one
+  // input-axis row across B_PORT_TILES output tiles
+  void write_weight_beat(Set wset, int k, int span,
                          const ac_int<WEIGHT_WRITE_WIDTH, false> &beat) {
-    const int base_k = address / WEIGHT_BEATS_PER_ROW;
-    const int span = address % WEIGHT_BEATS_PER_ROW;
-
     WriteRequest request;
     request.wset = wset;
-    request.input_axis_idx = base_k / Array::TILE_K;
+    request.input_axis_idx = k / Array::TILE_K;
     request.output_axis_tile_base = span * B_PORT_TILES;
-    request.wchi = base_k % Array::TILE_K;
+    request.wchi = k % Array::TILE_K;
     request.replicate = 0;
     clear_pack(request.data);
 
 #pragma hls_unroll yes
-    for (int bk = 0; bk < WRITE_CH_IN; bk++) {
+    for (int port_tile_idx = 0; port_tile_idx < B_PORT_TILES; port_tile_idx++) {
 #pragma hls_unroll yes
-      for (int port_tile_idx = 0; port_tile_idx < B_PORT_TILES;
-           port_tile_idx++) {
-#pragma hls_unroll yes
-        for (int tile_n = 0; tile_n < Array::TILE_N; tile_n++) {
-          const int lane =
-              (bk * B_PORT_TILES + port_tile_idx) * Array::TILE_N + tile_n;
-          request.data[port_tile_idx][bk][tile_n] =
-              beat.template slc<B_WIDTH>(lane * B_WIDTH);
-        }
+      for (int tile_n = 0; tile_n < Array::TILE_N; tile_n++) {
+        const int lane = port_tile_idx * Array::TILE_N + tile_n;
+        request.data[port_tile_idx][0][tile_n] =
+            beat.template slc<B_WIDTH>(lane * B_WIDTH);
       }
     }
     write_request_channel.Push(request);
   }
 
-  // Consume the controller's addressed bank writes and commit them to the
-  // resident sets Mirror the weight DoubleBuffer's per-bank phase alternation:
-  // a complete fill ends at req.last, the set is handed to the issue thread,
-  // and the same set is written again only after the issue thread swaps away
-  // from it
+  // Load each fixed-size beat stream into alternating resident sets
   void load_weights() {
-    weight_write[0].Reset();
-    weight_write[1].Reset();
+    weight_channel.Reset();
     write_request_channel.ResetWrite();
     set_filled[0].ResetWrite();
     set_filled[1].ResetWrite();
@@ -377,41 +347,12 @@ SC_MODULE(CIMProcessor) {
         set_consumed_deq[bank].Pop();
       }
 
-      bool last = false;
-#ifndef __SYNTHESIS__
-      // The address is a destination, not a sequence position, so a controller
-      // may fill a set in any order it likes. What it may not do is leave a
-      // destination stale or write one twice, which no ordering assumption
-      // would catch
-      bool covered[WEIGHT_WRITES_PER_SET] = {false};
-#endif
-      while (!last) {
-        const BufferWriteRequest<ac_int<WEIGHT_WRITE_WIDTH, false>> request =
-            weight_write[bank].Pop();
-        last = request.last;
-#ifndef __SYNTHESIS__
-        if (request.address >= WEIGHT_WRITES_PER_SET) {
-          SC_REPORT_FATAL("CIMProcessor",
-                          "weight write address exceeds one resident set; a "
-                          "bank holds one weight tile");
-        }
-        if (covered[request.address]) {
-          SC_REPORT_FATAL("CIMProcessor",
-                          "weight write repeats a destination within one fill");
-        }
-        covered[request.address] = true;
-#endif
-        write_weight_beat(Set(bank), request.address, request.data);
-      }
-#ifndef __SYNTHESIS__
-      for (int write = 0; write < WEIGHT_WRITES_PER_SET; write++) {
-        if (!covered[write]) {
-          SC_REPORT_FATAL("CIMProcessor",
-                          "fill ended with a resident weight destination left "
-                          "unwritten");
+      for (int k = 0; k < K; k++) {
+        for (int span = 0; span < WEIGHT_BEATS_PER_ROW; span++) {
+          const ac_int<WEIGHT_WRITE_WIDTH, false> beat = weight_channel.Pop();
+          write_weight_beat(Set(bank), k, span, beat);
         }
       }
-#endif
 
       set_filled[bank].Push(true);
       filled_before[bank] = true;

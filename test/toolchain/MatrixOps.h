@@ -215,6 +215,8 @@ void map_matrix_operation(const Operation& operation,
   const auto weight = matrix_op.kwargs().at(weight_key).tensor();
 
   bool is_mx_op = matrix_op.target().find("mx") != std::string::npos;
+  const bool weight_transpose =
+      weight.has_reshape() && weight.reshape().target() == "transpose";
   bool is_fc = is_fc_layer(matrix_op);
   bool is_dwc = false;
 
@@ -240,10 +242,6 @@ void map_matrix_operation(const Operation& operation,
     if (matrix_op.kwargs().contains("weight_code")) {
       throw std::invalid_argument(
           "CIM MatrixUnit direct weights do not support weight codebooks");
-    }
-    if (weight.reshape().target() == "transpose") {
-      throw std::invalid_argument(
-          "CIM MatrixUnit direct weights do not support transposed weights");
     }
     if (weight.has_dequant()) {
       throw std::invalid_argument(
@@ -470,12 +468,24 @@ void map_matrix_operation(const Operation& operation,
           get_packing_factor<MV_UNIT_WIDTH, OC_PORT_WIDTH, WEIGHT_DATATYPE>(
               matrix_params->weight_dtype, 1, weight_fetch_width);
     } else {
-      int k_bound = matrix_params->weight_transpose
-                        ? 1
-                        : tiling.loops[1][tiling.weight_loop_idx[1]];
+#if MATRIX_BACKEND == MATRIX_BACKEND_CIM
+      const int k_bound =
+          weight_transpose ? 1 : tiling.loops[1][tiling.weight_loop_idx[1]];
+      if (weight_transpose) {
+        weight_num_packs =
+            get_packing_factor<IC_DIMENSION, OC_PORT_WIDTH, WEIGHT_DATATYPE>(
+                matrix_params->weight_dtype, k_bound, weight_fetch_width);
+      } else {
+        weight_num_packs =
+            get_packing_factor<OC_DIMENSION, OC_PORT_WIDTH, WEIGHT_DATATYPE>(
+                matrix_params->weight_dtype, k_bound, weight_fetch_width);
+      }
+#else
+      const int k_bound = tiling.loops[1][tiling.weight_loop_idx[1]];
       weight_num_packs =
           get_packing_factor<OC_DIMENSION, OC_PORT_WIDTH, WEIGHT_DATATYPE>(
               matrix_params->weight_dtype, k_bound, weight_fetch_width);
+#endif
     }
 
     matrix_params->weight_burst_size = weight_fetch_width / 8;
@@ -533,7 +543,7 @@ void map_matrix_operation(const Operation& operation,
       }
     }
 
-    matrix_params->weight_transpose = weight.reshape().target() == "transpose";
+    matrix_params->weight_transpose = weight_transpose;
 
     if (matrix_params->weight_transpose) {
       // for transpose, we need to enforce that the innermost loop is the
@@ -562,6 +572,7 @@ void map_matrix_operation(const Operation& operation,
       // C1 loop
       matrix_params->weight_addr_loops[1][0] =
           tiling.loops[1][tiling.reduction_loop_idx[1]];
+#if MATRIX_BACKEND != MATRIX_BACKEND_CIM
       if constexpr (OC_DIMENSION > IC_DIMENSION) {
         // we can reduce the number of iterations, since we have already fetched
         // the values
@@ -576,6 +587,7 @@ void map_matrix_operation(const Operation& operation,
               (OC_DIMENSION / IC_DIMENSION);
         }
       }
+#endif
       matrix_params->weight_addr_reduction_loop_idx[1] = 0;
     } else {  // if not transpose, then we have freedom to pick any loop order
       // K1 loop

@@ -71,3 +71,41 @@ regression-cim-mobilebert-encoder:
             --num_processes "{{ PROCESSES }}" \
             --uniquify_layers \
             --skip_layers
+
+# Run selected MobileBERT encoder layers with the requested array rows and cols
+test-cim-mobilebert-encoder tests rows="16" cols="16":
+    source .envrc && \
+        export PYTHONPATH="$PWD/voyager-compiler/src${PYTHONPATH:+:$PYTHONPATH}" && \
+        if (( {{ cols }} % 4 != 0 )); then \
+            echo "Array cols must be a multiple of four for this INT8 test geometry" >&2; \
+            exit 2; \
+        fi && \
+        DATATYPE=INT8 \
+        IC_DIMENSION="{{ rows }}" \
+        OC_DIMENSION="{{ cols }}" \
+        INPUT_BUFFER_SIZE=1024 \
+        WEIGHT_BUFFER_SIZE=1024 \
+        ACCUM_BUFFER_SIZE=1024 \
+        MATRIX_BACKEND=1 \
+        CIM_CH_IN="{{ rows }}" \
+        CIM_CH_OUT=8 \
+        CIM_B_SETS=2 \
+        CIM_BASE_A_WIDTH=4 \
+        CIM_BASE_B_WIDTH=4 \
+        CIM_BASE_C_WIDTH=20 \
+        CIM_WRITE_CH_IN=1 \
+        CIM_MAC_LATENCY=1 \
+        CIM_MODE=0 \
+        CIM_TILE_INPUT_AXIS_ELEMENTS=1 \
+        CIM_TILE_OUTPUT_AXIS_ELEMENTS=1 \
+        CIM_INPUT_AXIS_TILES=1 \
+        CIM_OUTPUT_AXIS_TILES="$(( {{ cols }} / 4 ))" \
+        CIM_A_PORT_TILES=1 \
+        CIM_B_PORT_TILES="$(( {{ cols }} / 4 ))" \
+        CIM_C_PORT_TILES="$(( {{ cols }} / 4 ))" \
+        CIM_C_BEAT_LAYOUT=1 \
+        python run_regression.py \
+            --models "mobilebert_encoder" \
+            --tests "{{ tests }}" \
+            --sims "systemc" \
+            --num_processes "{{ PROCESSES }}"

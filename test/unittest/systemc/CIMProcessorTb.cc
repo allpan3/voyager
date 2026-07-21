@@ -55,7 +55,7 @@ static constexpr int B_WIDTH = 8;
 static constexpr bool SIGNED = true;
 static constexpr int A_PORT_TILES = INPUT_AXIS_TILES;
 #ifndef CIM_TEST_B_PORT_TILES
-#define CIM_TEST_B_PORT_TILES OUTPUT_AXIS_TILES
+#define CIM_TEST_B_PORT_TILES 1
 #endif
 static constexpr int B_PORT_TILES = CIM_TEST_B_PORT_TILES;
 static constexpr int C_PORT_TILES = OUTPUT_AXIS_TILES;
@@ -94,13 +94,10 @@ SC_MODULE(CIMProcessorTb) {
   Dut dut;
   sc_clock clk;
   sc_signal<bool> rstn;
-  // Persistent ping-pong bank mirroring the controller writer's bank_sel
-  bool weight_bank = false;
 
   Connections::Combinational<ac_int<INPUT_BUFFER_WIDTH, false>> input_channel;
-  Connections::Combinational<
-      BufferWriteRequest<ac_int<Processor::WEIGHT_WRITE_WIDTH, false>>>
-      weight_write_channel[2];
+  Connections::Combinational<ac_int<Processor::WEIGHT_WRITE_WIDTH, false>>
+      weight_channel;
   Connections::Combinational<BufferVector> bias_channel;
   Connections::Combinational<MatrixParams> params_channel;
   Connections::Combinational<BufferVector> output_channel;
@@ -151,8 +148,7 @@ SC_MODULE(CIMProcessorTb) {
     dut.clk(clk);
     dut.rstn(rstn);
     dut.input_channel(input_channel);
-    dut.weight_write[0](weight_write_channel[0]);
-    dut.weight_write[1](weight_write_channel[1]);
+    dut.weight_channel(weight_channel);
     dut.bias_channel(bias_channel);
     dut.params_in(params_channel);
     dut.output_channel(output_channel);
@@ -316,24 +312,19 @@ SC_MODULE(CIMProcessorTb) {
     return inputs;
   }
 
-  // Pack one array B-port beat: the output-axis span starting at
-  // span * B_PORT_TILES, for the WRITE_CH_IN rows starting at row
-  ac_int<Processor::WEIGHT_WRITE_WIDTH, false> make_weights(
-      int weight_pattern, int row, int span) const {
-    ac_int<Processor::WEIGHT_WRITE_WIDTH, false> weights = 0;
-    for (int bk = 0; bk < WRITE_CH_IN; bk++) {
-      for (int port_tile = 0; port_tile < B_PORT_TILES; port_tile++) {
-        for (int tile_n = 0; tile_n < TILE_N; tile_n++) {
-          const int k = row + bk;
-          const int n = (span * B_PORT_TILES + port_tile) * TILE_N + tile_n;
-          const int lane = (bk * B_PORT_TILES + port_tile) * TILE_N + tile_n;
-          const ac_int<B_WIDTH, true> value =
-              weight_value(weight_pattern, k, n);
-          weights.set_slc(lane * B_WIDTH, value.template slc<B_WIDTH>(0));
-        }
+  // Pack one output-axis span in the weight-channel lane order
+  ac_int<Processor::WEIGHT_WRITE_WIDTH, false> make_weight_beat(
+      int weight_pattern, int k, int span) const {
+    ac_int<Processor::WEIGHT_WRITE_WIDTH, false> beat = 0;
+    for (int port_tile = 0; port_tile < B_PORT_TILES; port_tile++) {
+      for (int tile_n = 0; tile_n < TILE_N; tile_n++) {
+        const int n = (span * B_PORT_TILES + port_tile) * TILE_N + tile_n;
+        const int lane = port_tile * TILE_N + tile_n;
+        const ac_int<B_WIDTH, true> value = weight_value(weight_pattern, k, n);
+        beat.set_slc(lane * B_WIDTH, value.template slc<B_WIDTH>(0));
       }
     }
-    return weights;
+    return beat;
   }
 
   // Compute one complete golden MAC result
@@ -388,20 +379,12 @@ SC_MODULE(CIMProcessorTb) {
     for (std::size_t operation = 0; operation < weight_patterns.size();
          operation++) {
       if (load_weights[operation]) {
-        // Mirror the controller writer: addressed B-port beats into the
-        // ping-pong bank, address = row * beats-per-row + span
-        for (int row = 0; row < K; row++) {
+        for (int k = 0; k < K; k++) {
           for (int span = 0; span < Processor::WEIGHT_BEATS_PER_ROW; span++) {
-            BufferWriteRequest<ac_int<Processor::WEIGHT_WRITE_WIDTH, false>>
-                request;
-            request.address = row * Processor::WEIGHT_BEATS_PER_ROW + span;
-            request.data = make_weights(weight_patterns[operation], row, span);
-            request.last =
-                row == K - 1 && span == Processor::WEIGHT_BEATS_PER_ROW - 1;
-            weight_write_channel[weight_bank].Push(request);
+            weight_channel.Push(
+                make_weight_beat(weight_patterns[operation], k, span));
           }
         }
-        weight_bank = !weight_bank;
       }
       input_channel.Push(make_inputs(input_pattern));
     }
@@ -564,8 +547,7 @@ SC_MODULE(CIMProcessorTb) {
   void run() {
     params_channel.ResetWrite();
     input_channel.ResetWrite();
-    weight_write_channel[0].ResetWrite();
-    weight_write_channel[1].ResetWrite();
+    weight_channel.ResetWrite();
     start_channel.ResetRead();
 
     rstn.write(false);

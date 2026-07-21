@@ -274,15 +274,15 @@ SC_MODULE(MatrixUnitOutputController) {
                           ac_int<16, false> k = k2 * K1 + k1 * width;
                           ac_int<32, false> address = y * X * K + x * K + k;
 
-                          bool found = (send_output_data_and_addr<
-                                            OutputTypes, width, BufferType,
-                                            OC_PORT_WIDTH, ADDRESS_WIDTH,
-                                            OutputTypes...>(
-                                            params.output_dtype, outputs,
-                                            params.output_offset, address,
-                                            matrix_unit_output_data,
-                                            matrix_unit_output_addr) ||
-                                        ...);
+                          bool found =
+                              (send_output_data_and_addr<
+                                   OutputTypes, width, BufferType, port_width,
+                                   ADDRESS_WIDTH, OutputTypes...>(
+                                   params.output_dtype, outputs,
+                                   params.output_offset, address,
+                                   matrix_unit_output_data,
+                                   matrix_unit_output_addr) ||
+                               ...);
 #ifndef __SYNTHESIS__
                           if (!found) {
                             std::cerr << "Error: output type '"

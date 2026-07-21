@@ -381,6 +381,13 @@ using WeightTypeList = std::tuple<WEIGHT_DATATYPE>;
 #define WEIGHT_DTYPE_WIDTH WEIGHT_DATATYPE::width
 #endif
 
+// Derive the array-level resident B[K][N] shape from the physical hierarchy
+#define CIM_ARRAY_K_DIMENSION \
+  (CIM_CH_IN * CIM_TILE_INPUT_AXIS_ELEMENTS * CIM_INPUT_AXIS_TILES)
+#define CIM_ARRAY_N_DIMENSION                               \
+  ((CIM_CH_OUT / (WEIGHT_DTYPE_WIDTH / CIM_BASE_B_WIDTH)) * \
+   CIM_TILE_OUTPUT_AXIS_ELEMENTS * CIM_OUTPUT_AXIS_TILES)
+
 // ================================================================
 // Port Width Definitions
 // ================================================================
