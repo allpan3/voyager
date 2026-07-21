@@ -614,25 +614,6 @@ void map_matrix_operation(const Operation& operation,
       matrix_params->weight_addr_fy_idx[1] = 0;
     }
 
-#if MATRIX_BACKEND == MATRIX_BACKEND_CIM
-    if (!is_fc) {
-      // One CIM bank is one resident set, so a bank fill must be exactly one
-      // weight tile; anything larger would silently overwrite resident rows
-      int tiles_per_fill = 1;
-      for (int i = 0; i < 5; i++) {
-        if (i != matrix_params->weight_addr_reduction_loop_idx[2]) {
-          tiles_per_fill *= matrix_params->weight_addr_loops[1][i];
-        }
-      }
-      if (tiles_per_fill > 1) {
-        throw std::invalid_argument(
-            "CIM double-buffered weight sets hold one tile per bank fill; "
-            "this tiling fills " +
-            std::to_string(tiles_per_fill) + " tiles between swap points");
-      }
-    }
-#endif
-
     matrix_params->is_resnet_replication = tiling.resnet_replication;
     matrix_params->is_generic_replication = tiling.generic_replication;
     matrix_params->num_channels = tiling.num_channels;

@@ -76,6 +76,9 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
 
   Connections::Combinational<ac_int<MAX_FETCH_WIDTH, false>> packed_bits;
   Connections::Combinational<ac_int<buffer_width, false>> transpose_out;
+#if MATRIX_BACKEND == MATRIX_BACKEND_CIM
+  Connections::Combinational<ac_int<4, false>> packing_indices;
+#endif
 
   SC_CTOR(WeightController) {
     SC_THREAD(read_params);
@@ -113,6 +116,323 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
     async_reset_signal_is(rstn, false);
   }
 
+#if MATRIX_BACKEND == MATRIX_BACKEND_CIM
+  // Fetch one resident tile at each compute-schedule demand point
+  void fetcher() {
+    weight_req.Reset();
+    fetcher_params.ResetRead();
+    packing_indices.ResetWrite();
+
+    wait();
+
+    while (true) {
+      const MatrixParams params = fetcher_params.Pop();
+
+      ac_int<LOOP_WIDTH, false> loop_counters[2][6];
+      ac_int<LOOP_WIDTH, false> loop_bounds[2][6];
+
+#pragma hls_unroll yes
+      for (int i = 0; i < 2; i++) {
+#pragma hls_unroll yes
+        for (int j = 0; j < 6; j++) {
+          loop_bounds[i][j] = params.loops[i][j];
+        }
+      }
+
+      loop_bounds[1][params.weight_reuse_idx[0]] = 1;
+      loop_bounds[1][params.weight_reuse_idx[1]] = 1;
+
+      const ac_int<LOOP_WIDTH, false> K2 =
+          params.weight_addr_loops[0][params.weight_addr_weight_loop_idx[0]];
+      const ac_int<LOOP_WIDTH, false> C2 =
+          params.weight_addr_loops[0][params.weight_addr_reduction_loop_idx[0]];
+      const ac_int<LOOP_WIDTH, false> C1 =
+          params.weight_addr_loops[1][params.weight_addr_reduction_loop_idx[1]];
+      const ac_int<LOOP_WIDTH, false> C0 =
+          params.weight_addr_loops[1][params.weight_addr_reduction_loop_idx[2]];
+      const ac_int<LOOP_WIDTH, false> FX =
+          params.weight_addr_loops[1][params.weight_addr_fx_idx];
+      const ac_int<LOOP_WIDTH, false> FY1 =
+          params.weight_addr_loops[0][params.weight_addr_fy_idx[0]];
+      ac_int<LOOP_WIDTH, false> K1 =
+          params.weight_addr_loops[1][params.weight_addr_weight_loop_idx[1]];
+      K1 >>= params.weight_pack_factor_lg2;
+
+      const ac_int<16, false> k_stride = cols << params.weight_pack_factor_lg2;
+      const ac_int<24, false> c_stride = K2 * K1 * k_stride;
+      const ac_int<24, false> fx_stride = C2 * C1 * C0 * c_stride;
+      const ac_int<24, false> fy_stride = FX * fx_stride;
+
+      const ac_int<LOOP_WIDTH, false> compute_fy1 =
+          params.loops[0][params.fy_loop_idx[0]];
+      const ac_int<LOOP_WIDTH, false> compute_c2 =
+          params.loops[0][params.reduction_loop_idx[0]];
+      const ac_int<LOOP_WIDTH, false> compute_fy0 =
+          params.loops[1][params.fy_loop_idx[1]];
+      const ac_int<LOOP_WIDTH, false> compute_fx =
+          params.loops[1][params.fx_loop_idx];
+      const ac_int<LOOP_WIDTH, false> compute_c1 =
+          params.loops[1][params.reduction_loop_idx[1]];
+      const ac_int<LOOP_WIDTH, false> compute_k1 =
+          params.loops[1][params.weight_loop_idx[1]];
+      const bool reuse_weights = compute_fy1 == 1 && compute_c2 == 1 &&
+                                 compute_fy0 == 1 && compute_fx == 1 &&
+                                 compute_c1 == 1 && compute_k1 == 1;
+
+      ac_int<LOOP_WIDTH, false> spatial_reuse_bound = 1;
+      if (compute_c2 == 1) {
+        if (params.weight_loop_idx[0] < params.x_loop_idx[0]) {
+          if (!reuse_weights) {
+            spatial_reuse_bound = loop_bounds[0][params.x_loop_idx[0]];
+          }
+          loop_bounds[0][params.x_loop_idx[0]] = 1;
+        }
+        if (params.weight_loop_idx[0] < params.y_loop_idx[0]) {
+          if (!reuse_weights) {
+            spatial_reuse_bound *= loop_bounds[0][params.y_loop_idx[0]];
+          }
+          loop_bounds[0][params.y_loop_idx[0]] = 1;
+        }
+      }
+
+#pragma hls_pipeline_init_interval 1
+#pragma hls_pipeline_stall_mode flush
+      for (loop_counters[0][0] = 0;; loop_counters[0][0]++) {
+        for (loop_counters[0][1] = 0;; loop_counters[0][1]++) {
+          for (loop_counters[0][2] = 0;; loop_counters[0][2]++) {
+            for (loop_counters[0][3] = 0;; loop_counters[0][3]++) {
+              for (loop_counters[0][4] = 0;; loop_counters[0][4]++) {
+                for (ac_int<LOOP_WIDTH, false> spatial_reuse_idx = 0;;
+                     spatial_reuse_idx++) {
+                  for (loop_counters[1][0] = 0;; loop_counters[1][0]++) {
+                    for (loop_counters[1][1] = 0;; loop_counters[1][1]++) {
+                      for (loop_counters[1][2] = 0;; loop_counters[1][2]++) {
+                        for (loop_counters[1][3] = 0;; loop_counters[1][3]++) {
+                          for (loop_counters[1][4] = 0;;
+                               loop_counters[1][4]++) {
+                            for (loop_counters[1][5] = 0;;
+                                 loop_counters[1][5]++) {
+                              const ac_int<LOOP_WIDTH, false> k2 =
+                                  loop_counters[0][params.weight_loop_idx[0]];
+                              const ac_int<LOOP_WIDTH, false> c2 =
+                                  loop_counters[0]
+                                               [params.reduction_loop_idx[0]];
+                              const ac_int<LOOP_WIDTH, false> c1 =
+                                  loop_counters[1]
+                                               [params.reduction_loop_idx[1]];
+                              const ac_int<LOOP_WIDTH, false> fx =
+                                  loop_counters[1][params.fx_loop_idx];
+                              const ac_int<LOOP_WIDTH, false> fy0 =
+                                  loop_counters[1][params.fy_loop_idx[1]];
+                              const ac_int<LOOP_WIDTH, false> fy1 =
+                                  loop_counters[0][params.fy_loop_idx[0]];
+                              const ac_int<LOOP_WIDTH, false> k1 =
+                                  loop_counters[1][params.weight_loop_idx[1]];
+                              const ac_int<LOOP_WIDTH, false> packed_k1 =
+                                  k1 >> params.weight_pack_factor_lg2;
+                              const ac_int<4, false> packing_index =
+                                  k1 -
+                                  (packed_k1 << params.weight_pack_factor_lg2);
+
+                              for (int row = 0; row < rows; row++) {
+                                if (row < C0) {
+                                  const ac_int<16, false> k =
+                                      (k2 * K1 + packed_k1) * k_stride;
+                                  const ac_int<16, false> c =
+                                      (c2 * C1 + c1) * C0 + row;
+                                  const ac_int<16, false> fy = fy0 * FY1 + fy1;
+                                  const ac_int<32, false> address =
+                                      fy * fy_stride + fx * fx_stride +
+                                      c * c_stride + k;
+
+                                  send_packed_request<WeightTypes...>(
+                                      params.weight_dtype, params.weight_offset,
+                                      address, params.weight_burst_size,
+                                      weight_req);
+                                  packing_indices.Push(packing_index);
+                                  fetcher_done.write(false);
+                                  fetcher_done_2.write(false);
+                                }
+                              }
+
+                              if (loop_counters[1][5] == loop_bounds[1][5] - 1)
+                                break;
+                            }
+                            if (loop_counters[1][4] == loop_bounds[1][4] - 1)
+                              break;
+                          }
+                          if (loop_counters[1][3] == loop_bounds[1][3] - 1)
+                            break;
+                        }
+                        if (loop_counters[1][2] == loop_bounds[1][2] - 1) break;
+                      }
+                      if (loop_counters[1][1] == loop_bounds[1][1] - 1) break;
+                    }
+                    if (loop_counters[1][0] == loop_bounds[1][0] - 1) break;
+                  }
+                  if (spatial_reuse_idx == spatial_reuse_bound - 1) break;
+                }
+                if (loop_counters[0][4] == loop_bounds[0][4] - 1) break;
+              }
+              if (loop_counters[0][3] == loop_bounds[0][3] - 1) break;
+            }
+            if (loop_counters[0][2] == loop_bounds[0][2] - 1) break;
+          }
+          if (loop_counters[0][1] == loop_bounds[0][1] - 1) break;
+        }
+        if (loop_counters[0][0] == loop_bounds[0][0] - 1) break;
+      }
+      fetcher_done.write(true);
+      fetcher_done_2.write(true);
+    }
+  }
+
+  // Emit one complete, zero-filled resident tile per compute demand
+  void writer() {
+    writer_params.ResetRead();
+    transpose_out.ResetRead();
+    write_request[0].Reset();
+    write_request[1].Reset();
+
+    bool bank_sel = 0;
+
+    wait();
+
+    while (true) {
+      const MatrixParams params = writer_params.Pop();
+
+      ac_int<LOOP_WIDTH, false> loop_counters[2][6];
+      ac_int<LOOP_WIDTH, false> loop_bounds[2][6];
+
+#pragma hls_unroll yes
+      for (int i = 0; i < 2; i++) {
+#pragma hls_unroll yes
+        for (int j = 0; j < 6; j++) {
+          loop_bounds[i][j] = params.loops[i][j];
+        }
+      }
+
+      loop_bounds[1][params.weight_reuse_idx[0]] = 1;
+      loop_bounds[1][params.weight_reuse_idx[1]] = 1;
+
+      const ac_int<LOOP_WIDTH, false> C0 =
+          params.weight_addr_loops[1][params.weight_addr_reduction_loop_idx[2]];
+      const ac_int<LOOP_WIDTH, false> compute_fy1 =
+          params.loops[0][params.fy_loop_idx[0]];
+      const ac_int<LOOP_WIDTH, false> compute_c2 =
+          params.loops[0][params.reduction_loop_idx[0]];
+      const ac_int<LOOP_WIDTH, false> compute_fy0 =
+          params.loops[1][params.fy_loop_idx[1]];
+      const ac_int<LOOP_WIDTH, false> compute_fx =
+          params.loops[1][params.fx_loop_idx];
+      const ac_int<LOOP_WIDTH, false> compute_c1 =
+          params.loops[1][params.reduction_loop_idx[1]];
+      const ac_int<LOOP_WIDTH, false> compute_k1 =
+          params.loops[1][params.weight_loop_idx[1]];
+      const bool reuse_weights = compute_fy1 == 1 && compute_c2 == 1 &&
+                                 compute_fy0 == 1 && compute_fx == 1 &&
+                                 compute_c1 == 1 && compute_k1 == 1;
+
+      ac_int<LOOP_WIDTH, false> spatial_reuse_bound = 1;
+      if (compute_c2 == 1) {
+        if (params.weight_loop_idx[0] < params.x_loop_idx[0]) {
+          if (!reuse_weights) {
+            spatial_reuse_bound = loop_bounds[0][params.x_loop_idx[0]];
+          }
+          loop_bounds[0][params.x_loop_idx[0]] = 1;
+        }
+        if (params.weight_loop_idx[0] < params.y_loop_idx[0]) {
+          if (!reuse_weights) {
+            spatial_reuse_bound *= loop_bounds[0][params.y_loop_idx[0]];
+          }
+          loop_bounds[0][params.y_loop_idx[0]] = 1;
+        }
+      }
+
+      const ac_int<6, false> dtype_width =
+          get_type_width<WeightTypes...>(params.weight_dtype);
+      ac_int<LOOP_WIDTH, false> valid_cols =
+          params.weight_burst_size * 8 / dtype_width;
+      valid_cols >>= params.weight_pack_factor_lg2;
+      if (valid_cols > cols) valid_cols = cols;
+
+#pragma hls_pipeline_init_interval 1
+#pragma hls_pipeline_stall_mode flush
+      for (loop_counters[0][0] = 0;; loop_counters[0][0]++) {
+        for (loop_counters[0][1] = 0;; loop_counters[0][1]++) {
+          for (loop_counters[0][2] = 0;; loop_counters[0][2]++) {
+            for (loop_counters[0][3] = 0;; loop_counters[0][3]++) {
+              for (loop_counters[0][4] = 0;; loop_counters[0][4]++) {
+                for (ac_int<LOOP_WIDTH, false> spatial_reuse_idx = 0;;
+                     spatial_reuse_idx++) {
+                  for (loop_counters[1][0] = 0;; loop_counters[1][0]++) {
+                    for (loop_counters[1][1] = 0;; loop_counters[1][1]++) {
+                      for (loop_counters[1][2] = 0;; loop_counters[1][2]++) {
+                        for (loop_counters[1][3] = 0;; loop_counters[1][3]++) {
+                          for (loop_counters[1][4] = 0;;
+                               loop_counters[1][4]++) {
+                            for (loop_counters[1][5] = 0;;
+                                 loop_counters[1][5]++) {
+                              for (int row = 0; row < rows; row++) {
+                                ac_int<buffer_width, false> data = 0;
+                                if (row < C0) {
+                                  const ac_int<buffer_width, false> fetched =
+                                      transpose_out.Pop();
+#pragma hls_unroll yes
+                                  for (int col = 0; col < cols; col++) {
+                                    if (col < valid_cols) {
+                                      data.set_slc(
+                                          col * DATA_WIDTH,
+                                          fetched.template slc<DATA_WIDTH>(
+                                              col * DATA_WIDTH));
+                                    }
+                                  }
+                                }
+
+                                for (int beat = 0; beat < WRITES_PER_ROW;
+                                     beat++) {
+                                  BufferWriteRequest<ac_int<write_width, false>>
+                                      req;
+                                  req.address = row * WRITES_PER_ROW + beat;
+                                  req.data = data.template slc<write_width>(
+                                      beat * write_width);
+                                  req.last = row == rows - 1 &&
+                                             beat == WRITES_PER_ROW - 1;
+                                  write_request[bank_sel].Push(req);
+                                }
+                              }
+                              bank_sel = !bank_sel;
+
+                              if (loop_counters[1][5] == loop_bounds[1][5] - 1)
+                                break;
+                            }
+                            if (loop_counters[1][4] == loop_bounds[1][4] - 1)
+                              break;
+                          }
+                          if (loop_counters[1][3] == loop_bounds[1][3] - 1)
+                            break;
+                        }
+                        if (loop_counters[1][2] == loop_bounds[1][2] - 1) break;
+                      }
+                      if (loop_counters[1][1] == loop_bounds[1][1] - 1) break;
+                    }
+                    if (loop_counters[1][0] == loop_bounds[1][0] - 1) break;
+                  }
+                  if (spatial_reuse_idx == spatial_reuse_bound - 1) break;
+                }
+                if (loop_counters[0][4] == loop_bounds[0][4] - 1) break;
+              }
+              if (loop_counters[0][3] == loop_bounds[0][3] - 1) break;
+            }
+            if (loop_counters[0][2] == loop_bounds[0][2] - 1) break;
+          }
+          if (loop_counters[0][1] == loop_bounds[0][1] - 1) break;
+        }
+        if (loop_counters[0][0] == loop_bounds[0][0] - 1) break;
+      }
+    }
+  }
+#else
   void fetcher() {
     weight_req.Reset();
     fetcher_params.ResetRead();
@@ -360,6 +680,7 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
       }
     }
   }
+#endif
 
 #if MATRIX_BACKEND != MATRIX_BACKEND_CIM
   void reader() {
@@ -641,6 +962,50 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
     }
   }
 
+#if MATRIX_BACKEND == MATRIX_BACKEND_CIM
+  // Select the packed sub-tile requested by the compute schedule
+  void transposer() {
+    transposer_params.ResetRead();
+    packed_bits.ResetRead();
+    transpose_out.ResetWrite();
+    packing_indices.ResetRead();
+
+    wait();
+
+    while (true) {
+      const MatrixParams params = transposer_params.Pop();
+
+#ifndef __SYNTHESIS__
+      if (params.weight_transpose) {
+        SC_REPORT_FATAL("WeightController",
+                        "CIM direct weights do not support transpose");
+      }
+#endif
+
+#pragma hls_pipeline_init_interval 1
+#pragma hls_pipeline_stall_mode flush
+      while (!fetcher_done_2.read()) {
+        const ac_int<MAX_FETCH_WIDTH, false> bits = packed_bits.Pop();
+        const ac_int<4, false> packing_index = packing_indices.Pop();
+        ac_int<buffer_width, false> outputs = 0;
+        const bool handled =
+            (unpack_bits<WeightTypes, cols, buffer_width, MAX_FETCH_WIDTH,
+                         WeightTypes...>(params.weight_dtype, bits, outputs,
+                                         packing_index) ||
+             ...);
+
+#ifndef __SYNTHESIS__
+        if (!handled) {
+          throw std::runtime_error("Unsupported dtype for matrix weight: " +
+                                   std::to_string(params.weight_dtype));
+        }
+#endif
+
+        transpose_out.Push(outputs);
+      }
+    }
+  }
+#else
   void transposer() {
     transposer_params.ResetRead();
     packed_bits.ResetRead();
@@ -749,6 +1114,7 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
       }
     }
   }
+#endif
 
   void bias_fetcher() {
     bias_fetcher_params.ResetRead();
