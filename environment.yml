@@ -2,6 +2,7 @@ name: accelerator-env
 channels:
   - conda-forge
 dependencies:
+  - just
   - libprotobuf<6
   - verilator>=5
   - python>=3.9,<3.11
@@ -11,6 +12,7 @@ dependencies:
       - torchvision==0.23.0
       - torchaudio==2.8.0
       - deepdiff
+      - huggingface-hub==1.24.0
       - xonsh
       - openpyxl
       - git+https://github.com/mflowgen/mflowgen.git@69412255acc2c509e98105804e5a97d9738ddfe1#egg=mflowgen

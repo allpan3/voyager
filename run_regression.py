@@ -823,7 +823,8 @@ def matches(value, rule_value):
             return value == rule_value
 
 
-def get_skip_layers(skip_rules, model, datatype, sim_type, block_size):
+# Return the most specific layer-skip rule for one regression configuration
+def get_skip_layers(skip_rules, model, datatype, sim_type, block_size, cim_backend):
     best_rule = None
     best_specificity = -1
 
@@ -833,6 +834,7 @@ def get_skip_layers(skip_rules, model, datatype, sim_type, block_size):
             and matches(datatype, rule["datatype"])
             and matches(sim_type, rule["sim_type"])
             and matches(block_size, rule["block_size"])
+            and matches(cim_backend, rule.get("cim_backend", "*"))
         ):
             # Calculate specificity score (higher is more specific)
             # Exact match = 2, list match = 1, wildcard = 0
@@ -841,6 +843,7 @@ def get_skip_layers(skip_rules, model, datatype, sim_type, block_size):
             specificity += 1 if isinstance(rule["model"], list) else (2 if rule["model"] != "*" else 0)
             specificity += 1 if isinstance(rule["sim_type"], list) else (2 if rule["sim_type"] != "*" else 0)
             specificity += 2 if rule["block_size"] != "*" else 0
+            specificity += 2 if rule.get("cim_backend", "*") != "*" else 0
 
             if specificity > best_specificity:
                 best_specificity = specificity
@@ -956,8 +959,10 @@ def main():
             block_size = max(
                 int(os.environ["OC_DIMENSION"]), int(os.environ["IC_DIMENSION"])
             )
+            cim_backend = int(os.environ.get("MATRIX_BACKEND", "0"))
             skip_layers = get_skip_layers(
-                skip_rules, network, datatype, args.sims, block_size
+                skip_rules, network, datatype, args.sims, block_size,
+                cim_backend,
             )
             add_layers(
                 network,

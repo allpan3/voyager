@@ -83,6 +83,38 @@ Use the access token to authenticate using the HuggingFace CLI (installed as par
 hf auth login
 ```
 
+### Short regression commands
+
+The `Justfile` provides shorter commands for common regression workflows. The focused test recipe defaults to the
+MobileBERT encoder, INT8, a 16x16 array, fast-SystemC, and 16 processes:
+
+```bash
+# Run one MobileBERT encoder layer
+just test-mobilebert-encoder matmul_2_fused
+
+# Run several MobileBERT encoder layers
+just test-mobilebert-encoder 'matmul_2_fused,softmax_1_fused'
+
+# Run every unique MobileBERT encoder layer using CI skip rules
+just regression-mobilebert-encoder
+
+# Run the same MobileBERT encoder regression with the validated CIM backend
+just regression-cim-mobilebert-encoder
+```
+
+Configuration variables can be overridden before the focused test recipe:
+
+```bash
+just DATATYPE=E4M3 IC_DIMENSION=16 OC_DIMENSION=16 test-mobilebert-encoder transpose
+just SIM=gold_model test-mobilebert-encoder matmul_2_fused
+```
+
+The `test-mobilebert-encoder` recipe prepares cached compiler and tiling artifacts before running the selected layers. The
+`regression-mobilebert-encoder` recipe mirrors the CI functional check by using `mobilebert_encoder`, a 16x16 array,
+and `--skip_layers`. The CI rules intentionally skip unsupported slice layers. The
+`regression-cim-mobilebert-encoder` recipe fixes the same model and dimensions while selecting the validated CIM
+geometry and event-driven SystemC simulation.
+
 ## Repository Structure
 
 - `/data`: Test datasets and input data used for simulation and accuracy evaluation
