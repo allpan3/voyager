@@ -17,56 +17,77 @@ static constexpr int CIM_C_BEAT_INPUT_MAJOR = 0;
 static constexpr int CIM_C_BEAT_OUTPUT_MAJOR = 1;
 
 // CIMArray routes tile-shaped A/B/C data across input and output axes
-template <int CH_IN, int CH_OUT, int B_SETS, int BASE_A_WIDTH, int BASE_B_WIDTH, int BASE_C_WIDTH, int WRITE_CH_IN,
-          int MAC_LATENCY, int MODE, int A_WIDTH, int B_WIDTH, bool SIGNED,
-          // Tile-internal layout; the input axis reduces into C while the output axis retains distinct B/C channels
+template <int CH_IN, int CH_OUT, int B_SETS, int BASE_A_WIDTH, int BASE_B_WIDTH,
+          int BASE_C_WIDTH, int WRITE_CH_IN, int MAC_LATENCY, int MODE,
+          int A_WIDTH, int B_WIDTH, bool SIGNED,
+          // Tile-internal layout; the input axis reduces into C while the
+          // output axis retains distinct B/C channels
           int TILE_INPUT_AXIS_ELEMENTS, int TILE_OUTPUT_AXIS_ELEMENTS,
-          // Input-axis tiles hold C partials that MACRequest::reduce optionally combines
+          // Input-axis tiles hold C partials that MACRequest::reduce optionally
+          // combines
           int INPUT_AXIS_TILES,
-          // Output-axis tiles hold distinct B/C channels that MACRequest::multicast optionally shares A among
+          // Output-axis tiles hold distinct B/C channels that
+          // MACRequest::multicast optionally shares A among
           int OUTPUT_AXIS_TILES,
-          // --- Beat and port geometry ---------------------------------------------------------------
-          // One ready/valid transfer moves one beat, whose payload width is an integer number of complete tiles
-          // A_PORT_TILES is the number of A tiles per beat
-          // Each A tile carries one complete Tile::AData payload of Tile::K scalars
-          // The current A beat spans the input axis; any future narrower beats must be assembled before MAC issue
+          // --- Beat and port geometry
+          // --------------------------------------------------------------- One
+          // ready/valid transfer moves one beat, whose payload width is an
+          // integer number of complete tiles A_PORT_TILES is the number of A
+          // tiles per beat Each A tile carries one complete Tile::AData payload
+          // of Tile::K scalars The current A beat spans the input axis; any
+          // future narrower beats must be assembled before MAC issue
           int A_PORT_TILES,
           // B_PORT_TILES is the number of B tiles per beat
-          // A direct request addresses one aligned, non-wrapping span along the output axis, so B_PORT_TILES must
-          // be no wider than that axis and must evenly divide it; data[k] maps to output_axis_tile_base + k
-          // A replicate request copies data[0] across the output axis and leaves the remaining payload tiles unused
-          // Routing a B beat wider than the output axis is deferred
+          // A direct request addresses one aligned, non-wrapping span along the
+          // output axis, so B_PORT_TILES must be no wider than that axis and
+          // must evenly divide it; data[k] maps to output_axis_tile_base + k A
+          // replicate request copies data[0] across the output axis and leaves
+          // the remaining payload tiles unused Routing a B beat wider than the
+          // output axis is deferred
           int B_PORT_TILES,
           // C_PORT_TILES is the number of C tiles per beat
           int C_PORT_TILES,
-          // C_BEAT_LAYOUT selects which tile axis advances first when one operation requires multiple C beats
-          // Input-major advances input indices first; output-major advances output indices first
+          // C_BEAT_LAYOUT selects which tile axis advances first when one
+          // operation requires multiple C beats Input-major advances input
+          // indices first; output-major advances output indices first
           int C_BEAT_LAYOUT>
 SC_MODULE(CIMArray) {
  private:
   // Return the ceil log2 used for static port widths
-  static constexpr int log2_ceil(int value) { return (value <= 1) ? 0 : 1 + log2_ceil((value + 1) / 2); }
+  static constexpr int log2_ceil(int value) {
+    return (value <= 1) ? 0 : 1 + log2_ceil((value + 1) / 2);
+  }
 
   // Return the ceiling division for static beat counts
-  static constexpr int ceil_div(int dividend, int divisor) { return (dividend + divisor - 1) / divisor; }
+  static constexpr int ceil_div(int dividend, int divisor) {
+    return (dividend + divisor - 1) / divisor;
+  }
 
-  using Tile = CIMTile<CH_IN, CH_OUT, B_SETS, BASE_A_WIDTH, BASE_B_WIDTH, BASE_C_WIDTH, WRITE_CH_IN, MAC_LATENCY, MODE,
-                       A_WIDTH, B_WIDTH, SIGNED, TILE_INPUT_AXIS_ELEMENTS, TILE_OUTPUT_AXIS_ELEMENTS>;
+  using Tile =
+      CIMTile<CH_IN, CH_OUT, B_SETS, BASE_A_WIDTH, BASE_B_WIDTH, BASE_C_WIDTH,
+              WRITE_CH_IN, MAC_LATENCY, MODE, A_WIDTH, B_WIDTH, SIGNED,
+              TILE_INPUT_AXIS_ELEMENTS, TILE_OUTPUT_AXIS_ELEMENTS>;
 
  public:
-  static_assert(TILE_INPUT_AXIS_ELEMENTS > 0, "TILE_INPUT_AXIS_ELEMENTS must be positive");
-  static_assert(TILE_OUTPUT_AXIS_ELEMENTS > 0, "TILE_OUTPUT_AXIS_ELEMENTS must be positive");
+  static_assert(TILE_INPUT_AXIS_ELEMENTS > 0,
+                "TILE_INPUT_AXIS_ELEMENTS must be positive");
+  static_assert(TILE_OUTPUT_AXIS_ELEMENTS > 0,
+                "TILE_OUTPUT_AXIS_ELEMENTS must be positive");
   static_assert(INPUT_AXIS_TILES > 0, "INPUT_AXIS_TILES must be positive");
   static_assert(OUTPUT_AXIS_TILES > 0, "OUTPUT_AXIS_TILES must be positive");
   static_assert(A_PORT_TILES > 0, "A_PORT_TILES must be positive");
   static_assert(B_PORT_TILES > 0, "B_PORT_TILES must be positive");
   static_assert(C_PORT_TILES > 0, "C_PORT_TILES must be positive");
-  static_assert(A_PORT_TILES == INPUT_AXIS_TILES, "CIMArray currently requires one A beat to span the input axis");
-  static_assert(B_PORT_TILES <= OUTPUT_AXIS_TILES,
-                "CIMArray currently does not route one B beat beyond the output axis");
+  static_assert(
+      A_PORT_TILES == INPUT_AXIS_TILES,
+      "CIMArray currently requires one A beat to span the input axis");
+  static_assert(
+      B_PORT_TILES <= OUTPUT_AXIS_TILES,
+      "CIMArray currently does not route one B beat beyond the output axis");
   static_assert(B_PORT_TILES == 0 || OUTPUT_AXIS_TILES % B_PORT_TILES == 0,
                 "B_PORT_TILES must evenly divide OUTPUT_AXIS_TILES");
-  static_assert(C_BEAT_LAYOUT == CIM_C_BEAT_INPUT_MAJOR || C_BEAT_LAYOUT == CIM_C_BEAT_OUTPUT_MAJOR,
+  static_assert(C_BEAT_LAYOUT == CIM_C_BEAT_INPUT_MAJOR ||
+                    C_BEAT_LAYOUT == CIM_C_BEAT_OUTPUT_MAJOR,
                 "C_BEAT_LAYOUT must be input-major or output-major");
 
   static constexpr int TILE_K = Tile::K;
@@ -75,7 +96,8 @@ SC_MODULE(CIMArray) {
   static constexpr int K = TILE_K * INPUT_AXIS_TILES;
   static constexpr int N = TILE_N * OUTPUT_AXIS_TILES;
   static constexpr int TILE_C_WIDTH = Tile::C_WIDTH;
-  static constexpr int REDUCTION_GUARD_WIDTH = (INPUT_AXIS_TILES <= 1) ? 0 : log2_ceil(INPUT_AXIS_TILES);
+  static constexpr int REDUCTION_GUARD_WIDTH =
+      (INPUT_AXIS_TILES <= 1) ? 0 : log2_ceil(INPUT_AXIS_TILES);
   static constexpr int C_WIDTH = TILE_C_WIDTH + REDUCTION_GUARD_WIDTH;
 
   using AValue = typename Tile::AValue;
@@ -94,13 +116,31 @@ SC_MODULE(CIMArray) {
   using BBeat = Pack1D<TileBData, B_PORT_TILES>;
   using CBeat = Pack1D<CData, C_PORT_TILES>;
 
-  // A complete MAC result may exceed the C port; this index selects one C_PORT_TILES-wide result transfer
-  static constexpr int MAX_C_RESULT_BEATS = ceil_div(INPUT_AXIS_TILES * OUTPUT_AXIS_TILES, C_PORT_TILES);
-  static constexpr int C_RESULT_BEAT_INDEX_WIDTH = (MAX_C_RESULT_BEATS <= 1) ? 1 : log2_ceil(MAX_C_RESULT_BEATS);
+  // A complete MAC result may exceed the C port; this index selects one
+  // C_PORT_TILES-wide result transfer
+  static constexpr int MAX_C_RESULT_BEATS =
+      ceil_div(INPUT_AXIS_TILES * OUTPUT_AXIS_TILES, C_PORT_TILES);
+  static constexpr int C_RESULT_BEAT_INDEX_WIDTH =
+      (MAX_C_RESULT_BEATS <= 1) ? 1 : log2_ceil(MAX_C_RESULT_BEATS);
   using CResultBeatIndex = ac_int<C_RESULT_BEAT_INDEX_WIDTH, false>;
 
-  static constexpr int INPUT_AXIS_INDEX_WIDTH = (INPUT_AXIS_TILES <= 1) ? 1 : log2_ceil(INPUT_AXIS_TILES);
-  static constexpr int OUTPUT_AXIS_INDEX_WIDTH = (OUTPUT_AXIS_TILES <= 1) ? 1 : log2_ceil(OUTPUT_AXIS_TILES);
+  // Reserve enough completions to cover the fixed retire and ready-credit loop
+  // without adding issue stalls
+  static constexpr int MAC_ISSUE_WINDOW = Tile::issue_window();
+  static constexpr int RESULT_CREDIT_LATENCY = Tile::operation_latency() + 3;
+  static constexpr int RESULT_QUEUE_DEPTH_PER_OUTPUT =
+      ceil_div(RESULT_CREDIT_LATENCY, MAC_ISSUE_WINDOW);
+  static constexpr int RESULT_QUEUE_TARGETED_DEPTH =
+      OUTPUT_AXIS_TILES * RESULT_QUEUE_DEPTH_PER_OUTPUT;
+  static constexpr int RESULT_QUEUE_DEPTH =
+      (RESULT_CREDIT_LATENCY < RESULT_QUEUE_TARGETED_DEPTH)
+          ? RESULT_CREDIT_LATENCY
+          : RESULT_QUEUE_TARGETED_DEPTH;
+
+  static constexpr int INPUT_AXIS_INDEX_WIDTH =
+      (INPUT_AXIS_TILES <= 1) ? 1 : log2_ceil(INPUT_AXIS_TILES);
+  static constexpr int OUTPUT_AXIS_INDEX_WIDTH =
+      (OUTPUT_AXIS_TILES <= 1) ? 1 : log2_ceil(OUTPUT_AXIS_TILES);
   using InputAxisIndex = ac_int<INPUT_AXIS_INDEX_WIDTH, false>;
   using OutputAxisIndex = ac_int<OUTPUT_AXIS_INDEX_WIDTH, false>;
 
@@ -112,7 +152,8 @@ SC_MODULE(CIMArray) {
     ac_int<1, false> reduce;
     ABeat a;
 
-    static const unsigned int width = Tile::BITS_B_SET + OUTPUT_AXIS_INDEX_WIDTH + 1 + 1 + ABeat::width;
+    static const unsigned int width =
+        Tile::BITS_B_SET + OUTPUT_AXIS_INDEX_WIDTH + 1 + 1 + ABeat::width;
 
     template <unsigned int Size>
     void Marshall(Marshaller<Size>& m) {
@@ -123,7 +164,8 @@ SC_MODULE(CIMArray) {
       m & a;
     }
 
-    inline friend void sc_trace(sc_trace_file* tf, const MACRequest& request, const std::string& name) {
+    inline friend void sc_trace(sc_trace_file* tf, const MACRequest& request,
+                                const std::string& name) {
       sc_trace(tf, request.mset, name + ".mset");
       sc_trace(tf, request.output_axis_idx, name + ".output_axis_idx");
       sc_trace(tf, request.multicast, name + ".multicast");
@@ -131,7 +173,8 @@ SC_MODULE(CIMArray) {
       sc_trace(tf, request.a, name + ".a");
     }
 
-    inline friend std::ostream& operator<<(ostream& os, const MACRequest& request) {
+    inline friend std::ostream& operator<<(ostream& os,
+                                           const MACRequest& request) {
       os << request.mset << " ";
       os << request.output_axis_idx << " ";
       os << request.multicast << " ";
@@ -140,23 +183,29 @@ SC_MODULE(CIMArray) {
       return os;
     }
 
-    inline friend bool operator==(const MACRequest& lhs, const MACRequest& rhs) {
-      return lhs.mset == rhs.mset && lhs.output_axis_idx == rhs.output_axis_idx && lhs.multicast == rhs.multicast &&
-             lhs.reduce == rhs.reduce && lhs.a == rhs.a;
+    inline friend bool operator==(const MACRequest& lhs,
+                                  const MACRequest& rhs) {
+      return lhs.mset == rhs.mset &&
+             lhs.output_axis_idx == rhs.output_axis_idx &&
+             lhs.multicast == rhs.multicast && lhs.reduce == rhs.reduce &&
+             lhs.a == rhs.a;
     }
   };
 
-  // WriteRequest carries one B beat plus tile coordinates, wset, and tile-local write channel
+  // WriteRequest carries one B beat plus tile coordinates, wset, and tile-local
+  // write channel
   struct WriteRequest {
     Set wset;
     InputAxisIndex input_axis_idx;
-    OutputAxisIndex output_axis_tile_base;  // first tile in a direct B-port span
+    OutputAxisIndex
+        output_axis_tile_base;  // first tile in a direct B-port span
     TileWChi wchi;
     ac_int<1, false> replicate;
     BBeat data;
 
     static const unsigned int width =
-        Tile::BITS_B_SET + INPUT_AXIS_INDEX_WIDTH + OUTPUT_AXIS_INDEX_WIDTH + Tile::BITS_K + 1 + BBeat::width;
+        Tile::BITS_B_SET + INPUT_AXIS_INDEX_WIDTH + OUTPUT_AXIS_INDEX_WIDTH +
+        Tile::BITS_K + 1 + BBeat::width;
 
     template <unsigned int Size>
     void Marshall(Marshaller<Size>& m) {
@@ -168,16 +217,19 @@ SC_MODULE(CIMArray) {
       m & data;
     }
 
-    inline friend void sc_trace(sc_trace_file* tf, const WriteRequest& request, const std::string& name) {
+    inline friend void sc_trace(sc_trace_file* tf, const WriteRequest& request,
+                                const std::string& name) {
       sc_trace(tf, request.wset, name + ".wset");
       sc_trace(tf, request.input_axis_idx, name + ".input_axis_idx");
-      sc_trace(tf, request.output_axis_tile_base, name + ".output_axis_tile_base");
+      sc_trace(tf, request.output_axis_tile_base,
+               name + ".output_axis_tile_base");
       sc_trace(tf, request.wchi, name + ".wchi");
       sc_trace(tf, request.replicate, name + ".replicate");
       sc_trace(tf, request.data, name + ".data");
     }
 
-    inline friend std::ostream& operator<<(ostream& os, const WriteRequest& request) {
+    inline friend std::ostream& operator<<(ostream& os,
+                                           const WriteRequest& request) {
       os << request.wset << " ";
       os << request.input_axis_idx << " ";
       os << request.output_axis_tile_base << " ";
@@ -187,10 +239,12 @@ SC_MODULE(CIMArray) {
       return os;
     }
 
-    inline friend bool operator==(const WriteRequest& lhs, const WriteRequest& rhs) {
+    inline friend bool operator==(const WriteRequest& lhs,
+                                  const WriteRequest& rhs) {
       return lhs.wset == rhs.wset && lhs.input_axis_idx == rhs.input_axis_idx &&
-             lhs.output_axis_tile_base == rhs.output_axis_tile_base && lhs.wchi == rhs.wchi &&
-             lhs.replicate == rhs.replicate && lhs.data == rhs.data;
+             lhs.output_axis_tile_base == rhs.output_axis_tile_base &&
+             lhs.wchi == rhs.wchi && lhs.replicate == rhs.replicate &&
+             lhs.data == rhs.data;
     }
   };
 
@@ -210,23 +264,21 @@ SC_MODULE(CIMArray) {
   sc_signal<bool> tile_c_retire[INPUT_AXIS_TILES][OUTPUT_AXIS_TILES];
   sc_signal<bool> tile_mac_ready[INPUT_AXIS_TILES][OUTPUT_AXIS_TILES];
 
-  static constexpr int OUTPUT_AXIS_RESULT_CAPACITY = Tile::RESULT_CAPACITY;
-  static constexpr int CREDIT_COUNT_WIDTH = log2_ceil(OUTPUT_AXIS_RESULT_CAPACITY + 1);
-  using CreditCount = ac_int<CREDIT_COUNT_WIDTH, false>;
-  sc_signal<CreditCount> issued_count[OUTPUT_AXIS_TILES];
-  sc_signal<CreditCount> collected_count[OUTPUT_AXIS_TILES];
+  // Each allocated completion slot carries request metadata and a bank per
+  // physical tile
+  using CompletionToken = ac_int<OUTPUT_AXIS_INDEX_WIDTH + 2, false>;
+  static constexpr int COMPLETION_RESULT_WIDTH =
+      TILE_C_WIDTH * TILE_N * INPUT_AXIS_TILES * OUTPUT_AXIS_TILES;
+  using CompletionResult = ac_int<COMPLETION_RESULT_WIDTH, false>;
+  static constexpr int RESULT_QUEUE_POINTER_WIDTH =
+      (RESULT_QUEUE_DEPTH <= 1) ? 1 : log2_ceil(2 * RESULT_QUEUE_DEPTH);
+  using ResultQueuePointer = ac_int<RESULT_QUEUE_POINTER_WIDTH, false>;
 
-  // Low bits hold the output-axis index and the high bits hold multicast/reduce
-  using InflightToken = ac_int<OUTPUT_AXIS_INDEX_WIDTH + 2, false>;
-  static constexpr int INFLIGHT_QUEUE_REQUIRED_DEPTH = OUTPUT_AXIS_RESULT_CAPACITY * OUTPUT_AXIS_TILES;
-  static constexpr int INFLIGHT_QUEUE_DEPTH =
-      (INFLIGHT_QUEUE_REQUIRED_DEPTH <= 1) ? 2 : 1 << log2_ceil(INFLIGHT_QUEUE_REQUIRED_DEPTH);
-  static constexpr int INFLIGHT_QUEUE_INDEX_WIDTH = log2_ceil(INFLIGHT_QUEUE_DEPTH);
-  using InflightQueuePointer = ac_int<INFLIGHT_QUEUE_INDEX_WIDTH + 1, false>;
-
-  sc_signal<InflightToken> inflight_queue[INFLIGHT_QUEUE_DEPTH];
-  sc_signal<InflightQueuePointer> inflight_write_pointer;
-  sc_signal<InflightQueuePointer> inflight_read_pointer;
+  sc_signal<CompletionToken> completion_tokens[RESULT_QUEUE_DEPTH];
+  sc_signal<CompletionResult> completion_results[RESULT_QUEUE_DEPTH];
+  sc_signal<ResultQueuePointer> completion_allocate_pointer;
+  sc_signal<ResultQueuePointer> completion_capture_pointer;
+  sc_signal<ResultQueuePointer> completion_release_pointer;
 
 #ifndef __SYNTHESIS__
   bool replicate_waste_warning_reported = false;
@@ -242,23 +294,34 @@ SC_MODULE(CIMArray) {
 
   // Construct CIM tiles and HLS control threads
   SC_CTOR(CIMArray) {
-    for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES; input_axis_idx++) {
-      for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES; output_axis_idx++) {
-        tiles[input_axis_idx][output_axis_idx] = new Tile(sc_gen_unique_name("tile"));
+    for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES;
+         input_axis_idx++) {
+      for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES;
+           output_axis_idx++) {
+        tiles[input_axis_idx][output_axis_idx] =
+            new Tile(sc_gen_unique_name("tile"));
 
         tiles[input_axis_idx][output_axis_idx]->wclk(clk);
         tiles[input_axis_idx][output_axis_idx]->mclk(clk);
         tiles[input_axis_idx][output_axis_idx]->rstn(rstn);
-        tiles[input_axis_idx][output_axis_idx]->write(tile_write[input_axis_idx][output_axis_idx]);
-        tiles[input_axis_idx][output_axis_idx]->wset(tile_wset[input_axis_idx][output_axis_idx]);
-        tiles[input_axis_idx][output_axis_idx]->wchi(tile_wchi[input_axis_idx][output_axis_idx]);
-        tiles[input_axis_idx][output_axis_idx]->b(tile_b[input_axis_idx][output_axis_idx]);
+        tiles[input_axis_idx][output_axis_idx]->write(
+            tile_write[input_axis_idx][output_axis_idx]);
+        tiles[input_axis_idx][output_axis_idx]->wset(
+            tile_wset[input_axis_idx][output_axis_idx]);
+        tiles[input_axis_idx][output_axis_idx]->wchi(
+            tile_wchi[input_axis_idx][output_axis_idx]);
+        tiles[input_axis_idx][output_axis_idx]->b(
+            tile_b[input_axis_idx][output_axis_idx]);
         tiles[input_axis_idx][output_axis_idx]->a(bus_a[input_axis_idx]);
         tiles[input_axis_idx][output_axis_idx]->mset(bus_mset);
-        tiles[input_axis_idx][output_axis_idx]->mac_issue(mac_issue[output_axis_idx]);
-        tiles[input_axis_idx][output_axis_idx]->mac_ready(tile_mac_ready[input_axis_idx][output_axis_idx]);
-        tiles[input_axis_idx][output_axis_idx]->c(tile_c[input_axis_idx][output_axis_idx]);
-        tiles[input_axis_idx][output_axis_idx]->c_retire(tile_c_retire[input_axis_idx][output_axis_idx]);
+        tiles[input_axis_idx][output_axis_idx]->mac_issue(
+            mac_issue[output_axis_idx]);
+        tiles[input_axis_idx][output_axis_idx]->mac_ready(
+            tile_mac_ready[input_axis_idx][output_axis_idx]);
+        tiles[input_axis_idx][output_axis_idx]->c(
+            tile_c[input_axis_idx][output_axis_idx]);
+        tiles[input_axis_idx][output_axis_idx]->c_retire(
+            tile_c_retire[input_axis_idx][output_axis_idx]);
       }
     }
 
@@ -267,9 +330,11 @@ SC_MODULE(CIMArray) {
 
     SC_METHOD(drive_mac_issue);
     sensitive << rstn << mac_request_channel.vld << mac_request_channel.dat;
-    for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES; output_axis_idx++) {
-      sensitive << issued_count[output_axis_idx] << collected_count[output_axis_idx];
-      for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES; input_axis_idx++) {
+    sensitive << completion_allocate_pointer << completion_release_pointer;
+    for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES;
+         output_axis_idx++) {
+      for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES;
+           input_axis_idx++) {
         sensitive << tile_mac_ready[input_axis_idx][output_axis_idx];
       }
     }
@@ -278,7 +343,11 @@ SC_MODULE(CIMArray) {
     sensitive << clk.pos();
     async_reset_signal_is(rstn, false);
 
-    SC_THREAD(collect_mac);
+    SC_THREAD(capture_mac);
+    sensitive << clk.pos();
+    async_reset_signal_is(rstn, false);
+
+    SC_THREAD(drain_mac);
     sensitive << clk.pos();
     async_reset_signal_is(rstn, false);
   }
@@ -289,9 +358,11 @@ SC_MODULE(CIMArray) {
     TileBData zero_b;
     clear_pack(zero_b);
 #pragma hls_unroll yes
-    for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES; input_axis_idx++) {
+    for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES;
+         input_axis_idx++) {
 #pragma hls_unroll yes
-      for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES; output_axis_idx++) {
+      for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES;
+           output_axis_idx++) {
         tile_write[input_axis_idx][output_axis_idx].write(false);
         tile_wset[input_axis_idx][output_axis_idx].write(0);
         tile_wchi[input_axis_idx][output_axis_idx].write(0);
@@ -305,18 +376,27 @@ SC_MODULE(CIMArray) {
     TileBData zero_b;
     clear_pack(zero_b);
 #pragma hls_unroll yes
-    for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES; input_axis_idx++) {
-      const bool input_selected = request.input_axis_idx == InputAxisIndex(input_axis_idx);
+    for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES;
+         input_axis_idx++) {
+      const bool input_selected =
+          request.input_axis_idx == InputAxisIndex(input_axis_idx);
 #pragma hls_unroll yes
-      for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES; output_axis_idx++) {
+      for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES;
+           output_axis_idx++) {
         const int beat_offset = (output_axis_idx / B_PORT_TILES) * B_PORT_TILES;
-        const bool span_selected = request.output_axis_tile_base == OutputAxisIndex(beat_offset);
-        const bool selected = input_selected && (request.replicate != 0 || span_selected);
-        tile_write[input_axis_idx][output_axis_idx].write(request_valid && selected);
+        const bool span_selected =
+            request.output_axis_tile_base == OutputAxisIndex(beat_offset);
+        const bool selected =
+            input_selected && (request.replicate != 0 || span_selected);
+        tile_write[input_axis_idx][output_axis_idx].write(request_valid &&
+                                                          selected);
         tile_wset[input_axis_idx][output_axis_idx].write(request.wset);
         tile_wchi[input_axis_idx][output_axis_idx].write(request.wchi);
         tile_b[input_axis_idx][output_axis_idx].write(
-            selected ? request.data[request.replicate != 0 ? 0 : output_axis_idx % B_PORT_TILES] : zero_b);
+            selected ? request.data[request.replicate != 0
+                                        ? 0
+                                        : output_axis_idx % B_PORT_TILES]
+                     : zero_b);
       }
     }
   }
@@ -345,19 +425,29 @@ SC_MODULE(CIMArray) {
 
 #ifndef __SYNTHESIS__
     if (request_valid && request.input_axis_idx.to_int() >= INPUT_AXIS_TILES) {
-      SC_REPORT_FATAL("CIMArray", "B request input_axis_idx is outside the input axis");
+      SC_REPORT_FATAL("CIMArray",
+                      "B request input_axis_idx is outside the input axis");
     }
     if (request_valid && request.replicate == 0 &&
         (request.output_axis_tile_base.to_int() % B_PORT_TILES != 0 ||
-         request.output_axis_tile_base.to_int() + B_PORT_TILES > OUTPUT_AXIS_TILES)) {
-      SC_REPORT_FATAL("CIMArray", "direct B request must select one aligned, non-wrapping B-port span");
+         request.output_axis_tile_base.to_int() + B_PORT_TILES >
+             OUTPUT_AXIS_TILES)) {
+      SC_REPORT_FATAL(
+          "CIMArray",
+          "direct B request must select one aligned, non-wrapping B-port span");
     }
-    if (request_valid && request.replicate != 0 && request.output_axis_tile_base != OutputAxisIndex(0)) {
-      SC_REPORT_FATAL("CIMArray", "replicate B request requires output_axis_tile_base zero");
+    if (request_valid && request.replicate != 0 &&
+        request.output_axis_tile_base != OutputAxisIndex(0)) {
+      SC_REPORT_FATAL(
+          "CIMArray",
+          "replicate B request requires output_axis_tile_base zero");
     }
     if constexpr (B_PORT_TILES > 1) {
-      if (request_valid && request.replicate != 0 && !replicate_waste_warning_reported) {
-        SC_REPORT_WARNING("CIMArray", "replicate B request uses beat tile zero and ignores the remaining tiles");
+      if (request_valid && request.replicate != 0 &&
+          !replicate_waste_warning_reported) {
+        SC_REPORT_WARNING("CIMArray",
+                          "replicate B request uses beat tile zero and ignores "
+                          "the remaining tiles");
         replicate_waste_warning_reported = true;
       }
     }
@@ -366,40 +456,65 @@ SC_MODULE(CIMArray) {
     drive_write_request(request, request_valid);
   }
 
-  // Return the storage index selected by one inflight queue pointer
-  static int inflight_queue_index(const InflightQueuePointer& pointer) {
-    return pointer.template slc<INFLIGHT_QUEUE_INDEX_WIDTH>(0).to_int();
+  // Return the exact-depth storage index selected by one completion queue
+  // pointer
+  static int result_queue_index(const ResultQueuePointer& pointer) {
+    const int pointer_value = pointer.to_uint();
+    return pointer_value < RESULT_QUEUE_DEPTH
+               ? pointer_value
+               : pointer_value - RESULT_QUEUE_DEPTH;
+  }
+
+  // Advance one exact-depth queue pointer through its index and phase range
+  static ResultQueuePointer next_result_queue_pointer(
+      const ResultQueuePointer& pointer) {
+    return pointer == ResultQueuePointer(2 * RESULT_QUEUE_DEPTH - 1)
+               ? ResultQueuePointer(0)
+               : ResultQueuePointer(pointer + 1);
+  }
+
+  // Return whether every completion slot has been reserved by an accepted
+  // request
+  static bool result_queue_full(const ResultQueuePointer& allocate_pointer,
+                                const ResultQueuePointer& release_pointer) {
+    const int release_value = release_pointer.to_uint();
+    const ResultQueuePointer full_pointer =
+        release_value < RESULT_QUEUE_DEPTH
+            ? ResultQueuePointer(release_value + RESULT_QUEUE_DEPTH)
+            : ResultQueuePointer(release_value - RESULT_QUEUE_DEPTH);
+    return allocate_pointer == full_pointer;
   }
 
 #ifndef __SYNTHESIS__
-  // Return whether the inflight token queue has no free entry
-  static bool inflight_queue_full(const InflightQueuePointer& write_pointer, const InflightQueuePointer& read_pointer) {
-    return InflightQueuePointer(write_pointer - read_pointer) == InflightQueuePointer(INFLIGHT_QUEUE_DEPTH);
-  }
-
   // Return whether one MAC request selects a valid output-axis tile
   static bool mac_target_valid(const MACRequest& request) {
-    return request.multicast != 0 || request.output_axis_idx.to_int() < OUTPUT_AXIS_TILES;
+    return request.multicast != 0 ||
+           request.output_axis_idx.to_int() < OUTPUT_AXIS_TILES;
   }
 #endif
 
   // Return whether one output-axis tile is selected by a MAC request
-  static bool mac_output_axis_selected(const MACRequest& request, int output_axis_idx) {
-    return request.multicast != 0 || OutputAxisIndex(output_axis_idx) == request.output_axis_idx;
+  static bool mac_output_axis_selected(const MACRequest& request,
+                                       int output_axis_idx) {
+    return request.multicast != 0 ||
+           OutputAxisIndex(output_axis_idx) == request.output_axis_idx;
   }
 
-  // Return whether every selected tile can accept and retain this operation
+  // Return whether the completion queue and every selected tile can accept this
+  // operation
   bool selected_tiles_ready(const MACRequest& request) const {
-    bool ready = true;
+    bool ready = !result_queue_full(completion_allocate_pointer.read(),
+                                    completion_release_pointer.read());
 
 #pragma hls_unroll yes
-    for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES; output_axis_idx++) {
+    for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES;
+         output_axis_idx++) {
       if (mac_output_axis_selected(request, output_axis_idx)) {
-        const CreditCount outstanding = issued_count[output_axis_idx].read() - collected_count[output_axis_idx].read();
-        ready = ready && outstanding < CreditCount(OUTPUT_AXIS_RESULT_CAPACITY);
 #pragma hls_unroll yes
-        for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES; input_axis_idx++) {
-          ready = ready && tile_mac_ready[input_axis_idx][output_axis_idx].read();
+        for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES;
+             input_axis_idx++) {
+          ready =
+              ready && tile_mac_ready[input_axis_idx][output_axis_idx].read();
         }
       }
     }
@@ -415,13 +530,15 @@ SC_MODULE(CIMArray) {
     request.reduce = 0;
     clear_pack(request.a);
 
-    const bool valid = rstn.read() && ConnectionsSignal::valid(mac_request_channel);
+    const bool valid =
+        rstn.read() && ConnectionsSignal::valid(mac_request_channel);
     if (valid) {
       request = ConnectionsSignal::peek(mac_request_channel);
     }
 #ifndef __SYNTHESIS__
     if (valid && !mac_target_valid(request)) {
-      SC_REPORT_FATAL("CIMArray", "MAC request output_axis_idx is outside the output axis");
+      SC_REPORT_FATAL("CIMArray",
+                      "MAC request output_axis_idx is outside the output axis");
     }
 #endif
     const bool ready = valid && selected_tiles_ready(request);
@@ -429,29 +546,26 @@ SC_MODULE(CIMArray) {
 
     bus_mset.write(request.mset);
 #pragma hls_unroll yes
-    for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES; input_axis_idx++) {
+    for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES;
+         input_axis_idx++) {
       bus_a[input_axis_idx].write(request.a[input_axis_idx]);
     }
 #pragma hls_unroll yes
-    for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES; output_axis_idx++) {
-      mac_issue[output_axis_idx].write(ready && mac_output_axis_selected(request, output_axis_idx));
+    for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES;
+         output_axis_idx++) {
+      mac_issue[output_axis_idx].write(
+          ready && mac_output_axis_selected(request, output_axis_idx));
     }
   }
 
-  // Record each accepted MAC request in credits and result order
+  // Reserve one completion slot and record result metadata for each accepted
+  // MAC
   void record_mac_issue() {
-    CreditCount issued_local[OUTPUT_AXIS_TILES];
+    ResultQueuePointer allocate_pointer = 0;
+    completion_allocate_pointer.write(allocate_pointer);
 #pragma hls_unroll yes
-    for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES; output_axis_idx++) {
-      issued_local[output_axis_idx] = 0;
-      issued_count[output_axis_idx].write(0);
-    }
-
-    InflightQueuePointer inflight_pointer = 0;
-    inflight_write_pointer.write(inflight_pointer);
-#pragma hls_unroll yes
-    for (int queue_idx = 0; queue_idx < INFLIGHT_QUEUE_DEPTH; queue_idx++) {
-      inflight_queue[queue_idx].write(InflightToken(0));
+    for (int queue_idx = 0; queue_idx < RESULT_QUEUE_DEPTH; queue_idx++) {
+      completion_tokens[queue_idx].write(CompletionToken(0));
     }
 
     wait();
@@ -463,40 +577,40 @@ SC_MODULE(CIMArray) {
         const MACRequest request = ConnectionsSignal::peek(mac_request_channel);
 
 #ifndef __SYNTHESIS__
-        if (inflight_queue_full(inflight_pointer, inflight_read_pointer.read())) {
-          SC_REPORT_FATAL("CIMArray", "MAC issue overflowed the inflight token queue despite available credit");
+        if (result_queue_full(allocate_pointer,
+                              completion_release_pointer.read())) {
+          SC_REPORT_FATAL("CIMArray",
+                          "MAC issue overflowed the completion queue despite "
+                          "unavailable credit");
         }
 #endif
 
-#pragma hls_unroll yes
-        for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES; output_axis_idx++) {
-          if (mac_output_axis_selected(request, output_axis_idx)) {
-            issued_local[output_axis_idx] = issued_local[output_axis_idx] + CreditCount(1);
-            issued_count[output_axis_idx].write(issued_local[output_axis_idx]);
-          }
-        }
-
-        InflightToken token = 0;
+        CompletionToken token = 0;
         token.set_slc(0, request.output_axis_idx);
         token.set_slc(OUTPUT_AXIS_INDEX_WIDTH, request.multicast);
         token.set_slc(OUTPUT_AXIS_INDEX_WIDTH + 1, request.reduce);
-        inflight_queue[inflight_queue_index(inflight_pointer)].write(token);
-        inflight_pointer += InflightQueuePointer(1);
-        inflight_write_pointer.write(inflight_pointer);
+        completion_tokens[result_queue_index(allocate_pointer)].write(token);
+        allocate_pointer = next_result_queue_pointer(allocate_pointer);
+        completion_allocate_pointer.write(allocate_pointer);
       }
       wait();
     }
   }
 
   // Return whether every tile selected by one operation has retired
-  bool request_retired(bool multicast, int target_output_axis_idx, const bool seen_retire[OUTPUT_AXIS_TILES]) const {
+  bool request_retired(bool multicast, int target_output_axis_idx,
+                       const bool seen_retire[OUTPUT_AXIS_TILES]) const {
     bool retired = true;
 #pragma hls_unroll yes
-    for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES; output_axis_idx++) {
+    for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES;
+         output_axis_idx++) {
       if (multicast || output_axis_idx == target_output_axis_idx) {
 #pragma hls_unroll yes
-        for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES; input_axis_idx++) {
-          retired = retired && tile_c_retire[input_axis_idx][output_axis_idx].read() != seen_retire[output_axis_idx];
+        for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES;
+             input_axis_idx++) {
+          retired = retired &&
+                    tile_c_retire[input_axis_idx][output_axis_idx].read() !=
+                        seen_retire[output_axis_idx];
         }
       }
     }
@@ -513,14 +627,27 @@ SC_MODULE(CIMArray) {
     return result;
   }
 
-  // Sum one C output channel across the input axis
-  CValue reduce_tile_values(int output_axis_idx, int tile_n) const {
+  // Return one scalar from a packed queued tile result
+  static TileCValue queued_tile_value(const CompletionResult& completion_result,
+                                      int input_axis_idx, int output_axis_idx,
+                                      int tile_n) {
+    const int bit_offset =
+        ((input_axis_idx * OUTPUT_AXIS_TILES + output_axis_idx) * TILE_N +
+         tile_n) *
+        TILE_C_WIDTH;
+    return completion_result.template slc<TILE_C_WIDTH>(bit_offset);
+  }
+
+  // Sum one queued C output channel across the input axis
+  CValue reduce_queued_tile_values(const CompletionResult& completion_result,
+                                   int output_axis_idx, int tile_n) const {
     ac_int<C_WIDTH, SIGNED> sum = 0;
 #pragma hls_unroll yes
-    for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES; input_axis_idx++) {
-      const TileCData tile_result = tile_c[input_axis_idx][output_axis_idx].read();
+    for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES;
+         input_axis_idx++) {
       ac_int<TILE_C_WIDTH, SIGNED> value;
-      value.set_slc(0, tile_result[tile_n]);
+      value.set_slc(0, queued_tile_value(completion_result, input_axis_idx,
+                                         output_axis_idx, tile_n));
       sum += value;
     }
     CValue result;
@@ -528,16 +655,24 @@ SC_MODULE(CIMArray) {
     return result;
   }
 
-  // Pack one port-width C beat from a complete MAC result in layout order
-  CBeat pack_output(CResultBeatIndex result_beat_idx, bool multicast, bool reduce, int target_output_axis_idx) const {
+  // Pack one port-width C beat from a queued complete MAC result in layout
+  // order
+  CBeat pack_queued_output(int queue_idx, CResultBeatIndex result_beat_idx,
+                           bool multicast, bool reduce,
+                           int target_output_axis_idx) const {
+    const CompletionResult completion_result =
+        completion_results[queue_idx].read();
     CBeat c_beat;
     clear_pack(c_beat);
 
     const int selected_output_tiles = multicast ? OUTPUT_AXIS_TILES : 1;
-    const int logical_results = reduce ? selected_output_tiles : selected_output_tiles * INPUT_AXIS_TILES;
+    const int logical_results = reduce
+                                    ? selected_output_tiles
+                                    : selected_output_tiles * INPUT_AXIS_TILES;
 #pragma hls_unroll yes
     for (int port_idx = 0; port_idx < C_PORT_TILES; port_idx++) {
-      const int logical_idx = result_beat_idx.to_int() * C_PORT_TILES + port_idx;
+      const int logical_idx =
+          result_beat_idx.to_int() * C_PORT_TILES + port_idx;
       if (logical_idx < logical_results) {
         int output_axis_ordinal = 0;
         int input_axis_idx = 0;
@@ -552,15 +687,17 @@ SC_MODULE(CIMArray) {
         } else {
           input_axis_idx = logical_idx;
         }
-        const int output_axis_idx = multicast ? output_axis_ordinal : target_output_axis_idx;
+        const int output_axis_idx =
+            multicast ? output_axis_ordinal : target_output_axis_idx;
 
 #pragma hls_unroll yes
         for (int tile_n = 0; tile_n < TILE_N; tile_n++) {
           if (reduce) {
-            c_beat[port_idx][tile_n] = reduce_tile_values(output_axis_idx, tile_n);
+            c_beat[port_idx][tile_n] = reduce_queued_tile_values(
+                completion_result, output_axis_idx, tile_n);
           } else {
-            const TileCData tile_result = tile_c[input_axis_idx][output_axis_idx].read();
-            c_beat[port_idx][tile_n] = widen_tile_value(tile_result[tile_n]);
+            c_beat[port_idx][tile_n] = widen_tile_value(queued_tile_value(
+                completion_result, input_axis_idx, output_axis_idx, tile_n));
           }
         }
       }
@@ -568,63 +705,128 @@ SC_MODULE(CIMArray) {
     return c_beat;
   }
 
-  // Collect C retirements in MAC issue order
-  void collect_mac() {
-    result_channel.Reset();
-
+  // Capture every fixed-latency retirement without waiting for result-channel
+  // readiness
+  void capture_mac() {
     bool seen_retire[OUTPUT_AXIS_TILES];
-    CreditCount collected_local[OUTPUT_AXIS_TILES];
 #pragma hls_unroll yes
-    for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES; output_axis_idx++) {
+    for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES;
+         output_axis_idx++) {
       seen_retire[output_axis_idx] = false;
-      collected_local[output_axis_idx] = 0;
-      collected_count[output_axis_idx].write(0);
     }
 
-    InflightQueuePointer inflight_pointer = 0;
-    CResultBeatIndex result_beat_idx = 0;
-    inflight_read_pointer.write(inflight_pointer);
+    ResultQueuePointer capture_pointer = 0;
+    completion_capture_pointer.write(capture_pointer);
+#pragma hls_unroll yes
+    for (int queue_idx = 0; queue_idx < RESULT_QUEUE_DEPTH; queue_idx++) {
+      completion_results[queue_idx].write(CompletionResult(0));
+    }
 
     wait();
 
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode bubble
     while (true) {
-      const InflightQueuePointer inflight_write = inflight_write_pointer.read();
-      const bool token_available = inflight_pointer != inflight_write;
+      const ResultQueuePointer allocate_pointer =
+          completion_allocate_pointer.read();
+      const bool token_available = capture_pointer != allocate_pointer;
 
       if (token_available) {
-        const InflightToken token = inflight_queue[inflight_queue_index(inflight_pointer)].read();
-        const bool multicast = token.template slc<1>(OUTPUT_AXIS_INDEX_WIDTH) != 0;
-        const bool reduce = token.template slc<1>(OUTPUT_AXIS_INDEX_WIDTH + 1) != 0;
-        const OutputAxisIndex token_output_axis_idx = token.template slc<OUTPUT_AXIS_INDEX_WIDTH>(0);
+        const int queue_idx = result_queue_index(capture_pointer);
+        const CompletionToken token = completion_tokens[queue_idx].read();
+        const bool multicast =
+            token.template slc<1>(OUTPUT_AXIS_INDEX_WIDTH) != 0;
+        const OutputAxisIndex token_output_axis_idx =
+            token.template slc<OUTPUT_AXIS_INDEX_WIDTH>(0);
         const int target_output_axis_idx = token_output_axis_idx.to_int();
 
         if (request_retired(multicast, target_output_axis_idx, seen_retire)) {
-          result_channel.Push(pack_output(result_beat_idx, multicast, reduce, target_output_axis_idx));
-
-          const int selected_output_tiles = multicast ? OUTPUT_AXIS_TILES : 1;
-          const int logical_results = reduce ? selected_output_tiles : selected_output_tiles * INPUT_AXIS_TILES;
-          const int result_beats = ceil_div(logical_results, C_PORT_TILES);
-          const bool token_complete = result_beat_idx == CResultBeatIndex(result_beats - 1);
-          if (token_complete) {
+          CompletionResult completion_result = 0;
 #pragma hls_unroll yes
-            for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES; output_axis_idx++) {
+          for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES;
+               input_axis_idx++) {
+#pragma hls_unroll yes
+            for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES;
+                 output_axis_idx++) {
               if (multicast || output_axis_idx == target_output_axis_idx) {
-                seen_retire[output_axis_idx] = !seen_retire[output_axis_idx];
-                collected_local[output_axis_idx] = collected_local[output_axis_idx] + CreditCount(1);
-                collected_count[output_axis_idx].write(collected_local[output_axis_idx]);
+                const TileCData tile_result =
+                    tile_c[input_axis_idx][output_axis_idx].read();
+#pragma hls_unroll yes
+                for (int tile_n = 0; tile_n < TILE_N; tile_n++) {
+                  const int bit_offset =
+                      ((input_axis_idx * OUTPUT_AXIS_TILES + output_axis_idx) *
+                           TILE_N +
+                       tile_n) *
+                      TILE_C_WIDTH;
+                  completion_result.set_slc(bit_offset, tile_result[tile_n]);
+                }
               }
             }
-
-            inflight_pointer += InflightQueuePointer(1);
-            inflight_read_pointer.write(inflight_pointer);
-            result_beat_idx = 0;
-          } else {
-            result_beat_idx += CResultBeatIndex(1);
           }
+          completion_results[queue_idx].write(completion_result);
+
+#pragma hls_unroll yes
+          for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES;
+               output_axis_idx++) {
+            if (multicast || output_axis_idx == target_output_axis_idx) {
+              seen_retire[output_axis_idx] = !seen_retire[output_axis_idx];
+            }
+          }
+
+          capture_pointer = next_result_queue_pointer(capture_pointer);
+          completion_capture_pointer.write(capture_pointer);
+        }
+      }
+      wait();
+    }
+  }
+
+  // Serialize captured results and return a completion credit after the final
+  // accepted beat
+  void drain_mac() {
+    result_channel.Reset();
+
+    ResultQueuePointer release_pointer = 0;
+    CResultBeatIndex result_beat_idx = 0;
+    completion_release_pointer.write(release_pointer);
+
+    wait();
+
+#pragma hls_pipeline_init_interval 1
+#pragma hls_pipeline_stall_mode bubble
+    while (true) {
+      const ResultQueuePointer capture_pointer =
+          completion_capture_pointer.read();
+      const bool result_available = release_pointer != capture_pointer;
+
+      if (result_available) {
+        const int queue_idx = result_queue_index(release_pointer);
+        const CompletionToken token = completion_tokens[queue_idx].read();
+        const bool multicast =
+            token.template slc<1>(OUTPUT_AXIS_INDEX_WIDTH) != 0;
+        const bool reduce =
+            token.template slc<1>(OUTPUT_AXIS_INDEX_WIDTH + 1) != 0;
+        const OutputAxisIndex token_output_axis_idx =
+            token.template slc<OUTPUT_AXIS_INDEX_WIDTH>(0);
+        const int target_output_axis_idx = token_output_axis_idx.to_int();
+
+        result_channel.Push(pack_queued_output(queue_idx, result_beat_idx,
+                                               multicast, reduce,
+                                               target_output_axis_idx));
+
+        const int selected_output_tiles = multicast ? OUTPUT_AXIS_TILES : 1;
+        const int logical_results =
+            reduce ? selected_output_tiles
+                   : selected_output_tiles * INPUT_AXIS_TILES;
+        const int result_beats = ceil_div(logical_results, C_PORT_TILES);
+        const bool token_complete =
+            result_beat_idx == CResultBeatIndex(result_beats - 1);
+        if (token_complete) {
+          release_pointer = next_result_queue_pointer(release_pointer);
+          completion_release_pointer.write(release_pointer);
+          result_beat_idx = 0;
         } else {
-          wait();
+          result_beat_idx += CResultBeatIndex(1);
         }
       } else {
         wait();

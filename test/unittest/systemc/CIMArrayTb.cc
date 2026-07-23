@@ -32,18 +32,25 @@ static constexpr int CIM_MODE_BIT_SERIAL_VALUE = 1;
 static int g_cases_remaining = 0;
 
 // Return a mask covering the requested bit width
-static constexpr long long mask_for_width(int width) { return (1LL << width) - 1; }
+static constexpr long long mask_for_width(int width) {
+  return (1LL << width) - 1;
+}
 
 // Exercise one parameterized CIMArray geometry using logical A/B/C coordinates
-template <int CH_IN, int CH_OUT, int B_SETS, int BASE_A_WIDTH, int BASE_B_WIDTH, int BASE_C_WIDTH, int WRITE_CH_IN,
-          int MAC_LATENCY, int MODE, int A_WIDTH, int B_WIDTH, bool IS_SIGNED, int TILE_INPUT_AXIS_ELEMENTS,
-          int TILE_OUTPUT_AXIS_ELEMENTS, int INPUT_AXIS_TILES = 1, int OUTPUT_AXIS_TILES = 1,
-          int A_PORT_TILES = INPUT_AXIS_TILES, int B_PORT_TILES = OUTPUT_AXIS_TILES,
-          int C_PORT_TILES = INPUT_AXIS_TILES, int C_BEAT_LAYOUT = CIM_C_BEAT_INPUT_MAJOR,
-          typename DutType =
-              CIMArray<CH_IN, CH_OUT, B_SETS, BASE_A_WIDTH, BASE_B_WIDTH, BASE_C_WIDTH, WRITE_CH_IN, MAC_LATENCY, MODE,
-                       A_WIDTH, B_WIDTH, IS_SIGNED, TILE_INPUT_AXIS_ELEMENTS, TILE_OUTPUT_AXIS_ELEMENTS,
-                       INPUT_AXIS_TILES, OUTPUT_AXIS_TILES, A_PORT_TILES, B_PORT_TILES, C_PORT_TILES, C_BEAT_LAYOUT>>
+template <
+    int CH_IN, int CH_OUT, int B_SETS, int BASE_A_WIDTH, int BASE_B_WIDTH,
+    int BASE_C_WIDTH, int WRITE_CH_IN, int MAC_LATENCY, int MODE, int A_WIDTH,
+    int B_WIDTH, bool IS_SIGNED, int TILE_INPUT_AXIS_ELEMENTS,
+    int TILE_OUTPUT_AXIS_ELEMENTS, int INPUT_AXIS_TILES = 1,
+    int OUTPUT_AXIS_TILES = 1, int A_PORT_TILES = INPUT_AXIS_TILES,
+    int B_PORT_TILES = OUTPUT_AXIS_TILES, int C_PORT_TILES = INPUT_AXIS_TILES,
+    int C_BEAT_LAYOUT = CIM_C_BEAT_INPUT_MAJOR,
+    typename DutType =
+        CIMArray<CH_IN, CH_OUT, B_SETS, BASE_A_WIDTH, BASE_B_WIDTH,
+                 BASE_C_WIDTH, WRITE_CH_IN, MAC_LATENCY, MODE, A_WIDTH, B_WIDTH,
+                 IS_SIGNED, TILE_INPUT_AXIS_ELEMENTS, TILE_OUTPUT_AXIS_ELEMENTS,
+                 INPUT_AXIS_TILES, OUTPUT_AXIS_TILES, A_PORT_TILES,
+                 B_PORT_TILES, C_PORT_TILES, C_BEAT_LAYOUT>>
 struct CIMArrayTbCase : sc_module {
   using Dut = DutType;
   using ABeat = typename Dut::ABeat;
@@ -54,7 +61,8 @@ struct CIMArrayTbCase : sc_module {
 
   static_assert(A_WIDTH < 31, "A_WIDTH must fit this unit test golden model");
   static_assert(B_WIDTH < 31, "B_WIDTH must fit this unit test golden model");
-  static_assert(Dut::C_WIDTH < 62, "C_WIDTH must fit this unit test golden model");
+  static_assert(Dut::C_WIDTH < 62,
+                "C_WIDTH must fit this unit test golden model");
 
   CIMARRAY_DUT_TYPE(Dut) dut;
   sc_clock clk;
@@ -74,7 +82,8 @@ struct CIMArrayTbCase : sc_module {
   SC_HAS_PROCESS(CIMArrayTbCase);
 
   // Construct one case and bind the standalone CIMArray ports
-  explicit CIMArrayTbCase(sc_module_name name) : sc_module(name), dut("dut"), clk("clk", 10, SC_NS) {
+  explicit CIMArrayTbCase(sc_module_name name)
+      : sc_module(name), dut("dut"), clk("clk", 10, SC_NS) {
     g_cases_remaining++;
 
     dut.clk(clk);
@@ -188,7 +197,8 @@ struct CIMArrayTbCase : sc_module {
   }
 
   // Drive one direct B-port span and mirror it into the logical B model
-  void drive_write_direct(Set wset, int input_axis_idx, int output_axis_tile_base, int tile_wchi, int phase) {
+  void drive_write_direct(Set wset, int input_axis_idx,
+                          int output_axis_tile_base, int tile_wchi, int phase) {
     WriteRequest request;
     request.wset = wset;
     request.input_axis_idx = input_axis_idx;
@@ -200,9 +210,11 @@ struct CIMArrayTbCase : sc_module {
       for (int tile_n = 0; tile_n < Dut::TILE_N; tile_n++) {
         for (int tile_bk = 0; tile_bk < Dut::TILE_BK; tile_bk++) {
           const int k = input_axis_idx * Dut::TILE_K + tile_wchi + tile_bk;
-          const int n = (output_axis_tile_base + port_tile_idx) * Dut::TILE_N + tile_n;
+          const int n =
+              (output_axis_tile_base + port_tile_idx) * Dut::TILE_N + tile_n;
           request.data[port_tile_idx][tile_bk][tile_n] = b_value(k, n, phase);
-          expected_b[wset.to_int()][k][n] = request.data[port_tile_idx][tile_bk][tile_n];
+          expected_b[wset.to_int()][k][n] =
+              request.data[port_tile_idx][tile_bk][tile_n];
         }
       }
     }
@@ -211,8 +223,10 @@ struct CIMArrayTbCase : sc_module {
     settle();
   }
 
-  // Drive one replicated B tile and mirror beat tile zero across the output axis
-  void drive_write_replicate(Set wset, int input_axis_idx, int tile_wchi, int phase) {
+  // Drive one replicated B tile and mirror beat tile zero across the output
+  // axis
+  void drive_write_replicate(Set wset, int input_axis_idx, int tile_wchi,
+                             int phase) {
     WriteRequest request;
     request.wset = wset;
     request.input_axis_idx = input_axis_idx;
@@ -225,12 +239,14 @@ struct CIMArrayTbCase : sc_module {
         for (int tile_bk = 0; tile_bk < Dut::TILE_BK; tile_bk++) {
           const int k = input_axis_idx * Dut::TILE_K + tile_wchi + tile_bk;
           const int source_n = port_tile_idx * Dut::TILE_N + tile_n;
-          request.data[port_tile_idx][tile_bk][tile_n] = b_value(k, source_n, phase);
+          request.data[port_tile_idx][tile_bk][tile_n] =
+              b_value(k, source_n, phase);
         }
       }
     }
 
-    for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES; output_axis_idx++) {
+    for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES;
+         output_axis_idx++) {
       for (int tile_n = 0; tile_n < Dut::TILE_N; tile_n++) {
         for (int tile_bk = 0; tile_bk < Dut::TILE_BK; tile_bk++) {
           const int k = input_axis_idx * Dut::TILE_K + tile_wchi + tile_bk;
@@ -246,11 +262,15 @@ struct CIMArrayTbCase : sc_module {
 
   // Load every direct B-port span required by one resident weight set
   void load_weight_set(Set wset, int phase, bool insert_idle = false) {
-    for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES; input_axis_idx++) {
-      for (int tile_wchi = 0; tile_wchi < Dut::TILE_K; tile_wchi += Dut::TILE_BK) {
-        for (int output_axis_tile_base = 0; output_axis_tile_base < OUTPUT_AXIS_TILES;
+    for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES;
+         input_axis_idx++) {
+      for (int tile_wchi = 0; tile_wchi < Dut::TILE_K;
+           tile_wchi += Dut::TILE_BK) {
+        for (int output_axis_tile_base = 0;
+             output_axis_tile_base < OUTPUT_AXIS_TILES;
              output_axis_tile_base += B_PORT_TILES) {
-          drive_write_direct(wset, input_axis_idx, output_axis_tile_base, tile_wchi, phase);
+          drive_write_direct(wset, input_axis_idx, output_axis_tile_base,
+                             tile_wchi, phase);
           if (insert_idle) {
             tick();
             tick();
@@ -262,9 +282,12 @@ struct CIMArrayTbCase : sc_module {
   }
 
   // Load one weight set by replicating beat tile zero
-  void load_weight_set_replicate(Set wset, int phase, bool insert_idle = false) {
-    for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES; input_axis_idx++) {
-      for (int tile_wchi = 0; tile_wchi < Dut::TILE_K; tile_wchi += Dut::TILE_BK) {
+  void load_weight_set_replicate(Set wset, int phase,
+                                 bool insert_idle = false) {
+    for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES;
+         input_axis_idx++) {
+      for (int tile_wchi = 0; tile_wchi < Dut::TILE_K;
+           tile_wchi += Dut::TILE_BK) {
         drive_write_replicate(wset, input_axis_idx, tile_wchi, phase);
         if (insert_idle) {
           tick();
@@ -276,7 +299,8 @@ struct CIMArrayTbCase : sc_module {
   }
 
   // Compute one tile C vector for an expected beat
-  void compute_expected_tile(ExpectedBeat& beat, int port_tile_idx, Set mset, int input_axis_idx, int output_axis_idx,
+  void compute_expected_tile(ExpectedBeat& beat, int port_tile_idx, Set mset,
+                             int input_axis_idx, int output_axis_idx,
                              int phase) const {
     for (int tile_n = 0; tile_n < Dut::TILE_N; tile_n++) {
       const int n = output_axis_idx * Dut::TILE_N + tile_n;
@@ -284,7 +308,8 @@ struct CIMArrayTbCase : sc_module {
       for (int tile_k = 0; tile_k < Dut::TILE_K; tile_k++) {
         const int k = input_axis_idx * Dut::TILE_K + tile_k;
         const long long a = decode_value<A_WIDTH>(a_value(k, phase));
-        const long long b = decode_value<B_WIDTH>(expected_b[mset.to_int()][k][n]);
+        const long long b =
+            decode_value<B_WIDTH>(expected_b[mset.to_int()][k][n]);
         sum += a * b;
       }
       beat.value[port_tile_idx][tile_n] += sum;
@@ -292,11 +317,17 @@ struct CIMArrayTbCase : sc_module {
   }
 
   // Queue the C beats produced by one targeted or multicast MAC request
-  void queue_expected_beats(Set mset, bool multicast, int target_output_axis_idx, bool reduce, int phase) {
+  void queue_expected_beats(Set mset, bool multicast,
+                            int target_output_axis_idx, bool reduce,
+                            int phase) {
     const int selected_output_tiles = multicast ? OUTPUT_AXIS_TILES : 1;
-    const int logical_results = reduce ? selected_output_tiles : selected_output_tiles * INPUT_AXIS_TILES;
-    const int result_beats = (logical_results + C_PORT_TILES - 1) / C_PORT_TILES;
-    for (int result_beat_idx = 0; result_beat_idx < result_beats; result_beat_idx++) {
+    const int logical_results = reduce
+                                    ? selected_output_tiles
+                                    : selected_output_tiles * INPUT_AXIS_TILES;
+    const int result_beats =
+        (logical_results + C_PORT_TILES - 1) / C_PORT_TILES;
+    for (int result_beat_idx = 0; result_beat_idx < result_beats;
+         result_beat_idx++) {
       ExpectedBeat beat = {};
       for (int port_idx = 0; port_idx < C_PORT_TILES; port_idx++) {
         const int logical_idx = result_beat_idx * C_PORT_TILES + port_idx;
@@ -317,14 +348,18 @@ struct CIMArrayTbCase : sc_module {
         } else {
           input_axis_idx = logical_idx;
         }
-        const int output_axis_idx = multicast ? output_axis_ordinal : target_output_axis_idx;
+        const int output_axis_idx =
+            multicast ? output_axis_ordinal : target_output_axis_idx;
 
         if (reduce) {
-          for (int sum_input_axis_idx = 0; sum_input_axis_idx < INPUT_AXIS_TILES; sum_input_axis_idx++) {
-            compute_expected_tile(beat, port_idx, mset, sum_input_axis_idx, output_axis_idx, phase);
+          for (int sum_input_axis_idx = 0;
+               sum_input_axis_idx < INPUT_AXIS_TILES; sum_input_axis_idx++) {
+            compute_expected_tile(beat, port_idx, mset, sum_input_axis_idx,
+                                  output_axis_idx, phase);
           }
         } else {
-          compute_expected_tile(beat, port_idx, mset, input_axis_idx, output_axis_idx, phase);
+          compute_expected_tile(beat, port_idx, mset, input_axis_idx,
+                                output_axis_idx, phase);
         }
       }
       expected_beats.push_back(beat);
@@ -334,7 +369,8 @@ struct CIMArrayTbCase : sc_module {
   // Build one complete A beat for a deterministic phase
   ABeat build_a_beat(int phase) const {
     ABeat beat;
-    for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES; input_axis_idx++) {
+    for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES;
+         input_axis_idx++) {
       for (int tile_k = 0; tile_k < Dut::TILE_K; tile_k++) {
         const int k = input_axis_idx * Dut::TILE_K + tile_k;
         beat[input_axis_idx][tile_k] = a_value(k, phase);
@@ -355,7 +391,8 @@ struct CIMArrayTbCase : sc_module {
   }
 
   // Drive one targeted MAC request and queue its expected C beats
-  void drive_targeted_mac(Set mset, int output_axis_idx, int phase, bool reduce = false) {
+  void drive_targeted_mac(Set mset, int output_axis_idx, int phase,
+                          bool reduce = false) {
     MACRequest request = build_mac_request(mset, phase);
     request.output_axis_idx = output_axis_idx;
     request.reduce = reduce;
@@ -374,11 +411,10 @@ struct CIMArrayTbCase : sc_module {
     settle();
   }
 
-  // Pop one C beat and compare it against the oldest expected beat
-  void pop_and_check() {
+  // Compare one received C beat against the oldest expected beat
+  void check_beat(const CBeat& actual) {
     require(!expected_beats.empty(), "C beat popped with no expected beat");
 
-    const CBeat actual = result_channel.Pop();
     const ExpectedBeat expected = expected_beats.front();
     expected_beats.pop_front();
 
@@ -391,11 +427,17 @@ struct CIMArrayTbCase : sc_module {
         }
 
         std::ostringstream text;
-        text << "unexpected C beat[" << port_tile_idx << "][" << tile_n << "] got "
-             << actual[port_tile_idx][tile_n].to_int() << " expected " << expected_bits.to_int();
+        text << "unexpected C beat[" << port_tile_idx << "][" << tile_n
+             << "] got " << actual[port_tile_idx][tile_n].to_int()
+             << " expected " << expected_bits.to_int();
         require(false, text.str());
       }
     }
+  }
+
+  // Pop one C beat and compare it against the oldest expected beat
+  void pop_and_check() {
+    check_beat(result_channel.Pop());
     settle();
   }
 
@@ -410,7 +452,8 @@ struct CIMArrayTbCase : sc_module {
   Set transaction_wset(int phase) const { return Set(phase % B_SETS); }
 
   // Run one multicast transaction with optional idle and backpressure cycles
-  void run_multicast_transaction(int phase, bool insert_idle_cycles, int c_backpressure_cycles) {
+  void run_multicast_transaction(int phase, bool insert_idle_cycles,
+                                 int c_backpressure_cycles) {
     const Set wset = transaction_wset(phase);
     load_weight_set(wset, phase);
     if (insert_idle_cycles) {
@@ -474,7 +517,8 @@ struct CIMArrayTbCase : sc_module {
     if constexpr (OUTPUT_AXIS_TILES > B_PORT_TILES) {
       const Set wset = transaction_wset(137);
       load_weight_set(wset, 137);
-      for (int tile_wchi = 0; tile_wchi < Dut::TILE_K; tile_wchi += Dut::TILE_BK) {
+      for (int tile_wchi = 0; tile_wchi < Dut::TILE_K;
+           tile_wchi += Dut::TILE_BK) {
         drive_write_direct(wset, 0, 0, tile_wchi, 149);
       }
       tick();
@@ -487,44 +531,95 @@ struct CIMArrayTbCase : sc_module {
   void run_targeted_issue_check() {
     const Set mset = transaction_wset(47);
     load_weight_set(mset, 47);
-    for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES; output_axis_idx++) {
+    for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES;
+         output_axis_idx++) {
       drive_targeted_mac(mset, output_axis_idx, 49 + output_axis_idx);
     }
     drain_expected_beats();
   }
 
-  // Check that one retained result backpressures a second request to the same tile
-  void run_issue_handshake_check() {
+  // Check that ready output removes every queue-induced stall from the native
+  // tile issue interval
+  void run_sustained_issue_check() {
     const Set mset = transaction_wset(53);
     load_weight_set(mset, 53);
 
-    MACRequest first_request = build_mac_request(mset, 59);
-    first_request.output_axis_idx = 0;
-    queue_expected_beats(mset, false, 0, false, 59);
-    mac_request_channel.Push(first_request);
-    settle();
+    constexpr int kOperations = Dut::RESULT_QUEUE_DEPTH * 3 + 2;
+    int accepted = 0;
+    int completed = 0;
+    int cycle = 0;
+    int last_issue_cycle = -Dut::MAC_ISSUE_WINDOW;
 
-    MACRequest second_request = build_mac_request(mset, 61);
-    second_request.output_axis_idx = 0;
-    require(!mac_request_channel.PushNB(second_request), "accepted a second request before releasing tile credit");
+    while (completed < kOperations) {
+      if (accepted < kOperations) {
+        const int phase = 200 + accepted;
+        MACRequest request = build_mac_request(mset, phase);
+        request.output_axis_idx = 0;
+        request.reduce = 1;
+        const bool request_accepted = mac_request_channel.PushNB(request);
+        if (!request_accepted &&
+            cycle - last_issue_cycle >= Dut::MAC_ISSUE_WINDOW) {
+          std::ostringstream text;
+          text << "completion queue extended the native issue window"
+               << " cycle=" << cycle << " accepted=" << accepted
+               << " completed=" << completed
+               << " depth=" << Dut::RESULT_QUEUE_DEPTH;
+          require(false, text.str());
+        }
+        if (request_accepted) {
+          queue_expected_beats(mset, false, 0, true, phase);
+          accepted++;
+          last_issue_cycle = cycle;
+        }
+      }
 
-    constexpr int kTargetedRawBeats = (INPUT_AXIS_TILES + C_PORT_TILES - 1) / C_PORT_TILES;
-    for (int beat = 0; beat < kTargetedRawBeats; beat++) {
-      pop_and_check();
+      CBeat actual;
+      if (result_channel.PopNB(actual)) {
+        check_beat(actual);
+        completed++;
+      }
+      tick();
+      cycle++;
+    }
+    require(expected_beats.empty(),
+            "sustained issue check left expected results undrained");
+  }
+
+  // Check that a full completion queue stops issue and retains every result
+  // through output backpressure
+  void run_completion_queue_backpressure_check() {
+    const Set mset = transaction_wset(59);
+    load_weight_set(mset, 59);
+
+    for (int operation = 0; operation < Dut::RESULT_QUEUE_DEPTH; operation++) {
+      const int phase = 300 + operation;
+      MACRequest request = build_mac_request(mset, phase);
+      request.output_axis_idx = 0;
+      request.reduce = 1;
+      queue_expected_beats(mset, false, 0, true, phase);
+      mac_request_channel.Push(request);
+      settle();
     }
 
-    queue_expected_beats(mset, false, 0, false, 61);
-    mac_request_channel.Push(second_request);
-    for (int beat = 0; beat < kTargetedRawBeats; beat++) {
-      pop_and_check();
-    }
+    MACRequest blocked_request = build_mac_request(mset, 400);
+    blocked_request.output_axis_idx = 0;
+    blocked_request.reduce = 1;
+    require(!mac_request_channel.PushNB(blocked_request),
+            "completion queue accepted a request without a free slot");
+
+    drain_expected_beats();
+
+    queue_expected_beats(mset, false, 0, true, 400);
+    mac_request_channel.Push(blocked_request);
+    pop_and_check();
   }
 
   // Replicate beat tile zero, then verify targeted and multicast requests
   void run_replicate_write_check() {
     const Set mset = transaction_wset(107);
     load_weight_set_replicate(mset, 107);
-    for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES; output_axis_idx++) {
+    for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES;
+         output_axis_idx++) {
       drive_targeted_mac(mset, output_axis_idx, 109 + output_axis_idx);
     }
     drain_expected_beats();
@@ -572,7 +667,8 @@ struct CIMArrayTbCase : sc_module {
     run_set_retention_check();
     run_b_port_span_retention_check();
     run_targeted_issue_check();
-    run_issue_handshake_check();
+    run_sustained_issue_check();
+    run_completion_queue_backpressure_check();
     run_replicate_write_check();
     run_write_during_mac_check();
     run_reset_recovery_check();
@@ -591,37 +687,49 @@ int sc_main(int argc, char** argv) {
   (void)argv;
 
 #ifndef SCVERIFY
-  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, false, 2, 3, 1, 1> dense_unsigned(
-      "dense_unsigned");
+  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 4,
+                 false, 2, 3, 1, 1>
+      dense_unsigned("dense_unsigned");
 
-  CIMArrayTbCase<5, 2, 3, 4, 4, 16, 1, 4, CIM_MODE_BIT_PARALLEL_VALUE, 5, 4, true, 3, 2, 1, 1>
+  CIMArrayTbCase<5, 2, 3, 4, 4, 16, 1, 4, CIM_MODE_BIT_PARALLEL_VALUE, 5, 4,
+                 true, 3, 2, 1, 1>
       tile_input_reduction_signed("tile_input_reduction_signed");
 
-  CIMArrayTbCase<4, 4, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 8, true, 2, 2, 1, 1> wider_b_signed(
-      "wider_b_signed");
+  CIMArrayTbCase<4, 4, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 8,
+                 true, 2, 2, 1, 1>
+      wider_b_signed("wider_b_signed");
 
-  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, true, 2, 2, 1, 2>
+  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 4,
+                 true, 2, 2, 1, 2>
       output_axis_parallel_signed("output_axis_parallel_signed");
 
-  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_SERIAL_VALUE, 4, 4, false, 2, 1, 1, 2>
+  CIMArrayTbCase<4, 2, 2, 8, 8, 20, 2, 1, CIM_MODE_BIT_PARALLEL_VALUE, 8, 8,
+                 true, 2, 2, 1, 2>
+      native_ii1_non_power_queue_signed("native_ii1_non_power_queue_signed");
+
+  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_SERIAL_VALUE, 4, 4,
+                 false, 2, 1, 1, 2>
       output_axis_serial_unsigned("output_axis_serial_unsigned");
 
-  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, true, 2, 2, 2, 2> two_axis_parallel_signed(
-      "two_axis_parallel_signed");
+  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 4,
+                 true, 2, 2, 2, 2>
+      two_axis_parallel_signed("two_axis_parallel_signed");
 
-  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_SERIAL_VALUE, 4, 4, false, 2, 2, 2, 2> two_axis_serial_unsigned(
-      "two_axis_serial_unsigned");
+  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_SERIAL_VALUE, 4, 4,
+                 false, 2, 2, 2, 2>
+      two_axis_serial_unsigned("two_axis_serial_unsigned");
 
-  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, true, 2, 2, 2, 3, 2, 3, 2,
-                 CIM_C_BEAT_OUTPUT_MAJOR>
+  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 4,
+                 true, 2, 2, 2, 3, 2, 3, 2, CIM_C_BEAT_OUTPUT_MAJOR>
       output_major_signed("output_major_signed");
 
-  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, true, 2, 2, 2, 4, 2, 2, 4,
-                 CIM_C_BEAT_OUTPUT_MAJOR>
+  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 4,
+                 true, 2, 2, 2, 4, 2, 2, 4, CIM_C_BEAT_OUTPUT_MAJOR>
       narrow_b_port_signed("narrow_b_port_signed");
 #else
-  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 4, false, 2, 2, 2, 3, 2,
-                 CIM_TEST_B_PORT_TILES, (CIM_TEST_C_BEAT_LAYOUT == CIM_C_BEAT_INPUT_MAJOR) ? 2 : 3,
+  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 4,
+                 false, 2, 2, 2, 3, 2, CIM_TEST_B_PORT_TILES,
+                 (CIM_TEST_C_BEAT_LAYOUT == CIM_C_BEAT_INPUT_MAJOR) ? 2 : 3,
                  CIM_TEST_C_BEAT_LAYOUT>
       cim_array_scverify("cim_array_scverify");
 #endif

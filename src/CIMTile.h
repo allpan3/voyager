@@ -1,4 +1,5 @@
-// CIMTile owns a two-dimensional grid of CIM elements and exposes tile-shaped A/B/C data
+// CIMTile owns a two-dimensional grid of CIM elements and exposes tile-shaped
+// A/B/C data
 
 #pragma once
 
@@ -15,24 +16,30 @@
 //
 // Relative to a bare element the tile adds two registered stages: the A station
 // captures A/mset on an accepted issue and pulses the elements on the following
-// cycle, then the C stage registers the reduction across the input-axis elements
-// INPUT_AXIS_ELEMENTS and OUTPUT_AXIS_ELEMENTS describe the grid dimensions; no
-// Connections protocol is exposed here. The input axis reduces into C while the
-// output axis retains distinct B/C channels
-template <int CH_IN, int CH_OUT, int B_SETS, int BASE_A_WIDTH, int BASE_B_WIDTH, int BASE_C_WIDTH, int WRITE_CH_IN,
-          int MAC_LATENCY, int MODE, int A_WIDTH, int B_WIDTH, bool SIGNED, int INPUT_AXIS_ELEMENTS,
+// cycle, then the C stage registers the reduction across the input-axis
+// elements INPUT_AXIS_ELEMENTS and OUTPUT_AXIS_ELEMENTS describe the grid
+// dimensions; no Connections protocol is exposed here. The input axis reduces
+// into C while the output axis retains distinct B/C channels
+template <int CH_IN, int CH_OUT, int B_SETS, int BASE_A_WIDTH, int BASE_B_WIDTH,
+          int BASE_C_WIDTH, int WRITE_CH_IN, int MAC_LATENCY, int MODE,
+          int A_WIDTH, int B_WIDTH, bool SIGNED, int INPUT_AXIS_ELEMENTS,
           int OUTPUT_AXIS_ELEMENTS>
 SC_MODULE(CIMTile) {
  private:
   // Return the ceil log2 used for static port widths
-  static constexpr int log2_ceil(int value) { return (value <= 1) ? 0 : 1 + log2_ceil((value + 1) / 2); }
+  static constexpr int log2_ceil(int value) {
+    return (value <= 1) ? 0 : 1 + log2_ceil((value + 1) / 2);
+  }
 
-  using Element = CIMElement<CH_IN, CH_OUT, B_SETS, BASE_A_WIDTH, BASE_B_WIDTH, BASE_C_WIDTH, WRITE_CH_IN, MAC_LATENCY,
-                             MODE, A_WIDTH, B_WIDTH, SIGNED>;
+  using Element = CIMElement<CH_IN, CH_OUT, B_SETS, BASE_A_WIDTH, BASE_B_WIDTH,
+                             BASE_C_WIDTH, WRITE_CH_IN, MAC_LATENCY, MODE,
+                             A_WIDTH, B_WIDTH, SIGNED>;
 
  public:
-  static_assert(INPUT_AXIS_ELEMENTS > 0, "INPUT_AXIS_ELEMENTS must be positive");
-  static_assert(OUTPUT_AXIS_ELEMENTS > 0, "OUTPUT_AXIS_ELEMENTS must be positive");
+  static_assert(INPUT_AXIS_ELEMENTS > 0,
+                "INPUT_AXIS_ELEMENTS must be positive");
+  static_assert(OUTPUT_AXIS_ELEMENTS > 0,
+                "OUTPUT_AXIS_ELEMENTS must be positive");
 
   static constexpr int ELEMENT_K = Element::K;
   static constexpr int ELEMENT_N = Element::N;
@@ -46,10 +53,12 @@ SC_MODULE(CIMTile) {
   static constexpr int BITS_K = (K <= 1) ? 1 : log2_ceil(K);
 
   // One B write carries BK contiguous K positions for every N channel
-  // CIMTile converts wchi into the selected input-axis element and its element-local K index
+  // CIMTile converts wchi into the selected input-axis element and its
+  // element-local K index
 
   // Reduction across the input-axis elements widens C by one guard field
-  static constexpr int REDUCTION_GUARD_WIDTH = (INPUT_AXIS_ELEMENTS <= 1) ? 0 : log2_ceil(INPUT_AXIS_ELEMENTS);
+  static constexpr int REDUCTION_GUARD_WIDTH =
+      (INPUT_AXIS_ELEMENTS <= 1) ? 0 : log2_ceil(INPUT_AXIS_ELEMENTS);
   static constexpr int C_WIDTH = ELEMENT_C_WIDTH + REDUCTION_GUARD_WIDTH;
 
   using AValue = ac_int<A_WIDTH, false>;
@@ -70,12 +79,9 @@ SC_MODULE(CIMTile) {
   static constexpr int issue_window() { return Element::issue_window(); }
 
   // Return the number of mclk cycles from an accepted tile issue to retirement
-  static constexpr int operation_latency() { return Element::operation_latency() + 2; }
-
-  // One C register holds the last retired tile result; a later retirement overwrites it if it's not collected
-  // The caller must ensure that no later issue occurs until the result is collected
-  // An imporvement would be to add a small FIFO to hold multiple outstanding results
-  static constexpr int RESULT_CAPACITY = 1;
+  static constexpr int operation_latency() {
+    return Element::operation_latency() + 2;
+  }
 
   sc_in<bool> CCS_INIT_S1(wclk);
   sc_in<bool> CCS_INIT_S1(mclk);
@@ -123,23 +129,33 @@ SC_MODULE(CIMTile) {
   SC_CTOR(CIMTile) {
     window_idle_state.write(true);
 
-    for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_ELEMENTS; input_axis_idx++) {
-      for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_ELEMENTS; output_axis_idx++) {
-        elements[input_axis_idx][output_axis_idx] = new Element(sc_gen_unique_name("element"));
+    for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_ELEMENTS;
+         input_axis_idx++) {
+      for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_ELEMENTS;
+           output_axis_idx++) {
+        elements[input_axis_idx][output_axis_idx] =
+            new Element(sc_gen_unique_name("element"));
 
         elements[input_axis_idx][output_axis_idx]->wclk(wclk);
         elements[input_axis_idx][output_axis_idx]->mclk(mclk);
         elements[input_axis_idx][output_axis_idx]->rstn(rstn);
-        elements[input_axis_idx][output_axis_idx]->wen(element_write[input_axis_idx]);
-        elements[input_axis_idx][output_axis_idx]->wchi(element_wchi[input_axis_idx]);
-        elements[input_axis_idx][output_axis_idx]->wset(element_wset[input_axis_idx]);
-        elements[input_axis_idx][output_axis_idx]->b(element_b[input_axis_idx][output_axis_idx]);
+        elements[input_axis_idx][output_axis_idx]->wen(
+            element_write[input_axis_idx]);
+        elements[input_axis_idx][output_axis_idx]->wchi(
+            element_wchi[input_axis_idx]);
+        elements[input_axis_idx][output_axis_idx]->wset(
+            element_wset[input_axis_idx]);
+        elements[input_axis_idx][output_axis_idx]->b(
+            element_b[input_axis_idx][output_axis_idx]);
         elements[input_axis_idx][output_axis_idx]->a(station_a[input_axis_idx]);
         elements[input_axis_idx][output_axis_idx]->mset(station_mset);
         elements[input_axis_idx][output_axis_idx]->mac_issue(element_mac_issue);
-        elements[input_axis_idx][output_axis_idx]->mac_ready(element_mac_ready[input_axis_idx][output_axis_idx]);
-        elements[input_axis_idx][output_axis_idx]->c(element_c[input_axis_idx][output_axis_idx]);
-        elements[input_axis_idx][output_axis_idx]->c_retire(element_c_retire[input_axis_idx][output_axis_idx]);
+        elements[input_axis_idx][output_axis_idx]->mac_ready(
+            element_mac_ready[input_axis_idx][output_axis_idx]);
+        elements[input_axis_idx][output_axis_idx]->c(
+            element_c[input_axis_idx][output_axis_idx]);
+        elements[input_axis_idx][output_axis_idx]->c_retire(
+            element_c_retire[input_axis_idx][output_axis_idx]);
       }
     }
 
@@ -162,7 +178,8 @@ SC_MODULE(CIMTile) {
   }
 
  private:
-  // Decode tile-local wchi to determine the selected input-axis element and its element-local input channel index
+  // Decode tile-local wchi to determine the selected input-axis element and its
+  // element-local input channel index
   void drive_write() {
     const bool reset_released = rstn.read();
     const bool write_enabled = reset_released && write.read();
@@ -187,12 +204,16 @@ SC_MODULE(CIMTile) {
 #endif
 
 #pragma hls_unroll yes
-    for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_ELEMENTS; input_axis_idx++) {
+    for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_ELEMENTS;
+         input_axis_idx++) {
       const int element_k_base = input_axis_idx * ELEMENT_K;
-      const bool element_selected = base_k >= element_k_base && base_k < element_k_base + ELEMENT_K;
+      const bool element_selected =
+          base_k >= element_k_base && base_k < element_k_base + ELEMENT_K;
       const int element_local_k = base_k - element_k_base;
-      const bool write_fits = element_local_k >= 0 && element_local_k + ELEMENT_BK <= ELEMENT_K;
-      element_write[input_axis_idx].write(write_enabled && element_selected && write_fits);
+      const bool write_fits =
+          element_local_k >= 0 && element_local_k + ELEMENT_BK <= ELEMENT_K;
+      element_write[input_axis_idx].write(write_enabled && element_selected &&
+                                          write_fits);
       element_wchi[input_axis_idx].write(write_fits ? element_local_k : 0);
       element_wset[input_axis_idx].write(selected_wset);
 
@@ -200,18 +221,21 @@ SC_MODULE(CIMTile) {
       if (write_enabled && element_selected && !write_fits) {
         std::ostringstream message;
         message << "write at wchi " << base_k << " crosses an element boundary";
-        SC_REPORT_ERROR("CIMTile wchi protocol violation", message.str().c_str());
+        SC_REPORT_ERROR("CIMTile wchi protocol violation",
+                        message.str().c_str());
       }
 #endif
 
 #pragma hls_unroll yes
-      for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_ELEMENTS; output_axis_idx++) {
+      for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_ELEMENTS;
+           output_axis_idx++) {
         ElementBData element_data = zero_b;
 #pragma hls_unroll yes
         for (int element_bk = 0; element_bk < ELEMENT_BK; element_bk++) {
 #pragma hls_unroll yes
           for (int element_n = 0; element_n < ELEMENT_N; element_n++) {
-            element_data[element_bk][element_n] = tile_b[element_bk][output_axis_idx * ELEMENT_N + element_n];
+            element_data[element_bk][element_n] =
+                tile_b[element_bk][output_axis_idx * ELEMENT_N + element_n];
           }
         }
         element_b[input_axis_idx][output_axis_idx].write(element_data);
@@ -227,7 +251,8 @@ SC_MODULE(CIMTile) {
       tile_a = a.read();
     }
 #pragma hls_unroll yes
-    for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_ELEMENTS; input_axis_idx++) {
+    for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_ELEMENTS;
+         input_axis_idx++) {
       ElementAData element_a;
 #pragma hls_unroll yes
       for (int element_k = 0; element_k < ELEMENT_K; element_k++) {
@@ -238,7 +263,8 @@ SC_MODULE(CIMTile) {
   }
 
   // Capture one tile A payload and issue it to every element on the next cycle
-  // Clocked sc_signal writes become visible after the edge, so this station is a pipeline register
+  // Clocked sc_signal writes become visible after the edge, so this station is
+  // a pipeline register
   void run_issue() {
     int window_remaining = 0;
     ElementAData zero_a;
@@ -247,7 +273,8 @@ SC_MODULE(CIMTile) {
     element_mac_issue.write(false);
     station_mset.write(0);
 #pragma hls_unroll yes
-    for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_ELEMENTS; input_axis_idx++) {
+    for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_ELEMENTS;
+         input_axis_idx++) {
       station_a[input_axis_idx].write(zero_a);
     }
     window_idle_state.write(true);
@@ -262,7 +289,8 @@ SC_MODULE(CIMTile) {
 
       if (mac_issue.read() && ready_now) {
 #pragma hls_unroll yes
-        for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_ELEMENTS; input_axis_idx++) {
+        for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_ELEMENTS;
+             input_axis_idx++) {
           station_a[input_axis_idx].write(element_a_bus[input_axis_idx].read());
         }
         station_mset.write(mset.read());
@@ -277,7 +305,8 @@ SC_MODULE(CIMTile) {
     }
   }
 
-  // Extend one element C value to the tile accumulator width while preserving signedness
+  // Extend one element C value to the tile accumulator width while preserving
+  // signedness
   static CValue widen_element_c(ElementCValue value) {
     CValue widened = 0;
     if constexpr (SIGNED) {
@@ -292,20 +321,29 @@ SC_MODULE(CIMTile) {
   }
 
 #ifndef __SYNTHESIS__
-  // Verify that every element stays synchronized with representative element [0][0]
+  // Verify that every element stays synchronized with representative element
+  // [0][0]
   void check_element_lockstep(bool representative_retire) const {
     const bool reference_ready = element_mac_ready[0][0].read();
-    for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_ELEMENTS; input_axis_idx++) {
-      for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_ELEMENTS; output_axis_idx++) {
-        if (element_mac_ready[input_axis_idx][output_axis_idx].read() != reference_ready) {
+    for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_ELEMENTS;
+         input_axis_idx++) {
+      for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_ELEMENTS;
+           output_axis_idx++) {
+        if (element_mac_ready[input_axis_idx][output_axis_idx].read() !=
+            reference_ready) {
           std::ostringstream message;
-          message << "element [" << input_axis_idx << "][" << output_axis_idx << "] mac_ready diverged from [0][0]";
-          SC_REPORT_ERROR("CIMTile element-ready lockstep violation", message.str().c_str());
+          message << "element [" << input_axis_idx << "][" << output_axis_idx
+                  << "] mac_ready diverged from [0][0]";
+          SC_REPORT_ERROR("CIMTile element-ready lockstep violation",
+                          message.str().c_str());
         }
-        if (element_c_retire[input_axis_idx][output_axis_idx].read() != representative_retire) {
+        if (element_c_retire[input_axis_idx][output_axis_idx].read() !=
+            representative_retire) {
           std::ostringstream message;
-          message << "element [" << input_axis_idx << "][" << output_axis_idx << "] c_retire diverged from [0][0]";
-          SC_REPORT_ERROR("CIMTile element-retire lockstep violation", message.str().c_str());
+          message << "element [" << input_axis_idx << "][" << output_axis_idx
+                  << "] c_retire diverged from [0][0]";
+          SC_REPORT_ERROR("CIMTile element-retire lockstep violation",
+                          message.str().c_str());
         }
       }
     }
@@ -331,15 +369,19 @@ SC_MODULE(CIMTile) {
 
       if (representative_retire != seen_retire) {
         CData tile_c;
-        // Keep the reduction inline so Catapult can statically enumerate every element_c signal
+        // Keep the reduction inline so Catapult can statically enumerate every
+        // element_c signal
 #pragma hls_unroll yes
-        for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_ELEMENTS; output_axis_idx++) {
+        for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_ELEMENTS;
+             output_axis_idx++) {
 #pragma hls_unroll yes
           for (int element_n = 0; element_n < ELEMENT_N; element_n++) {
             CValue sum = 0;
 #pragma hls_unroll yes
-            for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_ELEMENTS; input_axis_idx++) {
-              sum += widen_element_c(element_c[input_axis_idx][output_axis_idx].read()[element_n]);
+            for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_ELEMENTS;
+                 input_axis_idx++) {
+              sum += widen_element_c(
+                  element_c[input_axis_idx][output_axis_idx].read()[element_n]);
             }
             tile_c[output_axis_idx * ELEMENT_N + element_n] = sum;
           }
@@ -355,5 +397,7 @@ SC_MODULE(CIMTile) {
   }
 
   // Drive ready when the tile A station can accept an operation
-  void drive_mac_ready() { mac_ready.write(rstn.read() && window_idle_state.read()); }
+  void drive_mac_ready() {
+    mac_ready.write(rstn.read() && window_idle_state.read());
+  }
 };
