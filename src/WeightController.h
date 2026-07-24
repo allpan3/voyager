@@ -817,12 +817,27 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
     while (true) {
       const MatrixParams params = transposer_params.Pop();
 
-      if (params.weight_transpose) {
+      // Same bound the systolic transposer uses. The compiler stops fusing the
+      // transpose reshape into the matrix op once hardware unrolling reaches 64
+      // and emits a standalone transpose node instead, so weight_transpose is
+      // never set at that size. Spelling the bound out as a compile-time
+      // constant lets Catapult delete the rows x cols corner-turn buffer, which
+      // would otherwise cost rows*cols registers -- 32k flops at 64x64.
+#ifndef __SYNTHESIS__
+      if (params.weight_transpose && !(rows < 64 && cols < 64)) {
+        // The coupling to the compiler is invisible in RTL; fail loudly here
+        // rather than silently feed the array untransposed weights
+        SC_REPORT_FATAL("WeightController",
+                        "weight transpose is unsupported at this array size");
+      }
+#endif
+
+      if (params.weight_transpose && rows < 64 && cols < 64) {
         // Each source row becomes one column of the resident weight tile
         ac_int<DATA_WIDTH, false> transpose_buffer[rows][cols];
 
-#pragma hls_pipeline_init_interval 1
-#pragma hls_pipeline_stall_mode flush
+        // Keep the blocking gather and emit phases in one sequential tile
+        // transaction
         while (!fetcher_done_2.read()) {
           for (int source_col = 0; source_col < cols; source_col++) {
             if (source_col != 0) {
@@ -852,14 +867,18 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
             }
 #endif
 
+#pragma hls_unroll yes
             for (int row = 0; row < rows; row++) {
               transpose_buffer[row][source_col] =
                   source_values.template slc<DATA_WIDTH>(row * DATA_WIDTH);
             }
           }
 
+#pragma hls_pipeline_init_interval 1
+#pragma hls_pipeline_stall_mode flush
           for (int row = 0; row < rows; row++) {
-            ac_int<buffer_width, false> transposed = 0;
+            ac_int<buffer_width, false> transposed;
+#pragma hls_unroll yes
             for (int col = 0; col < cols; col++) {
               transposed.set_slc(col * DATA_WIDTH, transpose_buffer[row][col]);
             }

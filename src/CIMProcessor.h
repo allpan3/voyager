@@ -374,6 +374,8 @@ SC_MODULE(CIMProcessor) {
         set_consumed_deq[bank].Pop();
       }
 
+#pragma hls_pipeline_init_interval 1
+#pragma hls_pipeline_stall_mode flush
       for (int k = 0; k < K; k++) {
         for (int span = 0; span < WEIGHT_BEATS_PER_ROW; span++) {
           const ac_int<WEIGHT_WRITE_WIDTH, false> beat = weight_channel.Pop();
