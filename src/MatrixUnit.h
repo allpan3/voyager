@@ -15,6 +15,7 @@
 #include "InputScaleController.h"
 #include "OutputController.h"
 #include "ParamsDeserializer.h"
+#include "PerfMonitor.h"
 #include "WeightController.h"
 #include "WeightScaleController.h"
 #include "mc_scverify.h"
@@ -177,6 +178,11 @@ SC_MODULE(MatrixUnit) {
   Connections::SyncOut CCS_INIT_S1(start);
   Connections::SyncOut CCS_INIT_S1(done);
 
+#if ENABLE_PERF_COUNTERS
+  sc_in<MatrixPerformance::CounterIndex> CCS_INIT_S1(perf_counter_select);
+  sc_out<MatrixPerformance::Counter> CCS_INIT_S1(perf_counter_value);
+#endif
+
   SC_CTOR(MatrixUnit) {
     params_deserializer.clk(clk);
     params_deserializer.rstn(rstn);
@@ -273,6 +279,10 @@ SC_MODULE(MatrixUnit) {
     matrix_processor.bias_channel(bias_data);
     matrix_processor.params_in(matrix_params[2]);
     matrix_processor.start(start);
+#if ENABLE_PERF_COUNTERS
+    matrix_processor.perf_counter_select(perf_counter_select);
+    matrix_processor.perf_counter_value(perf_counter_value);
+#endif
 
     for (int i = 0; i < ACCUM_BUFFER_BANKS; i++) {
       matrix_processor.accumulation_buffer_read_address[i](

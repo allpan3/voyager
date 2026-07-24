@@ -6,6 +6,7 @@
 #include <cassert>
 
 #include "AccelTypes.h"
+#include "PerfMonitor.h"
 #include "sysc/kernel/sc_time.h"
 
 #ifndef CFLOAT
@@ -37,6 +38,10 @@ Harness::Harness(sc_module_name name, std::vector<Operation> operations,
   accelerator.matrix_unit_output_addr(matrix_unit_output_addr);
   accelerator.matrix_unit_start(matrix_unit_start);
   accelerator.matrix_unit_done(matrix_unit_done);
+#if ENABLE_PERF_COUNTERS
+  accelerator.matrix_perf_counter_select(matrix_perf_counter_select);
+  accelerator.matrix_perf_counter_value(matrix_perf_counter_value);
+#endif
 #if SUPPORT_MVM
   accelerator.matrix_vector_unit_params_in(matrix_vector_unit_params_in);
   accelerator.matrix_vector_unit_input_req(matrix_vector_unit_input_req);
@@ -495,6 +500,9 @@ void Harness::record_done(const std::deque<BaseParams*>& params,
                           const Operation& operation, bool is_last) {
   int idx = 0;
   while (idx < params.size()) {
+#if ENABLE_PERF_COUNTERS && defined(SIM_Accelerator)
+    bool matrix_unit_completed = false;
+#endif
     if (auto* matrix_params = get_param<MatrixParams>(params, idx)) {
 #if SUPPORT_MVM
       if (matrix_params->is_fc) {
@@ -505,12 +513,18 @@ void Harness::record_done(const std::deque<BaseParams*>& params,
           if (matrix_params->is_spmm) {
         if (auto* dense_params = get_param<MatrixParams>(params, idx)) {
           matrix_unit_done.SyncPop();
+#if ENABLE_PERF_COUNTERS && defined(SIM_Accelerator)
+          matrix_unit_completed = true;
+#endif
         }
         spmm_unit_done.SyncPop();
       } else
 #endif
       {
         matrix_unit_done.SyncPop();
+#if ENABLE_PERF_COUNTERS && defined(SIM_Accelerator)
+        matrix_unit_completed = true;
+#endif
       }
     } else if (auto* dwc_params = get_param<DwCParams>(params, idx)) {
 #if SUPPORT_DWC
@@ -526,6 +540,10 @@ void Harness::record_done(const std::deque<BaseParams*>& params,
     sc_time end = sc_time_stamp();
     CCS_LOG("----- Accelerator Layer '" << operation.name
                                         << "' Finished. -----");
+
+#if ENABLE_PERF_COUNTERS && defined(SIM_Accelerator)
+    if (matrix_unit_completed) print_matrix_performance();
+#endif
 
     sc_time start = start_times.front();
     start_times.pop_front();
@@ -548,6 +566,39 @@ void Harness::record_done(const std::deque<BaseParams*>& params,
     }
   }
 }
+
+#if ENABLE_PERF_COUNTERS && defined(SIM_Accelerator)
+// Print the stable hardware snapshot through the same indexed port exposed by
+// RTL
+void Harness::print_matrix_performance() {
+  static const char* names[MatrixPerformance::COUNTER_COUNT] = {
+      "schema_version",
+      "snapshot_sequence",
+      "core_cycles",
+      "array_resident_cycles",
+      "array_issue_cycles",
+      "input_unavailable_cycles",
+      "input_backpressure_cycles",
+      "weight_unavailable_cycles",
+      "weight_backpressure_cycles",
+      "result_backpressure_cycles",
+      "accumulation_stall_cycles",
+      "output_backpressure_cycles",
+      "output_fifo_full_cycles",
+  };
+
+  std::cout << "MatrixPerfHardware:";
+  for (int i = 0; i < MatrixPerformance::COUNTER_COUNT; i++) {
+    matrix_perf_counter_select.write(i);
+    // Delta cycles are not enough in RTL cosim: the select must cross the
+    // transactor boundary on real clock edges before the value is stable
+    wait(clk.period());
+    wait(clk.period());
+    std::cout << " " << names[i] << "=" << matrix_perf_counter_value.read();
+  }
+  std::cout << std::endl;
+}
+#endif
 
 void Harness::param_sender() {
   matrix_unit_params_in.ResetWrite();

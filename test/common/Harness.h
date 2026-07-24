@@ -9,6 +9,7 @@
 
 #include "AccelTypes.h"
 #include "ArchitectureParams.h"
+#include "PerfMonitor.h"
 #include "test/common/AccessCounter.h"
 #include "test/common/DataLoader.h"
 #include "test/common/Network.h"
@@ -63,6 +64,12 @@ SC_MODULE(Harness) {
 
   Connections::SyncChannel CCS_INIT_S1(matrix_unit_start);
   Connections::SyncChannel CCS_INIT_S1(matrix_unit_done);
+
+#if ENABLE_PERF_COUNTERS
+  sc_signal<MatrixPerformance::CounterIndex> CCS_INIT_S1(
+      matrix_perf_counter_select);
+  sc_signal<MatrixPerformance::Counter> CCS_INIT_S1(matrix_perf_counter_value);
+#endif
 
   //----------------------------------------------------------
   // MATRIX VECTOR UNIT CONNECTIONS
@@ -361,5 +368,8 @@ SC_MODULE(Harness) {
                     const Operation& operation, bool is_first);
   void record_done(const std::deque<BaseParams*>& params,
                    const Operation& operation, bool is_last);
+#if ENABLE_PERF_COUNTERS && defined(SIM_Accelerator)
+  void print_matrix_performance();
+#endif
 };
 #endif

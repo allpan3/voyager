@@ -5,6 +5,7 @@
 
 #include "ArchitectureParams.h"
 #include "ParamsDeserializer.h"
+#include "PerfMonitor.h"
 #include "Skewer.h"
 #include "SystolicArray.h"
 #include "Utils.h"
@@ -53,6 +54,13 @@ struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
   Connections::Combinational<Pack1D<Buffer, cols>> CCS_INIT_S1(
       accum_output_enq);
 
+#if ENABLE_PERF_COUNTERS
+  sc_signal<bool> perf_completion_toggle;
+  sc_signal<MatrixPerformance::SnapshotSequence> perf_snapshot_sequence;
+  sc_signal<MatrixPerformance::Counter>
+      perf_snapshot[MatrixPerformance::PERFORMANCE_COUNTER_COUNT];
+#endif
+
  public:
   sc_in<bool> CCS_INIT_S1(clk);
   sc_in<bool> CCS_INIT_S1(rstn);
@@ -99,6 +107,11 @@ struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
 #endif
 
   Connections::SyncOut CCS_INIT_S1(start);
+
+#if ENABLE_PERF_COUNTERS
+  sc_in<MatrixPerformance::CounterIndex> CCS_INIT_S1(perf_counter_select);
+  sc_out<MatrixPerformance::Counter> CCS_INIT_S1(perf_counter_value);
+#endif
 
   SC_CTOR(MatrixProcessor) {
     input_skewer.clk(clk);
@@ -169,6 +182,19 @@ struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
     SC_THREAD(write_back);
     sensitive << clk.pos();
     async_reset_signal_is(rstn, false);
+
+#if ENABLE_PERF_COUNTERS
+    SC_THREAD(monitor_performance);
+    sensitive << clk.pos();
+    async_reset_signal_is(rstn, false);
+
+    SC_METHOD(read_performance_counter);
+    sensitive << perf_counter_select;
+    sensitive << perf_snapshot_sequence;
+    for (int i = 0; i < MatrixPerformance::PERFORMANCE_COUNTER_COUNT; i++) {
+      sensitive << perf_snapshot[i];
+    }
+#endif
   }
 
   void push_weights() {
@@ -646,6 +672,10 @@ struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
 #endif
     accum_output_enq.ResetWrite();
 
+#if ENABLE_PERF_COUNTERS
+    perf_completion_toggle.write(false);
+#endif
+
     bool accumulation_buffer_bank = 0;
 
     wait();
@@ -756,6 +786,150 @@ struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
           }
         }
       }
+#if ENABLE_PERF_COUNTERS
+      perf_completion_toggle.write(!perf_completion_toggle.read());
+#endif
     }
   }
+
+#if ENABLE_PERF_COUNTERS
+  // Count synthesized handshakes and stalls without participating in datapath
+  // control
+  void monitor_performance() {
+    MatrixPerformance::Counter
+        counters[MatrixPerformance::PERFORMANCE_COUNTER_COUNT];
+    ac_int<16, false> inflight = 0;
+    MatrixPerformance::SnapshotSequence snapshot_sequence = 0;
+    bool active = false;
+    bool observed_completion_toggle = false;
+
+#pragma hls_unroll yes
+    for (int i = 0; i < MatrixPerformance::PERFORMANCE_COUNTER_COUNT; i++) {
+      counters[i] = 0;
+      perf_snapshot[i].write(0);
+    }
+    perf_snapshot_sequence.write(0);
+
+    wait();
+
+#pragma hls_pipeline_init_interval 1
+#pragma hls_pipeline_stall_mode flush
+    while (true) {
+      const bool completion_toggle = perf_completion_toggle.read();
+      const bool completed = completion_toggle != observed_completion_toggle;
+      const bool started = params_in.vld.read() && params_in.rdy.read();
+#ifdef __SYNTHESIS__
+      const bool issue =
+          input_skewer_din.vld.read() && input_skewer_din.rdy.read();
+      const bool retire =
+          psum_out_skewer_dout.vld.read() && psum_out_skewer_dout.rdy.read();
+#else
+      const bool issue = false;
+      const bool retire = false;
+#endif
+
+      if (completed) {
+        snapshot_sequence++;
+        perf_snapshot_sequence.write(snapshot_sequence);
+#pragma hls_unroll yes
+        for (int i = 0; i < MatrixPerformance::PERFORMANCE_COUNTER_COUNT; i++) {
+          perf_snapshot[i].write(counters[i]);
+        }
+        active = false;
+        observed_completion_toggle = completion_toggle;
+      }
+
+      if (started) {
+#pragma hls_unroll yes
+        for (int i = 0; i < MatrixPerformance::PERFORMANCE_COUNTER_COUNT; i++) {
+          counters[i] = 0;
+        }
+        inflight = 0;
+        active = true;
+      } else if (active && !completed) {
+        counters[MatrixPerformance::storage_index(
+            MatrixPerformance::CORE_CYCLES)]++;
+
+        if (inflight != 0 || issue)
+          counters[MatrixPerformance::storage_index(
+              MatrixPerformance::ARRAY_RESIDENT_CYCLES)]++;
+        if (issue)
+          counters[MatrixPerformance::storage_index(
+              MatrixPerformance::ARRAY_ISSUE_CYCLES)]++;
+
+        if (input_channel.rdy.read() && !input_channel.vld.read())
+          counters[MatrixPerformance::storage_index(
+              MatrixPerformance::INPUT_UNAVAILABLE_CYCLES)]++;
+#ifdef __SYNTHESIS__
+        if (input_skewer_din.vld.read() && !input_skewer_din.rdy.read())
+          counters[MatrixPerformance::storage_index(
+              MatrixPerformance::INPUT_BACKPRESSURE_CYCLES)]++;
+#endif
+        if (weight_channel.rdy.read() && !weight_channel.vld.read())
+          counters[MatrixPerformance::storage_index(
+              MatrixPerformance::WEIGHT_UNAVAILABLE_CYCLES)]++;
+#ifdef __SYNTHESIS__
+        if (weight_skewer_din.vld.read() && !weight_skewer_din.rdy.read())
+          counters[MatrixPerformance::storage_index(
+              MatrixPerformance::WEIGHT_BACKPRESSURE_CYCLES)]++;
+        if (psum_out_skewer_dout.vld.read() && !psum_out_skewer_dout.rdy.read())
+          counters[MatrixPerformance::storage_index(
+              MatrixPerformance::RESULT_BACKPRESSURE_CYCLES)]++;
+#endif
+
+        bool accumulation_stalled = false;
+#pragma hls_unroll yes
+        for (int i = 0; i < ACCUM_BUFFER_BANKS; i++) {
+          accumulation_stalled |=
+              accumulation_buffer_read_address[i].vld.read() &&
+              !accumulation_buffer_read_address[i].rdy.read();
+          accumulation_stalled |= accumulation_buffer_read_data[i].rdy.read() &&
+                                  !accumulation_buffer_read_data[i].vld.read();
+          accumulation_stalled |=
+              accumulation_buffer_write_request[i].vld.read() &&
+              !accumulation_buffer_write_request[i].rdy.read();
+        }
+
+#ifdef __SYNTHESIS__
+        if (accum_to_wb_enq.vld.read() && !accum_to_wb_enq.rdy.read())
+          accumulation_stalled = true;
+#endif
+        if (accumulation_stalled)
+          counters[MatrixPerformance::storage_index(
+              MatrixPerformance::ACCUMULATION_STALL_CYCLES)]++;
+#ifdef __SYNTHESIS__
+        if (accum_output_enq.vld.read() && !accum_output_enq.rdy.read())
+          counters[MatrixPerformance::storage_index(
+              MatrixPerformance::OUTPUT_FIFO_FULL_CYCLES)]++;
+#endif
+        if (output_channel.vld.read() && !output_channel.rdy.read())
+          counters[MatrixPerformance::storage_index(
+              MatrixPerformance::OUTPUT_BACKPRESSURE_CYCLES)]++;
+
+        if (issue && !retire) {
+          inflight++;
+        } else if (retire && !issue && inflight != 0) {
+          inflight--;
+        }
+      }
+
+      wait();
+    }
+  }
+
+  // Select one stable snapshot register for the external CSR-style read port
+  void read_performance_counter() {
+    MatrixPerformance::Counter value = 0;
+    if (perf_counter_select.read() == MatrixPerformance::SCHEMA_VERSION)
+      value = MatrixPerformance::SCHEMA_VERSION_VALUE;
+    if (perf_counter_select.read() == MatrixPerformance::SNAPSHOT_SEQUENCE)
+      value = perf_snapshot_sequence.read();
+#pragma hls_unroll yes
+    for (int i = 0; i < MatrixPerformance::PERFORMANCE_COUNTER_COUNT; i++) {
+      if (perf_counter_select.read() == MatrixPerformance::CORE_CYCLES + i)
+        value = perf_snapshot[i].read();
+    }
+    perf_counter_value.write(value);
+  }
+#endif
 };
