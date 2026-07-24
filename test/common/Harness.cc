@@ -4,6 +4,7 @@
 #include <systemc.h>
 
 #include <cassert>
+#include <sstream>
 
 #include "AccelTypes.h"
 #include "PerfMonitor.h"
@@ -184,6 +185,9 @@ Harness::Harness(sc_module_name name, std::vector<Operation> operations,
   REGISTER_FN(param_sender)
   REGISTER_FN(start_monitor)
   REGISTER_FN(done_monitor)
+#if ENABLE_PERF_COUNTERS && defined(SIM_Accelerator)
+  REGISTER_FN(matrix_performance_monitor)
+#endif
 
   access_counter = new AccessCounter();
 // do not set access counters for an RTL simulation
@@ -542,7 +546,10 @@ void Harness::record_done(const std::deque<BaseParams*>& params,
                                         << "' Finished. -----");
 
 #if ENABLE_PERF_COUNTERS && defined(SIM_Accelerator)
-    if (matrix_unit_completed) print_matrix_performance();
+    if (matrix_unit_completed) {
+      matrix_perf_snapshot_requests++;
+      matrix_perf_snapshot_event.notify(SC_ZERO_TIME);
+    }
 #endif
 
     sc_time start = start_times.front();
@@ -568,8 +575,22 @@ void Harness::record_done(const std::deque<BaseParams*>& params,
 }
 
 #if ENABLE_PERF_COUNTERS && defined(SIM_Accelerator)
-// Print the stable hardware snapshot through the same indexed port exposed by
-// RTL
+// Read completed matrix snapshots without delaying operation sequencing
+void Harness::matrix_performance_monitor() {
+  wait();
+
+  while (true) {
+    wait(matrix_perf_snapshot_event);
+
+    while (matrix_perf_snapshot_reads < matrix_perf_snapshot_requests) {
+      print_matrix_performance();
+      matrix_perf_snapshot_reads++;
+      matrix_perf_snapshot_read_event.notify(SC_ZERO_TIME);
+    }
+  }
+}
+
+// Print one coherent hardware snapshot through the indexed RTL read port
 void Harness::print_matrix_performance() {
   static const char* names[MatrixPerformance::COUNTER_COUNT] = {
       "schema_version",
@@ -587,16 +608,29 @@ void Harness::print_matrix_performance() {
       "output_fifo_full_cycles",
   };
 
-  std::cout << "MatrixPerfHardware:";
-  for (int i = 0; i < MatrixPerformance::COUNTER_COUNT; i++) {
-    matrix_perf_counter_select.write(i);
-    // Delta cycles are not enough in RTL cosim: the select must cross the
-    // transactor boundary on real clock edges before the value is stable
+  MatrixPerformance::Counter values[MatrixPerformance::COUNTER_COUNT];
+  while (true) {
+    for (int i = 0; i < MatrixPerformance::COUNTER_COUNT; i++) {
+      matrix_perf_counter_select.write(i);
+      // The select and response each cross an RTL transactor boundary
+      wait(clk.period());
+      wait(clk.period());
+      values[i] = matrix_perf_counter_value.read();
+    }
+
+    matrix_perf_counter_select.write(MatrixPerformance::SNAPSHOT_SEQUENCE);
     wait(clk.period());
     wait(clk.period());
-    std::cout << " " << names[i] << "=" << matrix_perf_counter_value.read();
+    if (values[MatrixPerformance::SNAPSHOT_SEQUENCE] ==
+        matrix_perf_counter_value.read())
+      break;
   }
-  std::cout << std::endl;
+
+  std::ostringstream line;
+  line << "MatrixPerfHardware:";
+  for (int i = 0; i < MatrixPerformance::COUNTER_COUNT; i++)
+    line << " " << names[i] << "=" << values[i];
+  std::cout << line.str() << std::endl;
 }
 #endif
 
@@ -772,6 +806,11 @@ void Harness::done_monitor() {
       record_done(accelerator_params, operation, true);
     }
   }
+
+#if ENABLE_PERF_COUNTERS && defined(SIM_Accelerator)
+  while (matrix_perf_snapshot_reads < matrix_perf_snapshot_requests)
+    wait(matrix_perf_snapshot_read_event);
+#endif
 
   sc_stop();
 }

@@ -900,6 +900,11 @@ def main():
         help="(Internal use) Name of scverify test to run",
     )
     parser.add_argument(
+        "--results_folder",
+        default=None,
+        help="Write results to this new directory without updating regression_results/latest",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Whether to dump RTL simulation waveform",
@@ -908,13 +913,17 @@ def main():
 
     args.models = [s.strip() for s in args.models.split(",")]
 
-    # Create directory with current time
-    current_time = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
-    results_folder = "regression_results/" + current_time
-    os.makedirs(results_folder)
-    # create softlink to latest results (delete old if exists)
-    os.system("rm -f regression_results/latest")
-    os.system(f"cd regression_results && ln -sf {current_time} latest")
+    if args.results_folder:
+        results_folder = os.path.abspath(args.results_folder)
+        os.makedirs(results_folder)
+    else:
+        # Create directory with current time
+        current_time = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+        results_folder = "regression_results/" + current_time
+        os.makedirs(results_folder)
+        # create softlink to latest results (delete old if exists)
+        os.system("rm -f regression_results/latest")
+        os.system(f"cd regression_results && ln -sf {current_time} latest")
 
     layers = {}
     layer_counts = {}

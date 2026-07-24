@@ -167,8 +167,9 @@ CIM_BUILD_SIGNATURE = ci$(CIM_CH_IN)_co$(CIM_CH_OUT)_bs$(CIM_B_SETS)_base$(CIM_B
 # Overridden external port widths change the generated params, so they must not
 # share a build directory with the derived-width default
 PORT_BUILD_SIGNATURE = $(if $(IC_PORT_WIDTH)$(OC_PORT_WIDTH),_icp$(if $(IC_PORT_WIDTH),$(IC_PORT_WIDTH),auto)_ocp$(if $(OC_PORT_WIDTH),$(OC_PORT_WIDTH),auto))
-CIM_BACKEND_SIGNATURE = $(if $(filter 1,$(MATRIX_BACKEND)),_cim_$(CIM_BUILD_SIGNATURE))
-BUILD_DIR ?= build/$(DATATYPE)_$(IC_DIMENSION)x$(OC_DIMENSION)_$(INPUT_BUFFER_SIZE)x$(WEIGHT_BUFFER_SIZE)x$(ACCUM_BUFFER_SIZE)_$(DOUBLE_BUFFERED_ACCUM_BUFFER)_$(SUPPORT_MVM)_$(SUPPORT_SPMM)$(CIM_BACKEND_SIGNATURE)$(PORT_BUILD_SIGNATURE)
+# Keep the backend explicit so new builds cannot reuse legacy unsuffixed caches
+BACKEND_BUILD_SIGNATURE = $(if $(filter 1,$(MATRIX_BACKEND)),_cim_$(CIM_BUILD_SIGNATURE),_sa)
+BUILD_DIR ?= build/$(DATATYPE)_$(IC_DIMENSION)x$(OC_DIMENSION)_$(INPUT_BUFFER_SIZE)x$(WEIGHT_BUFFER_SIZE)x$(ACCUM_BUFFER_SIZE)_$(DOUBLE_BUFFERED_ACCUM_BUFFER)_$(SUPPORT_MVM)_$(SUPPORT_SPMM)$(BACKEND_BUILD_SIGNATURE)$(PORT_BUILD_SIGNATURE)
 CC_BUILD_DIR = $(BUILD_DIR)/cc
 
 # Report the effective build directory so external tools stay consistent with

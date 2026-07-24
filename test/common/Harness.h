@@ -256,6 +256,12 @@ SC_MODULE(Harness) {
 
   std::deque<sc_time> start_times;
   std::deque<sc_time> operation_start_times;
+#if ENABLE_PERF_COUNTERS && defined(SIM_Accelerator)
+  sc_event matrix_perf_snapshot_event;
+  sc_event matrix_perf_snapshot_read_event;
+  unsigned matrix_perf_snapshot_requests = 0;
+  unsigned matrix_perf_snapshot_reads = 0;
+#endif
 
   Harness(sc_module_name, std::vector<Operation>, DataLoader*);
   SC_HAS_PROCESS(Harness);
@@ -369,6 +375,7 @@ SC_MODULE(Harness) {
   void record_done(const std::deque<BaseParams*>& params,
                    const Operation& operation, bool is_last);
 #if ENABLE_PERF_COUNTERS && defined(SIM_Accelerator)
+  void matrix_performance_monitor();
   void print_matrix_performance();
 #endif
 };

@@ -81,6 +81,7 @@ for cfg in "${ALL[@]}"; do
   want "$name" || continue
   echo "=== [$(date +%T)] $name (${ic}x${oc}) port ${PW} ==="
   export MATRIX_BACKEND=$backend IC_DIMENSION=$ic OC_DIMENSION=$oc
+  export ENABLE_PERF_COUNTERS=0
   # The compiler disables reshape fusion once an unroll dim reaches 64, so >=64
   # configurations need their own codegen corpus
   if [ "$ic" -ge 64 ] || [ "$oc" -ge 64 ]; then
@@ -102,10 +103,45 @@ for cfg in "${ALL[@]}"; do
   make network-proto > "$RES/${tag}_proto.log" 2>&1 || { echo "  PROTO FAILED"; continue; }
   make -j32 TestRunner > "$RES/${tag}_build.log" 2>&1 || {
     echo "  BUILD FAILED"; tail -20 "$RES/${tag}_build.log"; continue; }
+  # SystemC pass first: fast functional check against the gold model
   for layer in "${LAYERS[@]}"; do
     ( TESTS=$layer timeout 7200 make sim > "$RES/${tag}__${layer}.log" 2>&1 ) &
   done
   wait
-  echo "  done $(date +%T)"
+  fails=$(grep -L "Error count: 0" "$RES/${tag}__"*.log | wc -l)
+  echo "  systemc done $(date +%T), gold failures: $fails"
+
+  # RTL pass: Catapult synthesis, then VCS cosim for cycle-accurate runtime and
+  # the hardware performance counters (RTL=1 to enable)
+  if [ "${RTL:-0}" = "1" ]; then
+    if [ "$fails" != "0" ]; then echo "  SKIP RTL: gold failures"; continue; fi
+    if ! TECHNOLOGY=generic ENABLE_PERF_COUNTERS=1 make -j16 rtl > "$RES/${tag}_rtl_gen.log" 2>&1; then
+      echo "  RTL GEN FAILED"; tail -5 "$RES/${tag}_rtl_gen.log"; continue
+    fi
+    echo "  rtl generated $(date +%T)"
+    joined=$(IFS=,; echo "${LAYERS[*]}")
+    rtl_results="$RES/${tag}_rtl_results_$(date +%Y%m%d_%H%M%S)_$$"
+    if ! TECHNOLOGY=generic ENABLE_PERF_COUNTERS=1 python run_regression.py \
+      --models mobilebert_encoder --sims rtl --keep_build \
+      --num_processes ${#LAYERS[@]} --tests "$joined" \
+      --results_folder "$rtl_results" > "$RES/${tag}_rtl_run.log" 2>&1; then
+      echo "  RTL SIM FAILED"
+      tail -20 "$RES/${tag}_rtl_run.log"
+      continue
+    fi
+
+    missing=0
+    for layer in "${LAYERS[@]}"; do
+      src="$rtl_results/mobilebert_encoder_${layer}.log"
+      if [ ! -f "$src" ]; then
+        echo "  RTL LOG MISSING: $src"
+        missing=1
+        continue
+      fi
+      cp "$src" "$RES/${tag}__rtl__${layer}.log"
+    done
+    if [ "$missing" != "0" ]; then echo "  RTL LOG COLLECTION FAILED"; continue; fi
+    echo "  rtl sims done $(date +%T)"
+  fi
 done
 echo "ALL DONE $(date +%T)"
