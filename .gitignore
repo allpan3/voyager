@@ -22,3 +22,5 @@ test_outputs_e2e/
 logs/
 regression_results/
 .conda-env/
+# Local benchmarking artifacts (sweep scripts, logs, generated corpora)
+cmp_results/

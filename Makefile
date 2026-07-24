@@ -7,6 +7,13 @@ CC := $(CATAPULT_ROOT)/bin/g++
 
 export CODEGEN_DIR ?= test/compiler
 
+# L2 port widths in bits, one word per cycle per port
+# Left empty, ArchitectureParams.h derives them from the array dimensions, which
+# makes external bandwidth scale with the array; set them to hold the L2
+# interface constant across design points
+export IC_PORT_WIDTH ?=
+export OC_PORT_WIDTH ?=
+
 export MATRIX_BACKEND ?= 0
 export CIM_CH_IN ?= 64
 export CIM_CH_OUT ?= 8
@@ -25,6 +32,7 @@ export CIM_C_BEAT_LAYOUT ?= $(if $(filter 1,$(MATRIX_BACKEND)),1,0)
 export CIM_A_PORT_TILES ?= $(CIM_INPUT_AXIS_TILES)
 export CIM_B_PORT_TILES ?= $(CIM_OUTPUT_AXIS_TILES)
 export CIM_C_PORT_TILES ?= $(if $(filter 0,$(CIM_C_BEAT_LAYOUT)),$(CIM_INPUT_AXIS_TILES),$(CIM_OUTPUT_AXIS_TILES))
+export ENABLE_PERF_COUNTERS ?= 0
 
 # Check if the environment variable is set
 check_env_var:
@@ -83,7 +91,10 @@ override BASE_FLAGS += \
 	-DCIM_A_PORT_TILES=$(CIM_A_PORT_TILES) \
 	-DCIM_B_PORT_TILES=$(CIM_B_PORT_TILES) \
 	-DCIM_C_PORT_TILES=$(CIM_C_PORT_TILES) \
-	-DCIM_C_BEAT_LAYOUT=$(CIM_C_BEAT_LAYOUT)
+	-DCIM_C_BEAT_LAYOUT=$(CIM_C_BEAT_LAYOUT) \
+	-DENABLE_PERF_COUNTERS=$(ENABLE_PERF_COUNTERS) \
+	$(if $(IC_PORT_WIDTH),-DIC_PORT_WIDTH=$(IC_PORT_WIDTH)) \
+	$(if $(OC_PORT_WIDTH),-DOC_PORT_WIDTH=$(OC_PORT_WIDTH))
 
 ifndef INPUT_BUFFER_SIZE
 	export INPUT_BUFFER_SIZE = 1024
@@ -153,8 +164,18 @@ LDLIBS_NO_SYSC += -L$(CONDA_PREFIX)/lib
 # Build Directories
 ###########################################################
 CIM_BUILD_SIGNATURE = ci$(CIM_CH_IN)_co$(CIM_CH_OUT)_bs$(CIM_B_SETS)_base$(CIM_BASE_A_WIDTH)x$(CIM_BASE_B_WIDTH)x$(CIM_BASE_C_WIDTH)_w$(CIM_WRITE_CH_IN)_lat$(CIM_MAC_LATENCY)_m$(CIM_MODE)_tie$(CIM_TILE_INPUT_AXIS_ELEMENTS)_toe$(CIM_TILE_OUTPUT_AXIS_ELEMENTS)_iat$(CIM_INPUT_AXIS_TILES)_oat$(CIM_OUTPUT_AXIS_TILES)_apt$(CIM_A_PORT_TILES)_bpt$(CIM_B_PORT_TILES)_cpt$(CIM_C_PORT_TILES)_cbl$(CIM_C_BEAT_LAYOUT)
-BUILD_DIR ?= build/$(DATATYPE)_$(IC_DIMENSION)x$(OC_DIMENSION)_$(INPUT_BUFFER_SIZE)x$(WEIGHT_BUFFER_SIZE)x$(ACCUM_BUFFER_SIZE)_$(DOUBLE_BUFFERED_ACCUM_BUFFER)_$(SUPPORT_MVM)_$(SUPPORT_SPMM)_backend$(MATRIX_BACKEND)$(if $(filter 1,$(MATRIX_BACKEND)),_$(CIM_BUILD_SIGNATURE))
+# Overridden external port widths change the generated params, so they must not
+# share a build directory with the derived-width default
+PORT_BUILD_SIGNATURE = $(if $(IC_PORT_WIDTH)$(OC_PORT_WIDTH),_icp$(if $(IC_PORT_WIDTH),$(IC_PORT_WIDTH),auto)_ocp$(if $(OC_PORT_WIDTH),$(OC_PORT_WIDTH),auto))
+CIM_BACKEND_SIGNATURE = $(if $(filter 1,$(MATRIX_BACKEND)),_cim_$(CIM_BUILD_SIGNATURE))
+BUILD_DIR ?= build/$(DATATYPE)_$(IC_DIMENSION)x$(OC_DIMENSION)_$(INPUT_BUFFER_SIZE)x$(WEIGHT_BUFFER_SIZE)x$(ACCUM_BUFFER_SIZE)_$(DOUBLE_BUFFERED_ACCUM_BUFFER)_$(SUPPORT_MVM)_$(SUPPORT_SPMM)$(CIM_BACKEND_SIGNATURE)$(PORT_BUILD_SIGNATURE)
 CC_BUILD_DIR = $(BUILD_DIR)/cc
+
+# Report the effective build directory so external tools stay consistent with
+# this Makefile instead of duplicating the naming scheme
+.PHONY: print-build-dir
+print-build-dir:
+	@echo $(BUILD_DIR)
 ALL_BUILD_DIRS = $(CC_BUILD_DIR) $(TOOLCHAIN_BUILD_DIRS)
 # Create build dirs automatically
 $(info $(shell mkdir -p $(ALL_BUILD_DIRS)))

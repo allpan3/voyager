@@ -72,16 +72,13 @@ def set_default_env_vars(env_vars):
     env_vars.setdefault("SUPPORT_SPMM", "false")
 
 
+# Ask the Makefile for the effective build directory so this script can never
+# drift from its naming scheme (backend, port-width, and perf-counter suffixes)
 def get_build_folder(env_vars):
-    return (
-        f"build/"
-        f"{env_vars['DATATYPE']}_"
-        f"{env_vars['IC_DIMENSION']}x{env_vars['OC_DIMENSION']}_"
-        f"{env_vars['INPUT_BUFFER_SIZE']}x{env_vars['WEIGHT_BUFFER_SIZE']}x{env_vars['ACCUM_BUFFER_SIZE']}_"
-        f"{env_vars['DOUBLE_BUFFERED_ACCUM_BUFFER']}_"
-        f"{env_vars['SUPPORT_MVM']}_"
-        f"{env_vars['SUPPORT_SPMM']}"
+    output = subprocess.check_output(
+        ["make", "-s", "print-build-dir"], env=env_vars, text=True
     )
+    return [line for line in output.splitlines() if line.strip()][-1].strip()
 
 
 def utilization(df):
