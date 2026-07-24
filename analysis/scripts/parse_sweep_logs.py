@@ -1,43 +1,24 @@
 #!/usr/bin/env python3
-"""Parse sweep logs into a CSV of runtime / utilization / external traffic.
+"""Parse one sweep directory into a flat CSV of per-run metrics.
 
-Usage: cmp_parse.py <logs_dir> <out_csv>
+Usage: parse_sweep_logs.py <sweep_dir> <out_csv>
 
-Handles both naming schemes:
-  <config>__<layer>.log            derived port width (scales with the array)
-  <config>_pw<bits>__<layer>.log   pinned external (L2) port width
+Config metadata comes entirely from <sweep_dir>/manifest.csv (emitted by
+matrix_backend_sweep.sh), so nothing about the design space is hardcoded here.
+Log files are named
+    <config>[_pw<bits>]__<layer>.log         SystemC functional run
+    <config>[_pw<bits>]__rtl__<layer>.log    RTL cosim (cycle-accurate + counters)
+One CSV row per (config, port width, sim, layer).
 """
 import csv, os, re, sys
 
-LOGS = sys.argv[1]
+SWEEP_DIR = sys.argv[1]
 OUT = sys.argv[2]
 CLK_NS = 5.0
 FREQ_HZ = 200e6
-READ_PORTS = 3          # input, weight, bias each get their own port
 INT8_BITS = 8
 
-# config -> (backend, IC, OC, cell width, array organization)
-# "cell" is the CIM macro cell width: 8b matches the INT8 systolic datapath
-# (native comparison point), 4b is the vanilla macro (two cells per INT8 weight,
-# two A nibble-slices per MAC).
-CFG = {
-    "sa_32x32":      ("systolic", 32, 32, "",   ""),
-    "sa_32x64":      ("systolic", 32, 64, "",   ""),
-    "sa_64x32":      ("systolic", 64, 32, "",   ""),
-    "sa_64x64":      ("systolic", 64, 64, "",   ""),
-    "cimb8_32x32":   ("cim", 32, 32, "8b", "4 elem = 1 tile x 4 elem"),
-    "cimb8_32x64":   ("cim", 32, 64, "8b", "8 elem = 2 tiles x 4 elem"),
-    "cimb8_64x32":   ("cim", 64, 32, "8b", "4 elem = 1 tile x 4 elem"),
-    "cimb8_64x64":   ("cim", 64, 64, "8b", "8 elem = 2 tiles x 4 elem"),
-    "cim_32x32":     ("cim", 32, 32, "4b", "8 elem = 4 tiles x 2 elem"),
-    "cim_32x64":     ("cim", 32, 64, "4b", "16 elem = 4 tiles x 4 elem"),
-    "cim_64x32":     ("cim", 64, 32, "4b", "8 elem = 4 tiles x 2 elem"),
-    "cim_64x64":     ("cim", 64, 64, "4b", "16 elem = 4 tiles x 4 elem"),
-    "cimflat_64x64": ("cim", 64, 64, "4b", "16 elem = 16 tiles x 1 elem"),
-}
-
-rows = []
-# Names of the MatrixPerfHardware counters carried through to the CSV
+# MatrixPerfHardware counters carried through to the CSV (present in RTL logs)
 PERF_COUNTERS = [
     "core_cycles", "array_resident_cycles", "array_issue_cycles",
     "input_unavailable_cycles", "input_backpressure_cycles",
@@ -46,92 +27,88 @@ PERF_COUNTERS = [
     "output_backpressure_cycles", "output_fifo_full_cycles",
 ]
 
+manifest_path = os.path.join(SWEEP_DIR, "manifest.csv")
+if not os.path.exists(manifest_path):
+    sys.exit(f"no manifest at {manifest_path}")
 
-# Return a rounded ratio only when both inputs are usable
-def ratio(numerator, denominator):
-    if numerator is None or denominator in (None, 0):
-        return ""
-    return round(numerator / denominator, 4)
+CFG = {}
+for m in csv.DictReader(open(manifest_path)):
+    is_cim = m["backend"] == "1"
+    CFG[m["config"]] = dict(
+        backend="cim" if is_cim else "systolic",
+        K=int(m["K"]), N=int(m["N"]),
+        # Width the ports take when left unpinned: one array row/column per
+        # cycle. Older manifests predate the columns, so fall back to INT8.
+        ic_matched=int(m.get("ic_matched_port_bits") or int(m["K"]) * INT8_BITS),
+        oc_matched=int(m.get("oc_matched_port_bits") or int(m["N"]) * INT8_BITS),
+        cell=(m["cell_bits"] + "b") if (is_cim and m["cell_bits"]) else "",
+        ch_in=m["ch_in"], ch_out=m["ch_out"],
+        input_axis_tiles=m["input_axis_tiles"] or "",
+        output_axis_tiles=m["output_axis_tiles"] or "",
+    )
 
-
-# Convert one optional hardware counter to an integer
-def counter_value(perf, name):
-    value = perf.get(name)
-    return int(value) if value is not None else None
-
-
-for fn in sorted(os.listdir(LOGS)):
+rows = []
+for fn in sorted(os.listdir(SWEEP_DIR)):
     if "__" not in fn or not fn.endswith(".log"):
         continue
     tag, layer = fn[:-4].split("__", 1)
-    # RTL cosim logs are tagged <config>__rtl__<layer>.log
     sim = "systemc"
     if layer.startswith("rtl__"):
-        sim = "rtl"
-        layer = layer[len("rtl__"):]
-    m = re.match(r"^(.*)_pw(\d+)$", tag)
-    if m:
-        cfg, pw = m.group(1), int(m.group(2))
-        pinned = True
+        sim, layer = "rtl", layer[len("rtl__"):]
+    # _pw<bits> pins both ports; _pw<ic>x<oc> pins them separately (asymmetric
+    # geometries). No suffix means the widths were left derived, i.e. matched.
+    mm = re.match(r"^(.*)_pw(\d+)(?:x(\d+))?$", tag)
+    if mm:
+        cfg, pinned = mm.group(1), True
+        pw_ic = int(mm.group(2))
+        pw_oc = int(mm.group(3) or mm.group(2))
     else:
-        cfg, pw, pinned = tag, None, False
+        cfg, pinned, pw_ic, pw_oc = tag, False, None, None
     if cfg not in CFG:
         continue
-    txt = open(os.path.join(LOGS, fn), errors="replace").read()
-    backend, ic, oc, cell, org = CFG[cfg]
 
-    # Derived widths when not pinned: input port tracks IC, weight/bias track OC
-    ic_pw = pw if pinned else ic * INT8_BITS
-    oc_pw = pw if pinned else oc * INT8_BITS
+    txt = open(os.path.join(SWEEP_DIR, fn), errors="replace").read()
+    meta = CFG[cfg]
+    ic, oc = meta["K"], meta["N"]
 
     def grab(pat):
-        mm = re.search(pat, txt, re.M | re.I)
-        return int(mm.group(1)) if mm else None
+        g = re.search(pat, txt, re.M | re.I)
+        return int(g.group(1)) if g else None
 
-    ok = bool(re.search(r"Error count:\s+0\b", txt))
+    ok = bool(re.search(r"Error\s+count:\s+0\b", txt))
     total_ns = grab(r"^Total Runtime:\s+(\d+)\s*ns")
     ideal_ns = grab(r"matrix unit ideal runtime:\s+(\d+)\s*ns")
     rd = grab(r"^harness:\s+(\d+)") or 0
     wr = grab(r"^harness_outputs:\s+(\d+)") or 0
+    perf = {}
+    pm = re.search(r"^MatrixPerfHardware:(.*)$", txt, re.M)
+    if pm:
+        perf = dict(kv.split("=") for kv in pm.group(1).split())
 
-    cyc = total_ns / CLK_NS if total_ns else None
-    ideal_cyc = ideal_ns / CLK_NS if ideal_ns else None
-
-    # Idealised L2 model: one word per cycle per port, zero latency, no
-    # contention. Aggregate read budget is the input port plus the weight and
-    # bias ports.
+    # Only RTL cosimulation is performance-reportable
+    cyc = total_ns / CLK_NS if (sim == "rtl" and total_ns) else None
+    ideal_cyc = ideal_ns / CLK_NS if (sim == "rtl" and ideal_ns) else None
+    # Idealised L2 model: one word/cycle/port. Unpinned runs sit at the matched
+    # width (one array row/column per cycle); a pinned width overrides both.
+    ic_pw = pw_ic if pinned else meta["ic_matched"]
+    oc_pw = pw_oc if pinned else meta["oc_matched"]
     peak_rd_bpc = (ic_pw + 2 * oc_pw) / 8
     peak_wr_bpc = oc_pw / 8
     rd_bpc = rd / cyc if cyc else None
     wr_bpc = wr / cyc if cyc else None
 
-    # Hardware counter snapshot, present only in perf-counter RTL cosim logs
-    perf = {}
-    pm = re.search(r"^MatrixPerfHardware:(.*)$", txt, re.M)
-    if pm:
-        perf = dict(kv.split("=", 1) for kv in pm.group(1).split())
-
-    runtime_cycles = int(cyc) if cyc else None
-    core_cycles = counter_value(perf, "core_cycles")
-    resident_cycles = counter_value(perf, "array_resident_cycles")
-    issue_cycles = counter_value(perf, "array_issue_cycles")
-
     rows.append(dict(
-        # Matrix ideal work divided by the whole fused-layer runtime
-        fused_layer_matrix_efficiency=ratio(ideal_cyc, cyc),
-        # Array-active means at least one MAC is in flight; array-issue means a
-        # new MAC request was accepted
-        array_active_utilization=ratio(resident_cycles, runtime_cycles),
-        array_issue_utilization=ratio(issue_cycles, runtime_cycles),
-        array_active_fraction_of_matrix=ratio(resident_cycles, core_cycles),
-        array_issue_fraction_of_matrix=ratio(issue_cycles, core_cycles),
-        config=cfg, sim=sim, bw_mode="pinned" if pinned else "derived",
-        port_width_bits=pw if pinned else "",
-        backend=backend, geometry=f"{ic}x{oc}", IC=ic, OC=oc, macs=ic * oc,
-        cim_cell=cell, cim_org=org, layer=layer, passed=ok,
-        runtime_cycles=runtime_cycles if runtime_cycles else "",
-        runtime_us=round(total_ns / 1000.0, 3) if total_ns else "",
+        config=cfg, sim=sim, bw_mode="pinned" if pinned else "matched",
+        ic_port_width_bits=ic_pw, oc_port_width_bits=oc_pw,
+        backend=meta["backend"], geometry=f"{ic}x{oc}", IC=ic, OC=oc, macs=ic * oc,
+        cim_cell=meta["cell"], cim_ch_in=meta["ch_in"], cim_ch_out=meta["ch_out"],
+        input_axis_tiles=meta["input_axis_tiles"],
+        output_axis_tiles=meta["output_axis_tiles"],
+        layer=layer, passed=ok,
+        runtime_cycles=int(cyc) if cyc else "",
+        runtime_us=round(total_ns / 1000.0, 3) if cyc else "",
         ideal_cycles=int(ideal_cyc) if ideal_cyc else "",
+        utilization=round(ideal_cyc / cyc, 4) if (cyc and ideal_cyc) else "",
         cycles_per_ideal_beat=round(cyc / ideal_cyc, 3) if (cyc and ideal_cyc) else "",
         ext_read_bytes=rd, ext_write_bytes=wr,
         ext_read_GBps=round(rd_bpc * FREQ_HZ / 1e9, 2) if rd_bpc else "",
@@ -143,10 +120,14 @@ for fn in sorted(os.listdir(LOGS)):
         **{name: perf.get(name, "") for name in PERF_COUNTERS},
     ))
 
-rows.sort(key=lambda r: (r["sim"], r["bw_mode"], str(r["port_width_bits"]),
-                         r["layer"], r["macs"], r["config"]))
+if not rows:
+    sys.exit("no matching logs found for any manifest config")
+
+rows.sort(key=lambda r: (r["sim"], r["layer"], r["macs"], r["config"]))
 with open(OUT, "w", newline="") as f:
     w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
     w.writeheader()
     w.writerows(rows)
-print(f"wrote {OUT} ({len(rows)} rows)")
+print(f"wrote {OUT} ({len(rows)} rows, "
+      f"{len({r['config'] for r in rows})} configs, "
+      f"sims={sorted({r['sim'] for r in rows})})")
