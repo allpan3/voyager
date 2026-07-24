@@ -598,6 +598,8 @@ SC_MODULE(CIMProcessor) {
       select_weight_reuse_indices(params, outer_reuse_indices);
 
       const ac_int<32, false> total_ops = total_operations(params);
+#pragma hls_pipeline_init_interval 1
+#pragma hls_pipeline_stall_mode flush
       for (ac_int<32, false> step = 0; step < total_ops; step++) {
         // At a swap boundary every result of the outgoing set has been
         // collected, so its elements' MAC issue windows are closed and the
