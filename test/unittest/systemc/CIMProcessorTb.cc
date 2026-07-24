@@ -23,6 +23,22 @@
 #define CIM_PROCESSOR_LARGE_TEST 0
 #endif
 
+#ifndef CIM_PROCESSOR_TEST_CH_OUT
+#define CIM_PROCESSOR_TEST_CH_OUT 2
+#endif
+
+#ifndef CIM_PROCESSOR_TEST_BASE_A_WIDTH
+#define CIM_PROCESSOR_TEST_BASE_A_WIDTH 4
+#endif
+
+#ifndef CIM_PROCESSOR_TEST_BASE_B_WIDTH
+#define CIM_PROCESSOR_TEST_BASE_B_WIDTH 4
+#endif
+
+#ifndef CIM_PROCESSOR_TEST_BASE_C_WIDTH
+#define CIM_PROCESSOR_TEST_BASE_C_WIDTH 12
+#endif
+
 #if CIM_PROCESSOR_LARGE_TEST
 static constexpr int CH_IN = 64;
 static constexpr int CH_OUT = 64;
@@ -36,11 +52,11 @@ static constexpr int INPUT_AXIS_TILES = 1;
 static constexpr int OUTPUT_AXIS_TILES = 2;
 #else
 static constexpr int CH_IN = 2;
-static constexpr int CH_OUT = 2;
+static constexpr int CH_OUT = CIM_PROCESSOR_TEST_CH_OUT;
 static constexpr int B_SETS = 2;
-static constexpr int BASE_A_WIDTH = 4;
-static constexpr int BASE_B_WIDTH = 4;
-static constexpr int BASE_C_WIDTH = 12;
+static constexpr int BASE_A_WIDTH = CIM_PROCESSOR_TEST_BASE_A_WIDTH;
+static constexpr int BASE_B_WIDTH = CIM_PROCESSOR_TEST_BASE_B_WIDTH;
+static constexpr int BASE_C_WIDTH = CIM_PROCESSOR_TEST_BASE_C_WIDTH;
 static constexpr int TILE_INPUT_AXIS_ELEMENTS = 2;
 static constexpr int TILE_OUTPUT_AXIS_ELEMENTS = 1;
 static constexpr int INPUT_AXIS_TILES = 2;
@@ -70,8 +86,8 @@ using Processor =
                  DataTypes::int8, DataTypes::int8, DataTypes::int24,
                  DataTypes::int24, DataTypes::fp8_e8m0, K, N, BUFFER_DEPTH,
                  CH_IN, CH_OUT, B_SETS, BASE_A_WIDTH, BASE_B_WIDTH,
-                 BASE_C_WIDTH, WRITE_CH_IN, MAC_LATENCY, MODE, A_WIDTH, B_WIDTH,
-                 SIGNED, TILE_INPUT_AXIS_ELEMENTS, TILE_OUTPUT_AXIS_ELEMENTS,
+                 BASE_C_WIDTH, WRITE_CH_IN, MAC_LATENCY, MODE, SIGNED,
+                 TILE_INPUT_AXIS_ELEMENTS, TILE_OUTPUT_AXIS_ELEMENTS,
                  INPUT_AXIS_TILES, OUTPUT_AXIS_TILES, A_PORT_TILES,
                  B_PORT_TILES, C_PORT_TILES, CIM_C_BEAT_OUTPUT_MAJOR>;
 
@@ -125,6 +141,8 @@ SC_MODULE(CIMProcessorTb) {
 
   std::deque<ExpectedOutput> expected_outputs;
   std::deque<BufferVector> pending_biases;
+  std::vector<unsigned long> throughput_input_cycles;
+  std::vector<unsigned long> throughput_output_cycles;
   sc_event expected_output_event;
   sc_event bias_event;
   int checked_outputs;
@@ -275,6 +293,13 @@ SC_MODULE(CIMProcessorTb) {
     return params;
   }
 
+  // Create a long output-X traversal inside one resident-weight lifetime
+  MatrixParams make_throughput_params(int operations) const {
+    MatrixParams params = make_weight_reuse_params(true);
+    params.loops[0][params.x_loop_idx[0]] = operations;
+    return params;
+  }
+
   // Create one output address with two contributions for the backpressure case
   MatrixParams make_backpressure_params() const {
     MatrixParams params = make_base_params();
@@ -390,6 +415,49 @@ SC_MODULE(CIMProcessorTb) {
     }
   }
 
+  // Return the current clock index for ready/valid cadence measurements
+  unsigned long current_cycle() const {
+    return static_cast<unsigned long>(sc_time_stamp() / sc_time(10, SC_NS));
+  }
+
+  // Send a no-accumulation stream that reuses one resident weight set
+  void send_throughput_job(int operations, int weight_pattern,
+                           int input_pattern) {
+    params_channel.Push(make_throughput_params(operations));
+    start_channel.SyncPop();
+
+    for (int k = 0; k < K; k++) {
+      for (int span = 0; span < Processor::WEIGHT_BEATS_PER_ROW; span++) {
+        weight_channel.Push(make_weight_beat(weight_pattern, k, span));
+      }
+    }
+
+    for (int operation = 0; operation < operations; operation++) {
+      input_channel.Push(make_inputs(input_pattern));
+      throughput_input_cycles.push_back(current_cycle());
+    }
+  }
+
+  // Print and validate consecutive acceptance intervals
+  void report_throughput(const char *name,
+                         const std::vector<unsigned long> &cycles,
+                         int expected_count) {
+    std::ostringstream count_message;
+    count_message << name << " expected " << expected_count << " samples got "
+                  << cycles.size();
+    require(static_cast<int>(cycles.size()) == expected_count,
+            count_message.str());
+
+    std::cout << "RTL_CADENCE " << name << "_intervals=";
+    for (std::size_t index = 1; index < cycles.size(); index++) {
+      if (index > 1) {
+        std::cout << ",";
+      }
+      std::cout << cycles[index] - cycles[index - 1];
+    }
+    std::cout << std::endl;
+  }
+
   // Drive queued biases only when the processor requests them
   void drive_bias() {
     bias_channel.ResetWrite();
@@ -430,6 +498,9 @@ SC_MODULE(CIMProcessorTb) {
       }
 
       const BufferVector result = output_channel.Pop();
+      if (expected.label.rfind("throughput ", 0) == 0) {
+        throughput_output_cycles.push_back(current_cycle());
+      }
       for (int n = 0; n < N; n++) {
         std::ostringstream message;
         message << expected.label << " n " << n << " expected "
@@ -556,6 +627,27 @@ SC_MODULE(CIMProcessorTb) {
     rstn.write(true);
     tick();
 
+    std::cout << "RTL_WIDTHS base_c=" << BASE_C_WIDTH
+              << " tile_c=" << Processor::Array::TILE_C_WIDTH
+              << " reduced_c=" << Processor::C_WIDTH
+              << " psum_c=" << DataTypes::int24::width << std::endl;
+
+    static constexpr int kThroughputOperations = 24;
+    const BufferVector throughput_expected = expected_partial(6, 60);
+    for (int operation = 0; operation < kThroughputOperations; operation++) {
+      std::ostringstream label;
+      label << "throughput " << operation;
+      expect_output(label.str(), throughput_expected, 0);
+    }
+    send_throughput_job(kThroughputOperations, 60, 6);
+    while (static_cast<int>(throughput_output_cycles.size()) <
+           kThroughputOperations) {
+      tick();
+    }
+    report_throughput("input", throughput_input_cycles, kThroughputOperations);
+    report_throughput("output", throughput_output_cycles,
+                      kThroughputOperations);
+
     const BufferVector nominal_bias = queue_bias(0);
     BufferVector nominal_0 = nominal_bias;
     add_vector(nominal_0, expected_partial(0, 0));
@@ -593,7 +685,7 @@ SC_MODULE(CIMProcessorTb) {
     expect_output("backpressured temporal accumulation", backpressured, 25);
     send_job(make_backpressure_params(), {40, 41}, {true, true}, 3);
 
-    const int expected_output_count = 11;
+    const int expected_output_count = 11 + kThroughputOperations;
     while (checked_outputs < expected_output_count) {
       tick();
     }

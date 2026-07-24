@@ -45,12 +45,16 @@ template <
     int OUTPUT_AXIS_TILES = 1, int A_PORT_TILES = INPUT_AXIS_TILES,
     int B_PORT_TILES = OUTPUT_AXIS_TILES, int C_PORT_TILES = INPUT_AXIS_TILES,
     int C_BEAT_LAYOUT = CIM_C_BEAT_INPUT_MAJOR,
+    // Accumulator width; the processor takes this from ACCUM_DATATYPE, so the
+    // standalone testbench over-provisions from the base width. The array's own
+    // static_assert enforces that it holds one reduced result
+    int C_WIDTH = BASE_C_WIDTH + 8,
     typename DutType =
         CIMArray<CH_IN, CH_OUT, B_SETS, BASE_A_WIDTH, BASE_B_WIDTH,
                  BASE_C_WIDTH, WRITE_CH_IN, MAC_LATENCY, MODE, A_WIDTH, B_WIDTH,
-                 IS_SIGNED, TILE_INPUT_AXIS_ELEMENTS, TILE_OUTPUT_AXIS_ELEMENTS,
-                 INPUT_AXIS_TILES, OUTPUT_AXIS_TILES, A_PORT_TILES,
-                 B_PORT_TILES, C_PORT_TILES, C_BEAT_LAYOUT>>
+                 C_WIDTH, IS_SIGNED, TILE_INPUT_AXIS_ELEMENTS,
+                 TILE_OUTPUT_AXIS_ELEMENTS, INPUT_AXIS_TILES, OUTPUT_AXIS_TILES,
+                 A_PORT_TILES, B_PORT_TILES, C_PORT_TILES, C_BEAT_LAYOUT>>
 struct CIMArrayTbCase : sc_module {
   using Dut = DutType;
   using ABeat = typename Dut::ABeat;
@@ -61,7 +65,7 @@ struct CIMArrayTbCase : sc_module {
 
   static_assert(A_WIDTH < 31, "A_WIDTH must fit this unit test golden model");
   static_assert(B_WIDTH < 31, "B_WIDTH must fit this unit test golden model");
-  static_assert(Dut::C_WIDTH < 62,
+  static_assert(C_WIDTH < 62,
                 "C_WIDTH must fit this unit test golden model");
 
   CIMARRAY_DUT_TYPE(Dut) dut;
@@ -420,8 +424,8 @@ struct CIMArrayTbCase : sc_module {
 
     for (int port_tile_idx = 0; port_tile_idx < C_PORT_TILES; port_tile_idx++) {
       for (int tile_n = 0; tile_n < Dut::TILE_N; tile_n++) {
-        const ac_int<Dut::C_WIDTH, false> expected_bits =
-            encode_value<Dut::C_WIDTH>(expected.value[port_tile_idx][tile_n]);
+        const ac_int<C_WIDTH, false> expected_bits =
+            encode_value<C_WIDTH>(expected.value[port_tile_idx][tile_n]);
         if (actual[port_tile_idx][tile_n] == expected_bits) {
           continue;
         }

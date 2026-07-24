@@ -65,6 +65,29 @@ solution options set Input/CppStandard c++17
 # path leaves the blackbox external and the sim concat Verilog (matching the
 # global scripts/utils/setup_project.tcl flow).
 set compiler_flags "-D$DATATYPE -DIC_DIMENSION=$IC_DIMENSION -DOC_DIMENSION=$OC_DIMENSION -I$ROOT/src -I$ROOT/lib -I$ROOT"
+set cim_geometry_flags ""
+foreach name {
+  CIM_CH_IN CIM_CH_OUT CIM_B_SETS
+  CIM_BASE_A_WIDTH CIM_BASE_B_WIDTH CIM_BASE_C_WIDTH CIM_C_WIDTH
+  CIM_WRITE_CH_IN CIM_MAC_LATENCY CIM_MODE
+  CIM_A_WIDTH CIM_B_WIDTH CIM_SIGNED
+  CIM_TILE_INPUT_AXIS_ELEMENTS CIM_TILE_OUTPUT_AXIS_ELEMENTS
+  CIM_INPUT_AXIS_TILES CIM_OUTPUT_AXIS_TILES
+  CIM_A_PORT_TILES CIM_B_PORT_TILES CIM_C_PORT_TILES CIM_C_BEAT_LAYOUT
+} {
+  if {[info exists ::env($name)]} {
+    append cim_geometry_flags " -D$name=$::env($name)"
+  }
+}
+append compiler_flags $cim_geometry_flags
+set processor_test_flags ""
+foreach name {CH_OUT BASE_A_WIDTH BASE_B_WIDTH BASE_C_WIDTH} {
+  set env_name "CIM_PROCESSOR_TEST_$name"
+  if {[info exists ::env($env_name)]} {
+    append processor_test_flags " -D$env_name=$::env($env_name)"
+  }
+}
+append compiler_flags $processor_test_flags
 # Keep CIMArrayTb's DUT specialization aligned with HLS_TOP during Catapult analysis
 if {[info exists ::env(CIM_C_BEAT_LAYOUT)]} {
   append compiler_flags " -DCIM_TEST_C_BEAT_LAYOUT=$::env(CIM_C_BEAT_LAYOUT)"
@@ -98,6 +121,8 @@ if {$SCVERIFY} {
   solution options set Flows/VCS/VCSSIM_OPTS {+vcs+lic+wait}
   set scverify_comp_flags \
     "-O3 -Wall -Wno-unknown-pragmas -Wno-deprecated-declarations -I$ROOT/src -I$ROOT/lib -I$ROOT -I$ROOT/test/unittest -D$DATATYPE -DIC_DIMENSION=$IC_DIMENSION -DOC_DIMENSION=$OC_DIMENSION -DCIM_TEST_B_PORT_TILES=$CIM_B_PORT_TILES -DCIM_TEST_C_BEAT_LAYOUT=$::env(CIM_C_BEAT_LAYOUT) -DSCVERIFY -std=c++17"
+  append scverify_comp_flags $cim_geometry_flags
+  append scverify_comp_flags $processor_test_flags
   if {[info exists ::env(DOUBLE_BUFFERED_ACCUM_BUFFER)]} {
     append scverify_comp_flags " -DDOUBLE_BUFFERED_ACCUM_BUFFER=$::env(DOUBLE_BUFFERED_ACCUM_BUFFER)"
   }

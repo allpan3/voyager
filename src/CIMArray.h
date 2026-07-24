@@ -19,7 +19,13 @@ static constexpr int CIM_C_BEAT_OUTPUT_MAJOR = 1;
 // CIMArray routes tile-shaped A/B/C data across input and output axes
 template <int CH_IN, int CH_OUT, int B_SETS, int BASE_A_WIDTH, int BASE_B_WIDTH,
           int BASE_C_WIDTH, int WRITE_CH_IN, int MAC_LATENCY, int MODE,
-          int A_WIDTH, int B_WIDTH, bool SIGNED,
+          // A_WIDTH/B_WIDTH/C_WIDTH are the operand and accumulator widths from
+          // the datatype: A and B size the input and weight, C sizes the reduced
+          // result the processor accumulates and stores. C_WIDTH comes from the
+          // accumulation datatype (ACCUM_DATATYPE::width), the same way the
+          // systolic array takes its accumulator type; the per-tile BASE_C_WIDTH
+          // stays a separate free knob that only sizes one vector-matrix mul
+          int A_WIDTH, int B_WIDTH, int C_WIDTH, bool SIGNED,
           // Tile-internal layout; the input axis reduces into C while the
           // output axis retains distinct B/C channels
           int TILE_INPUT_AXIS_ELEMENTS, int TILE_OUTPUT_AXIS_ELEMENTS,
@@ -98,7 +104,10 @@ SC_MODULE(CIMArray) {
   static constexpr int TILE_C_WIDTH = Tile::C_WIDTH;
   static constexpr int REDUCTION_GUARD_WIDTH =
       (INPUT_AXIS_TILES <= 1) ? 0 : log2_ceil(INPUT_AXIS_TILES);
-  static constexpr int C_WIDTH = TILE_C_WIDTH + REDUCTION_GUARD_WIDTH;
+  // C_WIDTH is the accumulation datatype width supplied by the caller; it must
+  // hold one fully reduced result (all input tiles summed)
+  static_assert(C_WIDTH >= TILE_C_WIDTH + REDUCTION_GUARD_WIDTH,
+                "C_WIDTH must hold one reduced CIM array result");
 
   using AValue = typename Tile::AValue;
   using BValue = typename Tile::BValue;

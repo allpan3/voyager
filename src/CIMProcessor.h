@@ -23,20 +23,26 @@ template <typename InputTypeTuple, typename WeightTypeTuple, typename Input,
           typename Weight, typename Psum, typename Buffer, typename Scale,
           int rows, int cols, int buffer_size, int CH_IN, int CH_OUT,
           int B_SETS, int BASE_A_WIDTH, int BASE_B_WIDTH, int BASE_C_WIDTH,
-          int WRITE_CH_IN, int MAC_LATENCY, int MODE, int A_WIDTH, int B_WIDTH,
-          bool SIGNED, int TILE_INPUT_AXIS_ELEMENTS,
-          int TILE_OUTPUT_AXIS_ELEMENTS, int INPUT_AXIS_TILES,
-          int OUTPUT_AXIS_TILES, int A_PORT_TILES, int B_PORT_TILES,
-          int C_PORT_TILES, int C_BEAT_LAYOUT>
+          int WRITE_CH_IN, int MAC_LATENCY, int MODE, bool SIGNED,
+          int TILE_INPUT_AXIS_ELEMENTS, int TILE_OUTPUT_AXIS_ELEMENTS,
+          int INPUT_AXIS_TILES, int OUTPUT_AXIS_TILES, int A_PORT_TILES,
+          int B_PORT_TILES, int C_PORT_TILES, int C_BEAT_LAYOUT>
 SC_MODULE(CIMProcessor) {
  public:
   static constexpr int K = rows;
   static constexpr int N = cols;
 
+  // A/B/C operand widths follow the datatypes the same way MatrixProcessor
+  // takes Input/Weight/Psum; the CIM array is width-parameterized, so derive
+  // the widths from those types here rather than passing them in separately
+  static constexpr int A_WIDTH = Input::width;
+  static constexpr int B_WIDTH = Weight::width;
+  static constexpr int C_WIDTH = Psum::width;
+
   using Array =
       CIMArray<CH_IN, CH_OUT, B_SETS, BASE_A_WIDTH, BASE_B_WIDTH, BASE_C_WIDTH,
-               WRITE_CH_IN, MAC_LATENCY, MODE, A_WIDTH, B_WIDTH, SIGNED,
-               TILE_INPUT_AXIS_ELEMENTS, TILE_OUTPUT_AXIS_ELEMENTS,
+               WRITE_CH_IN, MAC_LATENCY, MODE, A_WIDTH, B_WIDTH, C_WIDTH,
+               SIGNED, TILE_INPUT_AXIS_ELEMENTS, TILE_OUTPUT_AXIS_ELEMENTS,
                INPUT_AXIS_TILES, OUTPUT_AXIS_TILES, A_PORT_TILES, B_PORT_TILES,
                C_PORT_TILES, C_BEAT_LAYOUT>;
   using ABeat = typename Array::ABeat;
@@ -113,12 +119,6 @@ SC_MODULE(CIMProcessor) {
   static_assert(WEIGHT_ROW_WIDTH ==
                     WEIGHT_WRITE_WIDTH * WEIGHT_BEATS_PER_ROW / WRITE_CH_IN,
                 "Beats must tile one logical B row exactly");
-  static_assert(Input::width == A_WIDTH,
-                "CIM A width must match the configured input datatype");
-  static_assert(Weight::width == B_WIDTH,
-                "CIM B width must match the configured weight datatype");
-  static_assert(Psum::width >= Array::C_WIDTH,
-                "ACCUM_DATATYPE must hold one CIM result");
 
   sc_in<bool> CCS_INIT_S1(clk);
   sc_in<bool> CCS_INIT_S1(rstn);
@@ -450,6 +450,8 @@ SC_MODULE(CIMProcessor) {
       ac_int<3, false> outer_reuse_indices[2];
       select_weight_reuse_indices(params, outer_reuse_indices);
 
+#pragma hls_pipeline_init_interval 1
+#pragma hls_pipeline_stall_mode flush
       for (ac_int<32, false> step = 0; step < total_ops; step++) {
         // needs_weight_load times the swap exactly like MatrixProcessor
         // push_inputs swap_weights Waiting on set_filled guarantees every row
@@ -534,7 +536,7 @@ SC_MODULE(CIMProcessor) {
 #pragma hls_unroll yes
       for (int tile_n = 0; tile_n < Array::TILE_N; tile_n++) {
         const int n = output_axis_idx * Array::TILE_N + tile_n;
-        ac_int<Array::C_WIDTH, SIGNED> value;
+        ac_int<Psum::width, SIGNED> value;
         value.set_slc(0, beat[output_axis_idx][tile_n]);
         result[n] = Psum(value);
       }
