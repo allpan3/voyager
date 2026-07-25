@@ -29,6 +29,10 @@ static constexpr int CIM_MODE_BIT_SERIAL_VALUE = 1;
 #define CIM_TEST_C_BEAT_LAYOUT CIM_C_BEAT_INPUT_MAJOR
 #endif
 
+#ifndef CIM_TEST_C_WIDTH
+#define CIM_TEST_C_WIDTH 20
+#endif
+
 static int g_cases_remaining = 0;
 
 // Return a mask covering the requested bit width
@@ -734,7 +738,7 @@ int sc_main(int argc, char** argv) {
   CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 4,
                  false, 2, 2, 2, 3, 2, CIM_TEST_B_PORT_TILES,
                  (CIM_TEST_C_BEAT_LAYOUT == CIM_C_BEAT_INPUT_MAJOR) ? 2 : 3,
-                 CIM_TEST_C_BEAT_LAYOUT>
+                 CIM_TEST_C_BEAT_LAYOUT, CIM_TEST_C_WIDTH>
       cim_array_scverify("cim_array_scverify");
 #endif
 

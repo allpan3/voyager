@@ -133,18 +133,18 @@ SC_MODULE(CIMArray) {
       (MAX_C_RESULT_BEATS <= 1) ? 1 : log2_ceil(MAX_C_RESULT_BEATS);
   using CResultBeatIndex = ac_int<C_RESULT_BEAT_INDEX_WIDTH, false>;
 
-  // Reserve enough completions to cover the fixed retire and ready-credit loop
-  // without adding issue stalls
+  // Reserve the fixed retire/capture loop plus an equal elastic window
   static constexpr int MAC_ISSUE_WINDOW = Tile::issue_window();
-  static constexpr int RESULT_CREDIT_LATENCY = Tile::operation_latency() + 3;
+  static constexpr int RESULT_CREDIT_LATENCY = Tile::operation_latency() + 2;
   static constexpr int RESULT_QUEUE_DEPTH_PER_OUTPUT =
       ceil_div(RESULT_CREDIT_LATENCY, MAC_ISSUE_WINDOW);
   static constexpr int RESULT_QUEUE_TARGETED_DEPTH =
       OUTPUT_AXIS_TILES * RESULT_QUEUE_DEPTH_PER_OUTPUT;
-  static constexpr int RESULT_QUEUE_DEPTH =
+  static constexpr int RESULT_QUEUE_PIPELINE_DEPTH =
       (RESULT_CREDIT_LATENCY < RESULT_QUEUE_TARGETED_DEPTH)
           ? RESULT_CREDIT_LATENCY
           : RESULT_QUEUE_TARGETED_DEPTH;
+  static constexpr int RESULT_QUEUE_DEPTH = 2 * RESULT_QUEUE_PIPELINE_DEPTH;
 
   static constexpr int INPUT_AXIS_INDEX_WIDTH =
       (INPUT_AXIS_TILES <= 1) ? 1 : log2_ceil(INPUT_AXIS_TILES);
@@ -288,6 +288,7 @@ SC_MODULE(CIMArray) {
   sc_signal<ResultQueuePointer> completion_allocate_pointer;
   sc_signal<ResultQueuePointer> completion_capture_pointer;
   sc_signal<ResultQueuePointer> completion_release_pointer;
+  sc_signal<bool> completion_release_pending;
 
 #ifndef __SYNTHESIS__
   bool replicate_waste_warning_reported = false;
@@ -340,6 +341,8 @@ SC_MODULE(CIMArray) {
     SC_METHOD(drive_mac_issue);
     sensitive << rstn << mac_request_channel.vld << mac_request_channel.dat;
     sensitive << completion_allocate_pointer << completion_release_pointer;
+    sensitive << completion_release_pending << result_channel.vld
+              << result_channel.rdy;
     for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES;
          output_axis_idx++) {
       for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES;
@@ -509,11 +512,18 @@ SC_MODULE(CIMArray) {
            OutputAxisIndex(output_axis_idx) == request.output_axis_idx;
   }
 
+  // Return whether the full queue releases its head on the current edge
+  bool completion_releases_on_fire() const {
+    return completion_release_pending.read() && result_channel.vld.read() &&
+           result_channel.rdy.read();
+  }
+
   // Return whether the completion queue and every selected tile can accept this
   // operation
   bool selected_tiles_ready(const MACRequest& request) const {
-    bool ready = !result_queue_full(completion_allocate_pointer.read(),
-                                    completion_release_pointer.read());
+    const bool queue_full = result_queue_full(
+        completion_allocate_pointer.read(), completion_release_pointer.read());
+    bool ready = !queue_full || completion_releases_on_fire();
 
 #pragma hls_unroll yes
     for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES;
@@ -587,10 +597,11 @@ SC_MODULE(CIMArray) {
 
 #ifndef __SYNTHESIS__
         if (result_queue_full(allocate_pointer,
-                              completion_release_pointer.read())) {
+                              completion_release_pointer.read()) &&
+            !completion_releases_on_fire()) {
           SC_REPORT_FATAL("CIMArray",
                           "MAC issue overflowed the completion queue despite "
-                          "unavailable credit");
+                          "unavailable storage");
         }
 #endif
 
@@ -798,6 +809,7 @@ SC_MODULE(CIMArray) {
     ResultQueuePointer release_pointer = 0;
     CResultBeatIndex result_beat_idx = 0;
     completion_release_pointer.write(release_pointer);
+    completion_release_pending.write(false);
 
     wait();
 
@@ -819,10 +831,6 @@ SC_MODULE(CIMArray) {
             token.template slc<OUTPUT_AXIS_INDEX_WIDTH>(0);
         const int target_output_axis_idx = token_output_axis_idx.to_int();
 
-        result_channel.Push(pack_queued_output(queue_idx, result_beat_idx,
-                                               multicast, reduce,
-                                               target_output_axis_idx));
-
         const int selected_output_tiles = multicast ? OUTPUT_AXIS_TILES : 1;
         const int logical_results =
             reduce ? selected_output_tiles
@@ -830,6 +838,13 @@ SC_MODULE(CIMArray) {
         const int result_beats = ceil_div(logical_results, C_PORT_TILES);
         const bool token_complete =
             result_beat_idx == CResultBeatIndex(result_beats - 1);
+        completion_release_pending.write(token_complete);
+
+        result_channel.Push(pack_queued_output(queue_idx, result_beat_idx,
+                                               multicast, reduce,
+                                               target_output_axis_idx));
+        completion_release_pending.write(false);
+
         if (token_complete) {
           release_pointer = next_result_queue_pointer(release_pointer);
           completion_release_pointer.write(release_pointer);
@@ -838,6 +853,7 @@ SC_MODULE(CIMArray) {
           result_beat_idx += CResultBeatIndex(1);
         }
       } else {
+        completion_release_pending.write(false);
         wait();
       }
     }

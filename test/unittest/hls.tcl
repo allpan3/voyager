@@ -93,6 +93,9 @@ if {[info exists ::env(CIM_C_BEAT_LAYOUT)]} {
   append compiler_flags " -DCIM_TEST_C_BEAT_LAYOUT=$::env(CIM_C_BEAT_LAYOUT)"
 }
 append compiler_flags " -DCIM_TEST_B_PORT_TILES=$CIM_B_PORT_TILES"
+if {[info exists ::env(CIM_C_WIDTH)]} {
+  append compiler_flags " -DCIM_TEST_C_WIDTH=$::env(CIM_C_WIDTH)"
+}
 if {[info exists ::env(DOUBLE_BUFFERED_ACCUM_BUFFER)]} {
   append compiler_flags " -DDOUBLE_BUFFERED_ACCUM_BUFFER=$::env(DOUBLE_BUFFERED_ACCUM_BUFFER)"
 }
@@ -126,6 +129,9 @@ if {$SCVERIFY} {
     "-O3 -Wall -Wno-unknown-pragmas -Wno-deprecated-declarations -I$ROOT/src -I$ROOT/lib -I$ROOT -I$ROOT/test/unittest -D$DATATYPE -DIC_DIMENSION=$IC_DIMENSION -DOC_DIMENSION=$OC_DIMENSION -DCIM_TEST_B_PORT_TILES=$CIM_B_PORT_TILES -DCIM_TEST_C_BEAT_LAYOUT=$::env(CIM_C_BEAT_LAYOUT) -DSCVERIFY -std=c++17"
   append scverify_comp_flags $cim_geometry_flags
   append scverify_comp_flags $processor_test_flags
+  if {[info exists ::env(CIM_C_WIDTH)]} {
+    append scverify_comp_flags " -DCIM_TEST_C_WIDTH=$::env(CIM_C_WIDTH)"
+  }
   if {[info exists ::env(DOUBLE_BUFFERED_ACCUM_BUFFER)]} {
     append scverify_comp_flags " -DDOUBLE_BUFFERED_ACCUM_BUFFER=$::env(DOUBLE_BUFFERED_ACCUM_BUFFER)"
   }
