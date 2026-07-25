@@ -449,7 +449,7 @@ SC_MODULE(CIMProcessorTb) {
   // Print and validate consecutive acceptance intervals
   void report_throughput(const char *name,
                          const std::vector<unsigned long> &cycles,
-                         int expected_count) {
+                         int expected_count, int expected_interval) {
     std::ostringstream count_message;
     count_message << name << " expected " << expected_count << " samples got "
                   << cycles.size();
@@ -461,7 +461,15 @@ SC_MODULE(CIMProcessorTb) {
       if (index > 1) {
         std::cout << ",";
       }
-      std::cout << cycles[index] - cycles[index - 1];
+      const unsigned long interval = cycles[index] - cycles[index - 1];
+      std::cout << interval;
+      if (expected_interval > 0) {
+        std::ostringstream interval_message;
+        interval_message << name << " interval " << index << " expected "
+                         << expected_interval << " got " << interval;
+        require(interval == static_cast<unsigned long>(expected_interval),
+                interval_message.str());
+      }
     }
     std::cout << std::endl;
   }
@@ -655,9 +663,10 @@ SC_MODULE(CIMProcessorTb) {
            kThroughputOperations) {
       tick();
     }
-    report_throughput("input", throughput_input_cycles, kThroughputOperations);
-    report_throughput("output", throughput_output_cycles,
-                      kThroughputOperations);
+    report_throughput("input", throughput_input_cycles, kThroughputOperations,
+                      0);
+    report_throughput("output", throughput_output_cycles, kThroughputOperations,
+                      Processor::Array::MAC_ISSUE_WINDOW);
 
     const BufferVector nominal_bias = queue_bias(0);
     BufferVector nominal_0 = nominal_bias;
@@ -743,9 +752,20 @@ SC_MODULE(CIMProcessorTb) {
                   bank_1_expected[n].int_val.to_int(),
               bank_1_data_message.str());
     }
+
+    // A direct result after banked jobs detects any leaked final-output entry
+    const int outputs_before_direct_resume = checked_outputs;
+    const BufferVector direct_resume_expected = expected_partial(7, 70);
+    expect_output("direct output after double buffering",
+                  direct_resume_expected, 0);
+    send_job(make_throughput_params(1), {70}, {true}, 7);
+    while (checked_outputs == outputs_before_direct_resume) {
+      tick();
+    }
 #endif
 
     if (!test_failed) {
+      std::cout << "[PASS] cim_processor_result_throughput" << std::endl;
       std::cout << "[PASS] cim_processor_nominal_accumulation" << std::endl;
       std::cout << "[PASS] cim_processor_weight_reuse" << std::endl;
       std::cout << "[PASS] cim_processor_backpressure" << std::endl;

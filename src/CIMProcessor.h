@@ -51,6 +51,49 @@ SC_MODULE(CIMProcessor) {
   using MACRequest = typename Array::MACRequest;
   using WriteRequest = typename Array::WriteRequest;
 
+  // Carry one ordered accumulator transaction between read issue and completion
+  struct AccumulationMetadata {
+    Pack1D<Psum, N> result;
+    Pack1D<Buffer, N> initial;
+    ac_int<1, false> first;
+    ac_int<1, false> bank;
+
+    static const unsigned int width =
+        Pack1D<Psum, N>::width + Pack1D<Buffer, N>::width + 2;
+
+    template <unsigned int Size>
+    void Marshall(Marshaller<Size> &m) {
+      m & result;
+      m & initial;
+      m & first;
+      m & bank;
+    }
+
+    inline friend void sc_trace(sc_trace_file *tf,
+                                const AccumulationMetadata &metadata,
+                                const std::string &name) {
+      sc_trace(tf, metadata.result, name + ".result");
+      sc_trace(tf, metadata.initial, name + ".initial");
+      sc_trace(tf, metadata.first, name + ".first");
+      sc_trace(tf, metadata.bank, name + ".bank");
+    }
+
+    inline friend std::ostream &operator<<(
+        std::ostream &os, const AccumulationMetadata &metadata) {
+      os << metadata.result << " ";
+      os << metadata.initial << " ";
+      os << metadata.first << " ";
+      os << metadata.bank;
+      return os;
+    }
+
+    inline friend bool operator==(const AccumulationMetadata &lhs,
+                                  const AccumulationMetadata &rhs) {
+      return lhs.result == rhs.result && lhs.initial == rhs.initial &&
+             lhs.first == rhs.first && lhs.bank == rhs.bank;
+    }
+  };
+
   // One array B-port write
   static constexpr int WEIGHT_WRITE_WIDTH = Array::BBeat::width;
   // One logical B row matches MatrixProcessor's weight-channel convention
@@ -59,6 +102,7 @@ SC_MODULE(CIMProcessor) {
   static constexpr int WEIGHT_BEATS_PER_ROW = OUTPUT_AXIS_TILES / B_PORT_TILES;
 
   static constexpr int LOOP_WIDTH = 10;
+  static constexpr int ACCUM_TO_WB_FIFO_DEPTH = SUPPORT_MX ? 8 : 1;
   static constexpr int OUTPUT_FIFO_DEPTH = 8;
 #if DOUBLE_BUFFERED_ACCUM_BUFFER
   static constexpr int ACCUM_BUFFER_BANKS = 2;
@@ -162,6 +206,24 @@ SC_MODULE(CIMProcessor) {
   Connections::Combinational<WriteRequest> CCS_INIT_S1(write_request_channel);
   Connections::Combinational<CBeat> CCS_INIT_S1(result_channel);
 
+  // Isolate CIM result retirement from the SA-shaped accumulation pipeline
+  Connections::Combinational<Pack1D<Psum, N>> CCS_INIT_S1(
+      result_to_accum_channel);
+
+  // Decouple accumulator reads from their ordered response/addition stage
+  Connections::Fifo<AccumulationMetadata, 2> CCS_INIT_S1(
+      accumulation_metadata_fifo);
+  Connections::Combinational<AccumulationMetadata> CCS_INIT_S1(
+      accumulation_metadata_enq);
+  Connections::Combinational<AccumulationMetadata> CCS_INIT_S1(
+      accumulation_metadata_deq);
+
+  // Match MatrixProcessor's accumulation-to-write-back decoupling
+  Connections::Fifo<Pack1D<Buffer, N>, ACCUM_TO_WB_FIFO_DEPTH> CCS_INIT_S1(
+      accum_to_wb_fifo);
+  Connections::Combinational<Pack1D<Buffer, N>> CCS_INIT_S1(accum_to_wb_enq);
+  Connections::Combinational<Pack1D<Buffer, N>> CCS_INIT_S1(accum_to_wb_deq);
+
   // Match MatrixProcessor's final-output decoupling after accumulation
   Connections::Fifo<Pack1D<Buffer, N>, OUTPUT_FIFO_DEPTH> CCS_INIT_S1(
       accum_output_fifo);
@@ -179,11 +241,22 @@ SC_MODULE(CIMProcessor) {
   Connections::Combinational<bool> set_consumed_enq[2];
   Connections::Combinational<bool> set_consumed_deq[2];
 
-  // MatrixProcessor has separate accumulation/write-back parameter FIFOs; the
-  // fused result thread needs one
-  Connections::Fifo<MatrixParams, 1> CCS_INIT_S1(result_params_fifo);
-  Connections::Combinational<MatrixParams> CCS_INIT_S1(result_params_enq);
-  Connections::Combinational<MatrixParams> CCS_INIT_S1(result_params_deq);
+  Connections::Fifo<MatrixParams, 1> CCS_INIT_S1(
+      process_accumulation_params_fifo);
+  Connections::Combinational<MatrixParams> CCS_INIT_S1(
+      process_accumulation_params_enq);
+  Connections::Combinational<MatrixParams> CCS_INIT_S1(
+      process_accumulation_params_deq);
+
+  Connections::Fifo<MatrixParams, 1> CCS_INIT_S1(collect_results_params_fifo);
+  Connections::Combinational<MatrixParams> CCS_INIT_S1(
+      collect_results_params_enq);
+  Connections::Combinational<MatrixParams> CCS_INIT_S1(
+      collect_results_params_deq);
+
+  Connections::Fifo<MatrixParams, 1> CCS_INIT_S1(write_back_params_fifo);
+  Connections::Combinational<MatrixParams> CCS_INIT_S1(write_back_params_enq);
+  Connections::Combinational<MatrixParams> CCS_INIT_S1(write_back_params_deq);
 
 #if ENABLE_PERF_COUNTERS
   sc_signal<bool> perf_completion_toggle;
@@ -201,15 +274,35 @@ SC_MODULE(CIMProcessor) {
     cim_array.write_request_channel(write_request_channel);
     cim_array.result_channel(result_channel);
 
+    accum_to_wb_fifo.clk(clk);
+    accum_to_wb_fifo.rst(rstn);
+    accum_to_wb_fifo.enq(accum_to_wb_enq);
+    accum_to_wb_fifo.deq(accum_to_wb_deq);
+
     accum_output_fifo.clk(clk);
     accum_output_fifo.rst(rstn);
     accum_output_fifo.enq(accum_output_enq);
     accum_output_fifo.deq(output_channel);
 
-    result_params_fifo.clk(clk);
-    result_params_fifo.rst(rstn);
-    result_params_fifo.enq(result_params_enq);
-    result_params_fifo.deq(result_params_deq);
+    accumulation_metadata_fifo.clk(clk);
+    accumulation_metadata_fifo.rst(rstn);
+    accumulation_metadata_fifo.enq(accumulation_metadata_enq);
+    accumulation_metadata_fifo.deq(accumulation_metadata_deq);
+
+    process_accumulation_params_fifo.clk(clk);
+    process_accumulation_params_fifo.rst(rstn);
+    process_accumulation_params_fifo.enq(process_accumulation_params_enq);
+    process_accumulation_params_fifo.deq(process_accumulation_params_deq);
+
+    collect_results_params_fifo.clk(clk);
+    collect_results_params_fifo.rst(rstn);
+    collect_results_params_fifo.enq(collect_results_params_enq);
+    collect_results_params_fifo.deq(collect_results_params_deq);
+
+    write_back_params_fifo.clk(clk);
+    write_back_params_fifo.rst(rstn);
+    write_back_params_fifo.enq(write_back_params_enq);
+    write_back_params_fifo.deq(write_back_params_deq);
 
     set_consumed_fifo_0.clk(clk);
     set_consumed_fifo_0.rst(rstn);
@@ -229,7 +322,19 @@ SC_MODULE(CIMProcessor) {
     sensitive << clk.pos();
     async_reset_signal_is(rstn, false);
 
-    SC_THREAD(process_results);
+    SC_THREAD(collect_results);
+    sensitive << clk.pos();
+    async_reset_signal_is(rstn, false);
+
+    SC_THREAD(issue_accumulation_reads);
+    sensitive << clk.pos();
+    async_reset_signal_is(rstn, false);
+
+    SC_THREAD(complete_accumulation);
+    sensitive << clk.pos();
+    async_reset_signal_is(rstn, false);
+
+    SC_THREAD(write_back);
     sensitive << clk.pos();
     async_reset_signal_is(rstn, false);
 
@@ -417,7 +522,9 @@ SC_MODULE(CIMProcessor) {
   void issue_operations() {
     params_in.Reset();
     input_channel.Reset();
-    result_params_enq.ResetWrite();
+    process_accumulation_params_enq.ResetWrite();
+    collect_results_params_enq.ResetWrite();
+    write_back_params_enq.ResetWrite();
     mac_request_channel.ResetWrite();
     set_filled[0].ResetRead();
     set_filled[1].ResetRead();
@@ -433,7 +540,9 @@ SC_MODULE(CIMProcessor) {
       const MatrixParams params = params_in.Pop();
       // MatrixProcessor::push_inputs also sends params to push_weights_params;
       // this thread owns both schedules
-      result_params_enq.Push(params);
+      process_accumulation_params_enq.Push(params);
+      collect_results_params_enq.Push(params);
+      write_back_params_enq.Push(params);
       start.SyncPush();
 
 #ifndef __SYNTHESIS__
@@ -538,6 +647,19 @@ SC_MODULE(CIMProcessor) {
                params.loops[1][params.fy_loop_idx[1]] - 1;
   }
 
+  // Match MatrixProcessor's double-buffer bank-switch boundary
+  static bool finishes_output_tile(
+      const MatrixParams &params,
+      const ac_int<LOOP_WIDTH, false> loop_counters[2][6]) {
+    return finishes_accumulation(params, loop_counters) &&
+           loop_counters[1][params.weight_loop_idx[1]] ==
+               params.loops[1][params.weight_loop_idx[1]] - 1 &&
+           loop_counters[1][params.x_loop_idx[1]] ==
+               params.loops[1][params.x_loop_idx[1]] - 1 &&
+           loop_counters[1][params.y_loop_idx[1]] ==
+               params.loops[1][params.y_loop_idx[1]] - 1;
+  }
+
   // Pop the one complete reduced MAC-result beat and unpack its N lanes
   Pack1D<Psum, N> collect_complete_result() {
     const CBeat beat = result_channel.Pop();
@@ -556,40 +678,69 @@ SC_MODULE(CIMProcessor) {
     return result;
   }
 
-  // Collect, accumulate, and publish results in matrix-loop order
-  // Fuse MatrixProcessor::process_accumulation and write_back for the direct
-  // CIM result path
-  void process_results() {
-    result_params_deq.ResetRead();
+  // Retire raw CIM results and close resident-set lifetimes before accumulation
+  void collect_results() {
+    collect_results_params_deq.ResetRead();
     result_channel.ResetRead();
-    bias_channel.Reset();
-    accum_output_enq.ResetWrite();
-#pragma hls_unroll yes
-    for (int bank = 0; bank < ACCUM_BUFFER_BANKS; bank++) {
-      accumulation_buffer_read_address[bank].Reset();
-      accumulation_buffer_read_data[bank].Reset();
-      accumulation_buffer_write_request[bank].Reset();
-#if DOUBLE_BUFFERED_ACCUM_BUFFER
-      accumulation_buffer_done[bank].Reset();
-#endif
-    }
-
+    result_to_accum_channel.ResetWrite();
     set_consumed_enq[0].ResetWrite();
     set_consumed_enq[1].ResetWrite();
 
-#if ENABLE_PERF_COUNTERS
-    perf_completion_toggle.write(false);
-#endif
+    wait();
+
+    // Preserve the existing two-set lifetime order across job boundaries
+    Set release_wset = 0;
+    bool have_release = false;
+    while (true) {
+      const MatrixParams params = collect_results_params_deq.Pop();
+      ac_int<LOOP_WIDTH, false> loop_counters[2][6];
+#pragma hls_unroll yes
+      for (int level = 0; level < 2; level++) {
+#pragma hls_unroll yes
+        for (int loop = 0; loop < 6; loop++) {
+          loop_counters[level][loop] = 0;
+        }
+      }
+
+      const bool reuse_weights = reuses_weights(params);
+      ac_int<3, false> outer_reuse_indices[2];
+      select_weight_reuse_indices(params, outer_reuse_indices);
+
+      const ac_int<32, false> total_ops = total_operations(params);
+#pragma hls_pipeline_init_interval 1
+#pragma hls_pipeline_stall_mode flush
+      for (ac_int<32, false> step = 0; step < total_ops; step++) {
+        if (needs_weight_load(params, loop_counters, outer_reuse_indices,
+                              reuse_weights, step)) {
+          if (have_release) {
+            set_consumed_enq[release_wset & 1].Push(true);
+            release_wset = (release_wset & 1) ? Set(0) : Set(1);
+          }
+          have_release = true;
+        }
+
+        result_to_accum_channel.Push(collect_complete_result());
+        advance_loop_counters(loop_counters, params);
+      }
+    }
+  }
+
+  // Issue ordered accumulator reads and preserve their partial-result metadata
+  void issue_accumulation_reads() {
+    process_accumulation_params_deq.ResetRead();
+    result_to_accum_channel.ResetRead();
+    bias_channel.Reset();
+    accumulation_metadata_enq.ResetWrite();
+#pragma hls_unroll yes
+    for (int bank = 0; bank < ACCUM_BUFFER_BANKS; bank++) {
+      accumulation_buffer_read_address[bank].Reset();
+    }
 
     bool accumulation_buffer_bank = false;
     wait();
 
-    // Mirror the issue thread's set alternation to release each set only
-    // after the last result computed from it has been collected
-    Set release_wset = 0;
-    bool have_release = false;
     while (true) {
-      const MatrixParams params = result_params_deq.Pop();
+      const MatrixParams params = process_accumulation_params_deq.Pop();
       ac_int<LOOP_WIDTH, false> loop_counters[2][6];
 #pragma hls_unroll yes
       for (int level = 0; level < 2; level++) {
@@ -605,32 +756,17 @@ SC_MODULE(CIMProcessor) {
         bias_reuse_indices[5 - loop] = loop;
       }
 
-      const bool reuse_weights = reuses_weights(params);
-      ac_int<3, false> outer_reuse_indices[2];
-      select_weight_reuse_indices(params, outer_reuse_indices);
-
       const ac_int<32, false> total_ops = total_operations(params);
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
       for (ac_int<32, false> step = 0; step < total_ops; step++) {
-        // At a swap boundary every result of the outgoing set has been
-        // collected, so its elements' MAC issue windows are closed and the
-        // fill thread may safely overwrite it
-        if (needs_weight_load(params, loop_counters, outer_reuse_indices,
-                              reuse_weights, step)) {
-          if (have_release) {
-            set_consumed_enq[release_wset & 1].Push(true);
-            release_wset = (release_wset & 1) ? Set(0) : Set(1);
-          }
-          have_release = true;
-        }
+        AccumulationMetadata metadata;
+        metadata.result = result_to_accum_channel.Pop();
+        metadata.first = starts_accumulation(params, loop_counters);
+        metadata.initial = Pack1D<Buffer, N>::zero();
+        metadata.bank = accumulation_buffer_bank;
 
-        const Pack1D<Psum, N> result = collect_complete_result();
-        const bool first = starts_accumulation(params, loop_counters);
-        const bool last = finishes_accumulation(params, loop_counters);
-        Pack1D<Buffer, N> previous = Pack1D<Buffer, N>::zero();
-
-        if (first) {
+        if (metadata.first) {
           if (params.has_bias) {
             const bool read_bias =
                 loop_counters[1][bias_reuse_indices[0]] == 0 &&
@@ -640,52 +776,119 @@ SC_MODULE(CIMProcessor) {
             if (read_bias) {
               bias = bias_channel.Pop();
             }
-            previous = bias;
+            metadata.initial = bias;
           }
         } else {
           const ac_int<16, false> address =
               accumulation_address(params, loop_counters);
           accumulation_buffer_read_address[accumulation_buffer_bank].Push(
               address);
-          previous =
-              accumulation_buffer_read_data[accumulation_buffer_bank].Pop();
         }
+
+        accumulation_metadata_enq.Push(metadata);
+
+#if DOUBLE_BUFFERED_ACCUM_BUFFER
+        if (params.write_output_to_accum_buffer &&
+            finishes_output_tile(params, loop_counters)) {
+          accumulation_buffer_bank = !accumulation_buffer_bank;
+        }
+#endif
+
+        advance_loop_counters(loop_counters, params);
+      }
+    }
+  }
+
+  // Complete accumulator reads and enqueue lane additions in issue order
+  void complete_accumulation() {
+    accumulation_metadata_deq.ResetRead();
+    accum_to_wb_enq.ResetWrite();
+#pragma hls_unroll yes
+    for (int bank = 0; bank < ACCUM_BUFFER_BANKS; bank++) {
+      accumulation_buffer_read_data[bank].Reset();
+    }
+
+    wait();
+
+#pragma hls_pipeline_init_interval 1
+#pragma hls_pipeline_stall_mode flush
+    while (true) {
+      const AccumulationMetadata metadata = accumulation_metadata_deq.Pop();
+      Pack1D<Buffer, N> previous = metadata.initial;
+
+      if (!metadata.first) {
+#pragma hls_unroll yes
+        for (int bank = 0; bank < ACCUM_BUFFER_BANKS; bank++) {
+          if (metadata.bank == bank) {
+            previous = accumulation_buffer_read_data[bank].Pop();
+          }
+        }
+      }
 
 #pragma hls_unroll yes
-        // Match MatrixProcessor::process_accumulation previous_accumulation
-        // plus outputs
-        for (int n = 0; n < N; n++) {
-          previous[n] += static_cast<Buffer>(result[n]);
-        }
+      for (int n = 0; n < N; n++) {
+        previous[n] += static_cast<Buffer>(metadata.result[n]);
+      }
 
-        // Match MatrixProcessor::write_back direct-output versus
-        // accumulation-buffer decision
+      accum_to_wb_enq.Push(previous);
+    }
+  }
+
+  // Write accumulated values to the buffer or final-output FIFO
+  void write_back() {
+    write_back_params_deq.ResetRead();
+    accum_to_wb_deq.ResetRead();
+    accum_output_enq.ResetWrite();
+#pragma hls_unroll yes
+    for (int bank = 0; bank < ACCUM_BUFFER_BANKS; bank++) {
+      accumulation_buffer_write_request[bank].Reset();
+#if DOUBLE_BUFFERED_ACCUM_BUFFER
+      accumulation_buffer_done[bank].Reset();
+#endif
+    }
+
+#if ENABLE_PERF_COUNTERS
+    perf_completion_toggle.write(false);
+#endif
+
+    bool accumulation_buffer_bank = false;
+    wait();
+
+    while (true) {
+      const MatrixParams params = write_back_params_deq.Pop();
+      ac_int<LOOP_WIDTH, false> loop_counters[2][6];
+#pragma hls_unroll yes
+      for (int level = 0; level < 2; level++) {
+#pragma hls_unroll yes
+        for (int loop = 0; loop < 6; loop++) {
+          loop_counters[level][loop] = 0;
+        }
+      }
+
+      const ac_int<32, false> total_ops = total_operations(params);
+#pragma hls_pipeline_init_interval 1
+#pragma hls_pipeline_stall_mode flush
+      for (ac_int<32, false> step = 0; step < total_ops; step++) {
+        const Pack1D<Buffer, N> accumulated = accum_to_wb_deq.Pop();
+        const bool last = finishes_accumulation(params, loop_counters);
+
         if (last && !(DOUBLE_BUFFERED_ACCUM_BUFFER &&
                       params.write_output_to_accum_buffer)) {
-          accum_output_enq.Push(previous);
+          accum_output_enq.Push(accumulated);
         } else {
           BufferWriteRequest<Pack1D<Buffer, N>> request;
           request.address = accumulation_address(params, loop_counters);
-          request.data = previous;
+          request.data = accumulated;
           request.last = false;
           accumulation_buffer_write_request[accumulation_buffer_bank].Push(
               request);
         }
 
 #if DOUBLE_BUFFERED_ACCUM_BUFFER
-        if (params.write_output_to_accum_buffer) {
-          const bool output_tile_completed =
-              last &&
-              loop_counters[1][params.weight_loop_idx[1]] ==
-                  params.loops[1][params.weight_loop_idx[1]] - 1 &&
-              loop_counters[1][params.x_loop_idx[1]] ==
-                  params.loops[1][params.x_loop_idx[1]] - 1 &&
-              loop_counters[1][params.y_loop_idx[1]] ==
-                  params.loops[1][params.y_loop_idx[1]] - 1;
-          if (output_tile_completed) {
-            accumulation_buffer_done[accumulation_buffer_bank].SyncPush();
-            accumulation_buffer_bank = !accumulation_buffer_bank;
-          }
+        if (params.write_output_to_accum_buffer &&
+            finishes_output_tile(params, loop_counters)) {
+          accumulation_buffer_done[accumulation_buffer_bank].SyncPush();
+          accumulation_buffer_bank = !accumulation_buffer_bank;
         }
 #endif
 
@@ -807,6 +1010,11 @@ SC_MODULE(CIMProcessor) {
               accumulation_buffer_write_request[i].vld.read() &&
               !accumulation_buffer_write_request[i].rdy.read();
         }
+
+#ifdef __SYNTHESIS__
+        if (accum_to_wb_enq.vld.read() && !accum_to_wb_enq.rdy.read())
+          accumulation_stalled = true;
+#endif
 
         bool final_output_stalled = false;
 #ifdef __SYNTHESIS__

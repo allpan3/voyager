@@ -23,11 +23,4 @@ proc pre_assembly {} {
   directive set /$full_block_name_stripped/$cim_array_name_stripped -MAP_TO_MODULE {[Block] CIMArray.v1}
 }
 
-# Preserve the MatrixUnit accumulation-buffer response latency contract
-proc pre_extract {} {
-  global DOUBLE_BUFFERED_ACCUM_BUFFER
-  cycle set accumulation_buffer_read_data.Pop() -from accumulation_buffer_read_address.Push() -equal 2
-  if {$DOUBLE_BUFFERED_ACCUM_BUFFER == true} {
-    cycle set accumulation_buffer_read_data.Pop()#1 -from accumulation_buffer_read_address.Push()#1 -equal 2
-  }
-}
+# Accumulator requests and responses are decoupled across independent threads

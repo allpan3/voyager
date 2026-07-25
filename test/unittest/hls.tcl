@@ -189,14 +189,6 @@ go assembly
 
 go architect
 
-# Preserve the MatrixUnit accumulation-buffer response latency contract
-if {$BLOCK eq "CIMProcessor"} {
-  cycle set accumulation_buffer_read_data.Pop() -from accumulation_buffer_read_address.Push() -equal 2
-  if {[info exists ::env(DOUBLE_BUFFERED_ACCUM_BUFFER)] && $::env(DOUBLE_BUFFERED_ACCUM_BUFFER) eq "true"} {
-    cycle set accumulation_buffer_read_data.Pop()#1 -from accumulation_buffer_read_address.Push()#1 -equal 2
-  }
-}
-
 go extract
 project save
 
