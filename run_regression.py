@@ -9,6 +9,7 @@ import os
 import subprocess
 import pandas as pd
 import re
+import shlex
 import signal
 import sys
 from deepdiff import DeepDiff
@@ -79,6 +80,16 @@ def get_build_folder(env_vars):
         ["make", "-s", "print-build-dir"], env=env_vars, text=True
     )
     return [line for line in output.splitlines() if line.strip()][-1].strip()
+
+
+# Ask the Makefile for the backend-specific SCVerify makefile and arguments
+def get_scverify_rtl_config(env_vars):
+    output = subprocess.check_output(
+        ["make", "-s", "print-scverify-rtl-config"], env=env_vars, text=True
+    )
+    config = [line for line in output.splitlines() if line.strip()][-1].strip()
+    makefile, _, args = config.partition("|")
+    return makefile, shlex.split(args)
 
 
 def utilization(df):
@@ -324,6 +335,7 @@ def run_rtl_test(model, layer, layer_count, num_tiles, output_folder, debug):
     env_vars["LD_PRELOAD"] = env_vars["CONDA_PREFIX"] + "/lib/libstdc++.so.6"
     set_default_env_vars(env_vars)
     build_folder = get_build_folder(env_vars)
+    rtl_makefile, rtl_args = get_scverify_rtl_config(env_vars)
 
     # we occasionally see the test fail due to filesystem issues ("no rule to
     # make target", but the target exists), so we retry up to 3 times
@@ -331,7 +343,7 @@ def run_rtl_test(model, layer, layer_count, num_tiles, output_folder, debug):
         with open(f"{output_folder}/{model}_{layer}.log", "w") as stdout_file:
             try:
                 subprocess.run(
-                    ["make", "-f", "scverify/Verify_concat_sim_rtl_v_vcs.mk", "sim"],
+                    ["make", "-f", f"scverify/{rtl_makefile}", *rtl_args, "sim"],
                     cwd=f"{build_folder}/Catapult/{env_vars['TECHNOLOGY']}/clock_{env_vars['CLOCK_PERIOD']}/Accelerator/Accelerator.v1",
                     env=env_vars,
                     stdout=stdout_file,
@@ -420,11 +432,12 @@ def run_rtl_tests(
     env_vars["LD_PRELOAD"] = env_vars["CONDA_PREFIX"] + "/lib/libstdc++.so.6"
     set_default_env_vars(env_vars)
     build_folder = get_build_folder(env_vars)
+    rtl_makefile, rtl_args = get_scverify_rtl_config(env_vars)
 
     # build VCS simulation binary
     with open(f"{results_folder}/vcs_build.log", "w") as stdout_file:
         subprocess.run(
-            ["make", "-f", "scverify/Verify_concat_sim_rtl_v_vcs.mk", "build"],
+            ["make", "-f", f"scverify/{rtl_makefile}", *rtl_args, "build"],
             cwd=f"{build_folder}/Catapult/{env_vars['TECHNOLOGY']}/clock_{env_vars['CLOCK_PERIOD']}/Accelerator/Accelerator.v1",
             env=env_vars,
             stdout=stdout_file,

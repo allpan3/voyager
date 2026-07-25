@@ -920,8 +920,6 @@ struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
   // Select one stable snapshot register for the external CSR-style read port
   void read_performance_counter() {
     MatrixPerformance::Counter value = 0;
-    if (perf_counter_select.read() == MatrixPerformance::SCHEMA_VERSION)
-      value = MatrixPerformance::SCHEMA_VERSION_VALUE;
     if (perf_counter_select.read() == MatrixPerformance::SNAPSHOT_SEQUENCE)
       value = perf_snapshot_sequence.read();
 #pragma hls_unroll yes

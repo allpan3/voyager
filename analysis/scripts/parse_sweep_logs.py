@@ -25,6 +25,13 @@ PERF_COUNTERS = [
     "weight_unavailable_cycles", "weight_backpressure_cycles",
     "result_backpressure_cycles", "accumulation_stall_cycles",
     "output_backpressure_cycles", "output_fifo_full_cycles",
+    "cim_set_wait_cycles", "cim_completion_queue_stall_cycles",
+    "cim_result_path_stall_cycles",
+]
+CIM_STALL_COUNTERS = [
+    "cim_set_wait_cycles",
+    "cim_completion_queue_stall_cycles",
+    "cim_result_path_stall_cycles",
 ]
 
 manifest_path = os.path.join(SWEEP_DIR, "manifest.csv")
@@ -84,12 +91,23 @@ for fn in sorted(os.listdir(SWEEP_DIR)):
     pm = re.search(r"^MatrixPerfHardware:(.*)$", txt, re.M)
     if pm:
         perf = dict(kv.split("=") for kv in pm.group(1).split())
+        if "cim_completion_queue_stall_cycles" not in perf:
+            perf["cim_completion_queue_stall_cycles"] = perf.get(
+                "cim_array_credit_stall_cycles", ""
+            )
+
+    # Normalize one synthesized stall counter against its snapshot duration
+    def perf_pct_of_core(name):
+        try:
+            return round(100 * int(perf[name]) / int(perf["core_cycles"]), 1)
+        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+            return ""
 
     # Only RTL cosimulation is performance-reportable
     cyc = total_ns / CLK_NS if (sim == "rtl" and total_ns) else None
     ideal_cyc = ideal_ns / CLK_NS if (sim == "rtl" and ideal_ns) else None
     # Idealised L2 model: one word/cycle/port. Unpinned runs sit at the matched
-    # width (one array row/column per cycle); a pinned width overrides both.
+    # width (one array row/column per cycle); pinned widths override both.
     ic_pw = pw_ic if pinned else meta["ic_matched"]
     oc_pw = pw_oc if pinned else meta["oc_matched"]
     peak_rd_bpc = (ic_pw + 2 * oc_pw) / 8
@@ -118,6 +136,10 @@ for fn in sorted(os.listdir(SWEEP_DIR)):
         read_bw_pct_of_peak=round(100 * rd_bpc / peak_rd_bpc, 1) if rd_bpc else "",
         write_bw_pct_of_peak=round(100 * wr_bpc / peak_wr_bpc, 1) if wr_bpc else "",
         **{name: perf.get(name, "") for name in PERF_COUNTERS},
+        **{
+            name.removesuffix("_cycles") + "_pct_of_core": perf_pct_of_core(name)
+            for name in CIM_STALL_COUNTERS
+        },
     ))
 
 if not rows:

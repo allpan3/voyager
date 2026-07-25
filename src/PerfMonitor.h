@@ -14,8 +14,7 @@ using SnapshotSequence = ac_int<16, false>;
 
 // Stable indices for the optional synthesized matrix-performance counter bank
 enum CounterId {
-  SCHEMA_VERSION = 0,
-  SNAPSHOT_SEQUENCE,
+  SNAPSHOT_SEQUENCE = 0,
   CORE_CYCLES,
   ARRAY_RESIDENT_CYCLES,
   ARRAY_ISSUE_CYCLES,
@@ -27,13 +26,13 @@ enum CounterId {
   ACCUMULATION_STALL_CYCLES,
   OUTPUT_BACKPRESSURE_CYCLES,
   OUTPUT_FIFO_FULL_CYCLES,
+  CIM_SET_WAIT_CYCLES,
+  CIM_COMPLETION_QUEUE_STALL_CYCLES,
+  CIM_RESULT_PATH_STALL_CYCLES,
   COUNTER_COUNT
 };
 
 static constexpr int PERFORMANCE_COUNTER_COUNT = COUNTER_COUNT - CORE_CYCLES;
-static constexpr int COMMON_PERFORMANCE_COUNTER_COUNT =
-    OUTPUT_FIFO_FULL_CYCLES - CORE_CYCLES;
-static constexpr unsigned SCHEMA_VERSION_VALUE = 2;
 
 // Convert a public performance-counter ID to its compact storage index
 static constexpr int storage_index(CounterId id) {

@@ -118,6 +118,10 @@ SC_MODULE(CIMProcessorTb) {
   Connections::Combinational<MatrixParams> params_channel;
   Connections::Combinational<BufferVector> output_channel;
   Connections::SyncChannel start_channel;
+#if ENABLE_PERF_COUNTERS
+  sc_signal<MatrixPerformance::CounterIndex> perf_counter_select;
+  sc_signal<MatrixPerformance::Counter> perf_counter_value;
+#endif
 
   Connections::Combinational<ac_int<16, false>> accumulation_read_address_0;
   Connections::Combinational<BufferVector> accumulation_read_data_0;
@@ -171,6 +175,10 @@ SC_MODULE(CIMProcessorTb) {
     dut.params_in(params_channel);
     dut.output_channel(output_channel);
     dut.start(start_channel);
+#if ENABLE_PERF_COUNTERS
+    dut.perf_counter_select(perf_counter_select);
+    dut.perf_counter_value(perf_counter_value);
+#endif
     dut.accumulation_buffer_read_address[0](accumulation_read_address_0);
     dut.accumulation_buffer_read_data[0](accumulation_read_data_0);
     dut.accumulation_buffer_write_request[0](accumulation_write_request_0);
@@ -620,6 +628,9 @@ SC_MODULE(CIMProcessorTb) {
     input_channel.ResetWrite();
     weight_channel.ResetWrite();
     start_channel.ResetRead();
+#if ENABLE_PERF_COUNTERS
+    perf_counter_select.write(MatrixPerformance::SNAPSHOT_SEQUENCE);
+#endif
 
     rstn.write(false);
     tick();

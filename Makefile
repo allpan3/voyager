@@ -177,6 +177,12 @@ CC_BUILD_DIR = $(BUILD_DIR)/cc
 .PHONY: print-build-dir
 print-build-dir:
 	@echo $(BUILD_DIR)
+
+# Report the backend-specific SCVerify makefile and arguments to external runners
+.PHONY: print-scverify-rtl-config
+print-scverify-rtl-config:
+	@echo '$(SCVERIFY_RTL_MK)|$(SCVERIFY_RTL_ARGS)'
+
 ALL_BUILD_DIRS = $(CC_BUILD_DIR) $(TOOLCHAIN_BUILD_DIRS)
 # Create build dirs automatically
 $(info $(shell mkdir -p $(ALL_BUILD_DIRS)))

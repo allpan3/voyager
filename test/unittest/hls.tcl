@@ -96,6 +96,9 @@ append compiler_flags " -DCIM_TEST_B_PORT_TILES=$CIM_B_PORT_TILES"
 if {[info exists ::env(DOUBLE_BUFFERED_ACCUM_BUFFER)]} {
   append compiler_flags " -DDOUBLE_BUFFERED_ACCUM_BUFFER=$::env(DOUBLE_BUFFERED_ACCUM_BUFFER)"
 }
+if {[info exists ::env(ENABLE_PERF_COUNTERS)]} {
+  append compiler_flags " -DENABLE_PERF_COUNTERS=$::env(ENABLE_PERF_COUNTERS)"
+}
 solution options set Input/CompilerFlags $compiler_flags
 
 solution options set Input/SearchPath "$ROOT/lib" -append
@@ -125,6 +128,9 @@ if {$SCVERIFY} {
   append scverify_comp_flags $processor_test_flags
   if {[info exists ::env(DOUBLE_BUFFERED_ACCUM_BUFFER)]} {
     append scverify_comp_flags " -DDOUBLE_BUFFERED_ACCUM_BUFFER=$::env(DOUBLE_BUFFERED_ACCUM_BUFFER)"
+  }
+  if {[info exists ::env(ENABLE_PERF_COUNTERS)]} {
+    append scverify_comp_flags " -DENABLE_PERF_COUNTERS=$::env(ENABLE_PERF_COUNTERS)"
   }
   solution options set Flows/VCS/COMP_FLAGS $scverify_comp_flags
   solution options set Flows/VCS/VCSELAB_OPTS \

@@ -133,6 +133,12 @@ notes = [
      "cycle-accurate source of truth. SystemC rows remain in Results for "
      "functional pass/fail and traffic counts only; their performance cells "
      "are blank. Any config missing an RTL row shows blank in Comparison.", N),
+    ("CIM Stalls reports the three backend-specific counters as raw cycles and "
+     "percent of core cycles. set_wait is time awaiting a completely filled "
+     "resident set; completion_queue is a pending MAC blocked by reserved or "
+     "occupied completion storage; result_path is the union of "
+     "accumulation-channel stalls and a full final-output FIFO, so these "
+     "categories can overlap other counters.", N),
 ]
 r = 1
 for text, font in notes:
@@ -217,6 +223,57 @@ for j in range(2, 5):
 for j in range(5, 5 + len(layers) + 3):
     ws.column_dimensions[get_column_letter(j)].width = 12
 
+# ------------------------------------------------------------ CIM Stalls -----
+ws = wb.create_sheet("CIM Stalls")
+ws.freeze_panes = "A3"
+ws["A1"] = "CIM RTL stall attribution"
+ws["A1"].font = TITLE
+stall_fields = [
+    ("config", "Config"),
+    ("geometry", "Geometry"),
+    ("layer", "Layer"),
+    ("runtime_cycles", "Runtime"),
+    ("core_cycles", "Core cycles"),
+    ("cim_set_wait_cycles", "Set wait"),
+    ("cim_set_wait_pct_of_core", "Set wait % core"),
+    ("cim_completion_queue_stall_cycles", "Completion queue"),
+    ("cim_completion_queue_stall_pct_of_core", "Completion queue % core"),
+    ("cim_result_path_stall_cycles", "Result path"),
+    ("cim_result_path_stall_pct_of_core", "Result path % core"),
+    ("result_backpressure_cycles", "Raw-result backpressure"),
+    ("output_fifo_full_cycles", "Output FIFO full"),
+    ("output_backpressure_cycles", "Downstream output stall"),
+]
+for j, (_, heading) in enumerate(stall_fields, 1):
+    c = ws.cell(row=2, column=j, value=heading)
+    c.font = H
+    c.fill = HFILL
+    c.alignment = CTR
+ws.row_dimensions[2].height = 34
+cim_stalls = [
+    d for d in rows if d["backend"] == "cim" and d["sim"] == primary_sim
+]
+cim_stalls.sort(key=lambda d: (d["geometry"], d["config"], d["layer"]))
+for i, d in enumerate(cim_stalls, 3):
+    for j, (field, _) in enumerate(stall_fields, 1):
+        value = d.get(field, "")
+        if field.endswith("_pct_of_core") and value not in ("", None):
+            value = float(value)
+        elif field.endswith("_cycles") and value not in ("", None):
+            value = int(float(value))
+        c = ws.cell(row=i, column=j, value=value)
+        c.font = N
+        c.fill = fill_for(d)
+        c.border = THIN
+        if field.endswith("_pct_of_core") and isinstance(value, float):
+            c.number_format = '0.0"%"'
+        elif field.endswith("_cycles") and isinstance(value, int):
+            c.number_format = "#,##0"
+for j, (field, heading) in enumerate(stall_fields, 1):
+    ws.column_dimensions[get_column_letter(j)].width = max(
+        11, min(32, max(len(field), len(heading)) + 2)
+    )
+
 # ---------------------------------------------------------------- Results ----
 ws = wb.create_sheet("Results")
 ws.freeze_panes = "B2"
@@ -226,14 +283,34 @@ fields = ["config", "sim", "bw_mode", "ic_port_width_bits", "oc_port_width_bits"
           "output_axis_tiles", "layer", "passed", "runtime_cycles", "runtime_us",
           "ideal_cycles", "utilization", "cycles_per_ideal_beat",
           "ext_read_GBps", "ext_write_GBps", "read_bw_pct_of_peak",
-          "core_cycles", "array_issue_cycles", "weight_backpressure_cycles",
-          "accumulation_stall_cycles"]
+          "core_cycles", "array_resident_cycles", "array_issue_cycles",
+          "input_unavailable_cycles", "input_backpressure_cycles",
+          "weight_unavailable_cycles", "weight_backpressure_cycles",
+          "result_backpressure_cycles", "accumulation_stall_cycles",
+          "output_backpressure_cycles", "output_fifo_full_cycles",
+          "cim_set_wait_cycles", "cim_set_wait_pct_of_core",
+          "cim_completion_queue_stall_cycles",
+          "cim_completion_queue_stall_pct_of_core",
+          "cim_result_path_stall_cycles",
+          "cim_result_path_stall_pct_of_core"]
 for j, f in enumerate(fields, 1):
     c = ws.cell(row=1, column=j, value=f); c.font = H; c.fill = HFILL; c.alignment = CTR
 ws.row_dimensions[1].height = 30
 pct = {"utilization"}
-percent_points = {"read_bw_pct_of_peak"}
-ints = {"runtime_cycles", "ideal_cycles", "macs"}
+percent_points = {
+    "read_bw_pct_of_peak", "cim_set_wait_pct_of_core",
+    "cim_completion_queue_stall_pct_of_core",
+    "cim_result_path_stall_pct_of_core",
+}
+ints = {
+    "runtime_cycles", "ideal_cycles", "macs", "core_cycles",
+    "array_resident_cycles", "array_issue_cycles", "input_unavailable_cycles",
+    "input_backpressure_cycles", "weight_unavailable_cycles",
+    "weight_backpressure_cycles", "result_backpressure_cycles",
+    "accumulation_stall_cycles", "output_backpressure_cycles",
+    "output_fifo_full_cycles", "cim_set_wait_cycles",
+    "cim_completion_queue_stall_cycles", "cim_result_path_stall_cycles",
+}
 srt = sorted(rows, key=lambda r: (r["geometry"], r["backend"] != "systolic",
              r["cim_cell"], r["config"], r["sim"], r["layer"]))
 for i, d in enumerate(srt, 2):

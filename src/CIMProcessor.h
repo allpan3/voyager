@@ -59,6 +59,7 @@ SC_MODULE(CIMProcessor) {
   static constexpr int WEIGHT_BEATS_PER_ROW = OUTPUT_AXIS_TILES / B_PORT_TILES;
 
   static constexpr int LOOP_WIDTH = 10;
+  static constexpr int OUTPUT_FIFO_DEPTH = 8;
 #if DOUBLE_BUFFERED_ACCUM_BUFFER
   static constexpr int ACCUM_BUFFER_BANKS = 2;
 #else
@@ -161,6 +162,11 @@ SC_MODULE(CIMProcessor) {
   Connections::Combinational<WriteRequest> CCS_INIT_S1(write_request_channel);
   Connections::Combinational<CBeat> CCS_INIT_S1(result_channel);
 
+  // Match MatrixProcessor's final-output decoupling after accumulation
+  Connections::Fifo<Pack1D<Buffer, N>, OUTPUT_FIFO_DEPTH> CCS_INIT_S1(
+      accum_output_fifo);
+  Connections::Combinational<Pack1D<Buffer, N>> CCS_INIT_S1(accum_output_enq);
+
   // Swap interlock mirroring the weight DoubleBuffer's bank alternation: a set
   // becomes MAC-able once completely filled, and is refilled only after every
   // result computed from it has been collected (the analog of a bank finishing
@@ -183,7 +189,7 @@ SC_MODULE(CIMProcessor) {
   sc_signal<bool> perf_completion_toggle;
   sc_signal<MatrixPerformance::SnapshotSequence> perf_snapshot_sequence;
   sc_signal<MatrixPerformance::Counter>
-      perf_snapshot[MatrixPerformance::COMMON_PERFORMANCE_COUNTER_COUNT];
+      perf_snapshot[MatrixPerformance::PERFORMANCE_COUNTER_COUNT];
 #endif
 
  public:
@@ -194,6 +200,11 @@ SC_MODULE(CIMProcessor) {
     cim_array.mac_request_channel(mac_request_channel);
     cim_array.write_request_channel(write_request_channel);
     cim_array.result_channel(result_channel);
+
+    accum_output_fifo.clk(clk);
+    accum_output_fifo.rst(rstn);
+    accum_output_fifo.enq(accum_output_enq);
+    accum_output_fifo.deq(output_channel);
 
     result_params_fifo.clk(clk);
     result_params_fifo.rst(rstn);
@@ -230,8 +241,7 @@ SC_MODULE(CIMProcessor) {
     SC_METHOD(read_performance_counter);
     sensitive << perf_counter_select;
     sensitive << perf_snapshot_sequence;
-    for (int i = 0; i < MatrixPerformance::COMMON_PERFORMANCE_COUNTER_COUNT;
-         i++) {
+    for (int i = 0; i < MatrixPerformance::PERFORMANCE_COUNTER_COUNT; i++) {
       sensitive << perf_snapshot[i];
     }
 #endif
@@ -553,7 +563,7 @@ SC_MODULE(CIMProcessor) {
     result_params_deq.ResetRead();
     result_channel.ResetRead();
     bias_channel.Reset();
-    output_channel.Reset();
+    accum_output_enq.ResetWrite();
 #pragma hls_unroll yes
     for (int bank = 0; bank < ACCUM_BUFFER_BANKS; bank++) {
       accumulation_buffer_read_address[bank].Reset();
@@ -652,7 +662,7 @@ SC_MODULE(CIMProcessor) {
         // accumulation-buffer decision
         if (last && !(DOUBLE_BUFFERED_ACCUM_BUFFER &&
                       params.write_output_to_accum_buffer)) {
-          output_channel.Push(previous);
+          accum_output_enq.Push(previous);
         } else {
           BufferWriteRequest<Pack1D<Buffer, N>> request;
           request.address = accumulation_address(params, loop_counters);
@@ -693,15 +703,14 @@ SC_MODULE(CIMProcessor) {
   // datapath control
   void monitor_performance() {
     MatrixPerformance::Counter
-        counters[MatrixPerformance::COMMON_PERFORMANCE_COUNTER_COUNT];
+        counters[MatrixPerformance::PERFORMANCE_COUNTER_COUNT];
     ac_int<16, false> inflight = 0;
     MatrixPerformance::SnapshotSequence snapshot_sequence = 0;
     bool active = false;
     bool observed_completion_toggle = false;
 
 #pragma hls_unroll yes
-    for (int i = 0; i < MatrixPerformance::COMMON_PERFORMANCE_COUNTER_COUNT;
-         i++) {
+    for (int i = 0; i < MatrixPerformance::PERFORMANCE_COUNTER_COUNT; i++) {
       counters[i] = 0;
       perf_snapshot[i].write(0);
     }
@@ -729,8 +738,7 @@ SC_MODULE(CIMProcessor) {
         snapshot_sequence++;
         perf_snapshot_sequence.write(snapshot_sequence);
 #pragma hls_unroll yes
-        for (int i = 0; i < MatrixPerformance::COMMON_PERFORMANCE_COUNTER_COUNT;
-             i++) {
+        for (int i = 0; i < MatrixPerformance::PERFORMANCE_COUNTER_COUNT; i++) {
           perf_snapshot[i].write(counters[i]);
         }
         active = false;
@@ -739,8 +747,7 @@ SC_MODULE(CIMProcessor) {
 
       if (started) {
 #pragma hls_unroll yes
-        for (int i = 0; i < MatrixPerformance::COMMON_PERFORMANCE_COUNTER_COUNT;
-             i++) {
+        for (int i = 0; i < MatrixPerformance::PERFORMANCE_COUNTER_COUNT; i++) {
           counters[i] = 0;
         }
         inflight = 0;
@@ -760,9 +767,20 @@ SC_MODULE(CIMProcessor) {
           counters[MatrixPerformance::storage_index(
               MatrixPerformance::INPUT_UNAVAILABLE_CYCLES)]++;
 #ifdef __SYNTHESIS__
-        if (mac_request_channel.vld.read() && !mac_request_channel.rdy.read())
+        const bool completion_queue_stalled =
+            mac_request_channel.vld.read() && !mac_request_channel.rdy.read();
+        if (completion_queue_stalled)
           counters[MatrixPerformance::storage_index(
               MatrixPerformance::INPUT_BACKPRESSURE_CYCLES)]++;
+        if (completion_queue_stalled)
+          counters[MatrixPerformance::storage_index(
+              MatrixPerformance::CIM_COMPLETION_QUEUE_STALL_CYCLES)]++;
+        const bool set_wait =
+            (set_filled[0].rdy.read() && !set_filled[0].vld.read()) ||
+            (set_filled[1].rdy.read() && !set_filled[1].vld.read());
+        if (set_wait)
+          counters[MatrixPerformance::storage_index(
+              MatrixPerformance::CIM_SET_WAIT_CYCLES)]++;
 #endif
         if (weight_channel.rdy.read() && !weight_channel.vld.read())
           counters[MatrixPerformance::storage_index(
@@ -790,9 +808,22 @@ SC_MODULE(CIMProcessor) {
               !accumulation_buffer_write_request[i].rdy.read();
         }
 
+        bool final_output_stalled = false;
+#ifdef __SYNTHESIS__
+        final_output_stalled =
+            accum_output_enq.vld.read() && !accum_output_enq.rdy.read();
+#endif
         if (accumulation_stalled)
           counters[MatrixPerformance::storage_index(
               MatrixPerformance::ACCUMULATION_STALL_CYCLES)]++;
+#ifdef __SYNTHESIS__
+        if (final_output_stalled)
+          counters[MatrixPerformance::storage_index(
+              MatrixPerformance::OUTPUT_FIFO_FULL_CYCLES)]++;
+#endif
+        if (accumulation_stalled || final_output_stalled)
+          counters[MatrixPerformance::storage_index(
+              MatrixPerformance::CIM_RESULT_PATH_STALL_CYCLES)]++;
         if (output_channel.vld.read() && !output_channel.rdy.read())
           counters[MatrixPerformance::storage_index(
               MatrixPerformance::OUTPUT_BACKPRESSURE_CYCLES)]++;
@@ -811,13 +842,10 @@ SC_MODULE(CIMProcessor) {
   // Select one stable snapshot register for the external CSR-style read port
   void read_performance_counter() {
     MatrixPerformance::Counter value = 0;
-    if (perf_counter_select.read() == MatrixPerformance::SCHEMA_VERSION)
-      value = MatrixPerformance::SCHEMA_VERSION_VALUE;
     if (perf_counter_select.read() == MatrixPerformance::SNAPSHOT_SEQUENCE)
       value = perf_snapshot_sequence.read();
 #pragma hls_unroll yes
-    for (int i = 0; i < MatrixPerformance::COMMON_PERFORMANCE_COUNTER_COUNT;
-         i++) {
+    for (int i = 0; i < MatrixPerformance::PERFORMANCE_COUNTER_COUNT; i++) {
       if (perf_counter_select.read() == MatrixPerformance::CORE_CYCLES + i)
         value = perf_snapshot[i].read();
     }
