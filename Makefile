@@ -15,6 +15,9 @@ export IC_PORT_WIDTH ?=
 export OC_PORT_WIDTH ?=
 
 export MATRIX_BACKEND ?= 0
+CODEGEN_BACKEND = $(if $(filter 1,$(MATRIX_BACKEND)),cim,sa)
+CODEGEN_BACKEND_GEOMETRY = $(CODEGEN_BACKEND)_$(IC_DIMENSION)x$(OC_DIMENSION)
+
 export CIM_CH_IN ?= 64
 export CIM_CH_OUT ?= 8
 export CIM_B_SETS ?= 18
@@ -547,11 +550,11 @@ $(CC_BUILD_DIR)/tiling.pb.o: test/compiler/proto/tiling.pb.cc
 
 .PHONY: network-proto
 network-proto: \
-    $(CODEGEN_DIR)/networks/$(NETWORK)/$(DATATYPE)/model.txt \
+    $(CODEGEN_DIR)/networks/$(NETWORK)/$(DATATYPE)/$(CODEGEN_BACKEND_GEOMETRY)/model.txt \
     test/compiler/proto/param.pb.cc \
     test/compiler/proto/tiling_pb2.py \
     test/compiler/proto/tiling.pb.cc \
-    $(CODEGEN_DIR)/networks/$(NETWORK)/$(DATATYPE)/$(IC_DIMENSION)x$(OC_DIMENSION)_$(INPUT_BUFFER_SIZE)x$(WEIGHT_BUFFER_SIZE)x$(ACCUM_BUFFER_SIZE)_$(DOUBLE_BUFFERED_ACCUM_BUFFER)/tilings.txtpb
+    $(CODEGEN_DIR)/networks/$(NETWORK)/$(DATATYPE)/$(CODEGEN_BACKEND_GEOMETRY)/$(IC_DIMENSION)x$(OC_DIMENSION)_$(INPUT_BUFFER_SIZE)x$(WEIGHT_BUFFER_SIZE)x$(ACCUM_BUFFER_SIZE)_$(DOUBLE_BUFFERED_ACCUM_BUFFER)/tilings.txtpb
 
 include codegen.mk
 

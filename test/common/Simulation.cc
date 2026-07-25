@@ -117,11 +117,7 @@ void Simulation::load_data() {
     dataloaders["accelerator"] = new DataLoader(memories["accelerator"], true);
   }
 
-  std::string project_root = std::string(getenv("PROJECT_ROOT"));
-  std::string datatype = std::string(getenv("DATATYPE"));
-  std::string data_dir = project_root + "/" +
-                         std::string(getenv("CODEGEN_DIR")) + "/networks/" +
-                         model + "/" + datatype + "/tensor_files";
+  std::string data_dir = get_codegen_network_dir(model) + "/tensor_files";
 
   const auto operations = network->get_operations(tests, false);
 

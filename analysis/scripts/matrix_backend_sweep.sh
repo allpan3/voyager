@@ -85,10 +85,9 @@ if [ -z "$RES" ]; then
 fi
 mkdir -p "$RES"
 
-CODEGEN_DIR_64=${CODEGEN_DIR_64:-cmp_results/compiler64}
-
 export DATATYPE=INT8 INPUT_BUFFER_SIZE=1024 WEIGHT_BUFFER_SIZE=1024 ACCUM_BUFFER_SIZE=1024
 export CLOCK_PERIOD=5 NETWORK=mobilebert_encoder SIMS=gold,accelerator
+export CODEGEN_DIR=${CODEGEN_DIR:-test/compiler}
 DTYPE_BITS=8                           # INT8 operands on both ports
 
 LAYERS=(
@@ -204,9 +203,6 @@ for rec in "${CONFIGS[@]}"; do
   fi
   echo "=== [$(date +%T)] $name  port ${tok}: ${icb}/${ocb} b = $((icb/8))/$((ocb/8)) B/cyc ==="
   export MATRIX_BACKEND=$backend IC_DIMENSION=$K OC_DIMENSION=$N
-  # The compiler disables reshape fusion at unroll dim >= 64, so those need
-  # their own codegen corpus
-  if [ "$K" -ge 64 ] || [ "$N" -ge 64 ]; then export CODEGEN_DIR=$CODEGEN_DIR_64; else export CODEGEN_DIR=test/compiler; fi
   if [ "$backend" = 1 ]; then
     local_basec=20; [ "$cell" = 8 ] && local_basec=24
     export CIM_CH_IN=$chin CIM_CH_OUT=$chout CIM_B_SETS=2 \

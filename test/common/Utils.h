@@ -5,6 +5,7 @@
 // IWYU pragma: begin_exports
 #include <algorithm>
 #include <any>
+#include <filesystem>
 #include <iostream>
 #include <map>
 #include <numeric>
@@ -168,14 +169,33 @@ inline std::vector<codegen::Tensor> get_op_outputs(
   return outputs;
 }
 
+// Return the backend-qualified matrix geometry used in generated paths
+inline std::string get_codegen_backend_geometry() {
+  const char* matrix_backend = std::getenv("MATRIX_BACKEND");
+  const std::string backend =
+      matrix_backend != nullptr && std::string(matrix_backend) == "1" ? "cim"
+                                                                      : "sa";
+  return backend + "_" + std::getenv("IC_DIMENSION") + "x" +
+         std::getenv("OC_DIMENSION");
+}
+
+// Return the backend- and geometry-scoped generated network directory
+inline std::string get_codegen_network_dir(const std::string& model_name) {
+  std::filesystem::path codegen_root(std::getenv("CODEGEN_DIR"));
+  if (codegen_root.is_relative()) {
+    codegen_root =
+        std::filesystem::path(std::getenv("PROJECT_ROOT")) / codegen_root;
+  }
+  return (codegen_root / "networks" / model_name / std::getenv("DATATYPE") /
+          get_codegen_backend_geometry())
+      .string();
+}
+
 inline float* read_constant_param(const codegen::Tensor& tensor) {
   const char* env_var = std::getenv("NETWORK");
   std::string model_name(env_var);
-  std::string project_root = std::string(std::getenv("PROJECT_ROOT"));
-  std::string datatype = std::string(std::getenv("DATATYPE"));
-  std::string filename =
-      project_root + "/" + std::string(getenv("CODEGEN_DIR")) + "/networks/" +
-      model_name + "/" + datatype + "/tensor_files/" + tensor.node() + ".bin";
+  std::string filename = get_codegen_network_dir(model_name) +
+                         "/tensor_files/" + tensor.node() + ".bin";
 
   const int size = get_size(tensor, false, false);
 

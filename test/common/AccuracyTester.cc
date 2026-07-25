@@ -34,9 +34,8 @@ bool run_sample(std::string model_name, std::string data_dir,
     data_loader->load_tensor(tensor, inputs_dir, false);
   }
 
-  std::string params_dir = std::string(getenv("CODEGEN_DIR")) + "/networks/" +
-                           model_name + "/" + std::getenv("DATATYPE") +
-                           "/tensor_files";
+  std::string params_dir =
+      get_codegen_network_dir(model_name) + "/tensor_files";
   for (const auto& tensor : model.parameters()) {
     data_loader->load_tensor(tensor, params_dir, false);
   }

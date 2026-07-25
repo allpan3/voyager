@@ -562,6 +562,16 @@ def run_accuracy(model, dataset, num_processes, output_folder):
     ic_unroll = int(os.environ["IC_DIMENSION"])
     oc_unroll = int(os.environ["OC_DIMENSION"])
     block_size = max(ic_unroll, oc_unroll)
+    codegen_backend = "cim" if env_vars.get("MATRIX_BACKEND", "0") == "1" else "sa"
+    backend_geometry = f"{codegen_backend}_{ic_unroll}x{oc_unroll}"
+    codegen_network_dir = (
+        f"{env_vars['CODEGEN_DIR']}/networks/{model}/{env_vars['DATATYPE']}/{backend_geometry}"
+    )
+    tiling_dir = (
+        f"{codegen_network_dir}/{ic_unroll}x{oc_unroll}_"
+        f"{env_vars['INPUT_BUFFER_SIZE']}x{env_vars['WEIGHT_BUFFER_SIZE']}x"
+        f"{env_vars['ACCUM_BUFFER_SIZE']}_{env_vars['DOUBLE_BUFFERED_ACCUM_BUFFER']}"
+    )
 
     if env_vars["DATATYPE"] == "E4M3":
         quantization_args = [
@@ -623,7 +633,7 @@ def run_accuracy(model, dataset, num_processes, output_folder):
         [
             "mkdir",
             "-p",
-            f"{env_vars['CODEGEN_DIR']}/networks/{model}/{env_vars['DATATYPE']}",
+            codegen_network_dir,
         ]
     )
 
@@ -640,7 +650,7 @@ def run_accuracy(model, dataset, num_processes, output_folder):
                 f"{ic_unroll},{oc_unroll}",
                 *quantization_args,
                 "--model_output_dir",
-                "test/compiler/networks/" + model + "/" + env_vars["DATATYPE"],
+                codegen_network_dir,
                 "--dump_dataset",
                 "--dataset_output_dir",
                 output_data_dir,
@@ -654,7 +664,7 @@ def run_accuracy(model, dataset, num_processes, output_folder):
         [
             "mkdir",
             "-p",
-            f"{env_vars['CODEGEN_DIR']}/networks/{model}/{env_vars['DATATYPE']}/{env_vars['IC_DIMENSION']}x{env_vars['OC_DIMENSION']}_{env_vars['INPUT_BUFFER_SIZE']}x{env_vars['WEIGHT_BUFFER_SIZE']}x{env_vars['ACCUM_BUFFER_SIZE']}_{env_vars['DOUBLE_BUFFERED_ACCUM_BUFFER']}",
+            tiling_dir,
         ]
     )
 
@@ -673,7 +683,7 @@ def run_accuracy(model, dataset, num_processes, output_folder):
                 "python",
                 "test/compiler/run_tiler.py",
                 "--codegen_dir",
-                f"test/compiler/networks/{model}/{env_vars['DATATYPE']}",
+                codegen_network_dir,
                 "--IC_dimension",
                 env_vars["IC_DIMENSION"],
                 "--OC_dimension",

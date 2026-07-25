@@ -12,12 +12,10 @@ using namespace google::protobuf;
 
 Network::Network(std::string& model_name) {
   project_root = std::string(getenv("PROJECT_ROOT"));
-  std::string datatype = std::string(getenv("DATATYPE"));
 
   // Open the file
-  std::string filename = project_root + "/" +
-                         std::string(getenv("CODEGEN_DIR")) + "/networks/" +
-                         model_name + "/" + datatype + "/model.txt";
+  const std::string codegen_network_dir = get_codegen_network_dir(model_name);
+  std::string filename = codegen_network_dir + "/model.txt";
 
   if (!std::filesystem::exists(filename)) {
     throw std::runtime_error("Error: File " + filename + " does not exist.");
@@ -32,10 +30,8 @@ Network::Network(std::string& model_name) {
   }
 
   std::map<std::string, voyager::Tiling> tiling_map;
-  filename = project_root + "/" + std::string(getenv("CODEGEN_DIR")) +
-             "/networks/" + model_name + "/" + datatype + "/" +
-             std::string(getenv("IC_DIMENSION")) + "x" +
-             std::string(getenv("OC_DIMENSION")) + "_" +
+  filename = codegen_network_dir + "/" + std::string(getenv("IC_DIMENSION")) +
+             "x" + std::string(getenv("OC_DIMENSION")) + "_" +
              std::string(getenv("INPUT_BUFFER_SIZE", "1024")) + "x" +
              std::string(getenv("WEIGHT_BUFFER_SIZE", "1024")) + "x" +
              std::string(getenv("ACCUM_BUFFER_SIZE", "1024")) + "_" +
