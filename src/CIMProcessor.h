@@ -230,11 +230,11 @@ SC_MODULE(CIMProcessor) {
   Connections::Combinational<Pack1D<Buffer, N>> CCS_INIT_S1(accum_output_enq);
 
   // Swap interlock mirroring the weight DoubleBuffer's bank alternation: a set
-  // becomes MAC-able once completely filled, and is refilled only after every
-  // result computed from it has been collected (the analog of a bank finishing
-  // its read phase), which closes each element's MAC issue window
-  // The release tokens pass through small FIFOs so the result thread never
-  // blocks on a token that only a future job's fill will consume
+  // becomes MAC-able once completely filled and becomes refillable after the
+  // first MAC using the next set is accepted, which proves the old issue window
+  // has closed
+  // The release tokens pass through small FIFOs until the loader revisits each
+  // physical set
   Connections::Combinational<bool> set_filled[2];
   Connections::Fifo<bool, 2> CCS_INIT_S1(set_consumed_fifo_0);
   Connections::Fifo<bool, 2> CCS_INIT_S1(set_consumed_fifo_1);
@@ -528,6 +528,8 @@ SC_MODULE(CIMProcessor) {
     mac_request_channel.ResetWrite();
     set_filled[0].ResetRead();
     set_filled[1].ResetRead();
+    set_consumed_enq[0].ResetWrite();
+    set_consumed_enq[1].ResetWrite();
     start.Reset();
 
     wait();
@@ -576,12 +578,14 @@ SC_MODULE(CIMProcessor) {
       for (ac_int<32, false> step = 0; step < total_ops; step++) {
         // needs_weight_load times the swap exactly like MatrixProcessor
         // push_inputs swap_weights Waiting on set_filled guarantees every row
-        // of the incoming set is committed first The result thread releases the
-        // outgoing set once its results are all collected
+        // of the incoming set is committed first
+        Set previous_wset = active_wset;
+        bool switched_wset = false;
         if (needs_weight_load(params, loop_counters, outer_reuse_indices,
                               reuse_weights, step)) {
           if (have_active) {
             active_wset = (active_wset & 1) ? Set(0) : Set(1);
+            switched_wset = true;
           }
           set_filled[active_wset & 1].Pop();
           have_active = true;
@@ -601,6 +605,13 @@ SC_MODULE(CIMProcessor) {
         // Atomic request acceptance is the physical issue acknowledged by
         // CIMArray
         mac_request_channel.Push(request);
+
+        // Acceptance on the new set proves every selected tile has closed the
+        // previous set's issue window, so refilling can overlap result
+        // retirement
+        if (switched_wset) {
+          set_consumed_enq[previous_wset & 1].Push(true);
+        }
 
         advance_loop_counters(loop_counters, params);
       }
@@ -678,49 +689,21 @@ SC_MODULE(CIMProcessor) {
     return result;
   }
 
-  // Retire raw CIM results and close resident-set lifetimes before accumulation
+  // Retire raw CIM results before accumulation
   void collect_results() {
     collect_results_params_deq.ResetRead();
     result_channel.ResetRead();
     result_to_accum_channel.ResetWrite();
-    set_consumed_enq[0].ResetWrite();
-    set_consumed_enq[1].ResetWrite();
 
     wait();
 
-    // Preserve the existing two-set lifetime order across job boundaries
-    Set release_wset = 0;
-    bool have_release = false;
     while (true) {
       const MatrixParams params = collect_results_params_deq.Pop();
-      ac_int<LOOP_WIDTH, false> loop_counters[2][6];
-#pragma hls_unroll yes
-      for (int level = 0; level < 2; level++) {
-#pragma hls_unroll yes
-        for (int loop = 0; loop < 6; loop++) {
-          loop_counters[level][loop] = 0;
-        }
-      }
-
-      const bool reuse_weights = reuses_weights(params);
-      ac_int<3, false> outer_reuse_indices[2];
-      select_weight_reuse_indices(params, outer_reuse_indices);
-
       const ac_int<32, false> total_ops = total_operations(params);
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
       for (ac_int<32, false> step = 0; step < total_ops; step++) {
-        if (needs_weight_load(params, loop_counters, outer_reuse_indices,
-                              reuse_weights, step)) {
-          if (have_release) {
-            set_consumed_enq[release_wset & 1].Push(true);
-            release_wset = (release_wset & 1) ? Set(0) : Set(1);
-          }
-          have_release = true;
-        }
-
         result_to_accum_channel.Push(collect_complete_result());
-        advance_loop_counters(loop_counters, params);
       }
     }
   }

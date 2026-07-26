@@ -69,8 +69,7 @@ struct CIMArrayTbCase : sc_module {
 
   static_assert(A_WIDTH < 31, "A_WIDTH must fit this unit test golden model");
   static_assert(B_WIDTH < 31, "B_WIDTH must fit this unit test golden model");
-  static_assert(C_WIDTH < 62,
-                "C_WIDTH must fit this unit test golden model");
+  static_assert(C_WIDTH < 62, "C_WIDTH must fit this unit test golden model");
 
   CIMARRAY_DUT_TYPE(Dut) dut;
   sc_clock clk;
@@ -78,6 +77,7 @@ struct CIMArrayTbCase : sc_module {
   Connections::Combinational<MACRequest> mac_request_channel;
   Connections::Combinational<WriteRequest> write_request_channel;
   Connections::Combinational<CBeat> result_channel;
+  unsigned mac_accept_count = 0;
 
   ac_int<B_WIDTH, false> expected_b[B_SETS][Dut::K][Dut::N];
 
@@ -104,6 +104,10 @@ struct CIMArrayTbCase : sc_module {
 
     SC_THREAD(run);
     sensitive << clk.posedge_event();
+
+    SC_METHOD(observe_mac_acceptance);
+    sensitive << clk.posedge_event();
+    dont_initialize();
 
     SC_THREAD(watchdog);
   }
@@ -137,6 +141,25 @@ struct CIMArrayTbCase : sc_module {
   void tick() {
     wait(clk.posedge_event());
     settle();
+  }
+
+  // Count actual array request transfers independently of the simulated source
+  // buffer
+  void observe_mac_acceptance() {
+    if (!rstn.read()) {
+      mac_accept_count = 0;
+      return;
+    }
+#ifdef CONNECTIONS_SIM_ONLY
+    const bool fired = mac_request_channel._VLDNAMEOUT_.read() &&
+                       mac_request_channel._RDYNAMEOUT_.read();
+#else
+    const bool fired = mac_request_channel._VLDNAME_.read() &&
+                       mac_request_channel._RDYNAME_.read();
+#endif
+    if (fired) {
+      mac_accept_count++;
+    }
   }
 
   // Reset the testbench-side Connections endpoints
@@ -401,22 +424,30 @@ struct CIMArrayTbCase : sc_module {
   // Drive one targeted MAC request and queue its expected C beats
   void drive_targeted_mac(Set mset, int output_axis_idx, int phase,
                           bool reduce = false) {
+    const unsigned accepted_before = mac_accept_count;
     MACRequest request = build_mac_request(mset, phase);
     request.output_axis_idx = output_axis_idx;
     request.reduce = reduce;
     queue_expected_beats(mset, false, output_axis_idx, reduce, phase);
     mac_request_channel.Push(request);
     settle();
+    while (mac_accept_count == accepted_before) {
+      tick();
+    }
   }
 
   // Drive one multicast MAC request and queue its expected C beats
   void drive_multicast_mac(Set mset, int phase, bool reduce = false) {
+    const unsigned accepted_before = mac_accept_count;
     MACRequest request = build_mac_request(mset, phase);
     request.multicast = 1;
     request.reduce = reduce;
     queue_expected_beats(mset, true, 0, reduce, phase);
     mac_request_channel.Push(request);
     settle();
+    while (mac_accept_count == accepted_before) {
+      tick();
+    }
   }
 
   // Compare one received C beat against the oldest expected beat
@@ -635,15 +666,21 @@ struct CIMArrayTbCase : sc_module {
     drain_expected_beats();
   }
 
-  // Check writes to another weight set while a MAC is in flight
-  void run_write_during_mac_check() {
-    const Set mset = Set(0);
-    const Set wset = Set((B_SETS > 1) ? 1 : 0);
-    load_weight_set(mset, 79);
-    drive_multicast_mac(mset, 83);
-    load_weight_set(wset, 89);
+  // Check that an old set can be overwritten after a new-set MAC is accepted
+  void run_overwrite_after_set_switch_check() {
+    if constexpr (B_SETS < 2) {
+      return;
+    }
+
+    const Set old_wset = Set(0);
+    const Set new_wset = Set(1);
+    load_weight_set(old_wset, 79);
+    load_weight_set(new_wset, 89);
+    drive_multicast_mac(old_wset, 83);
+    drive_multicast_mac(new_wset, 97);
+    load_weight_set(old_wset, 101);
     drain_expected_beats();
-    drive_multicast_mac(wset, 97);
+    drive_multicast_mac(old_wset, 103);
     drain_expected_beats();
   }
 
@@ -678,7 +715,7 @@ struct CIMArrayTbCase : sc_module {
     run_sustained_issue_check();
     run_completion_queue_backpressure_check();
     run_replicate_write_check();
-    run_write_during_mac_check();
+    run_overwrite_after_set_switch_check();
     run_reset_recovery_check();
 
     std::cout << "[PASS] " << name() << std::endl;

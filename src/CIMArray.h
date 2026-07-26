@@ -20,11 +20,12 @@ static constexpr int CIM_C_BEAT_OUTPUT_MAJOR = 1;
 template <int CH_IN, int CH_OUT, int B_SETS, int BASE_A_WIDTH, int BASE_B_WIDTH,
           int BASE_C_WIDTH, int WRITE_CH_IN, int MAC_LATENCY, int MODE,
           // A_WIDTH/B_WIDTH/C_WIDTH are the operand and accumulator widths from
-          // the datatype: A and B size the input and weight, C sizes the reduced
-          // result the processor accumulates and stores. C_WIDTH comes from the
-          // accumulation datatype (ACCUM_DATATYPE::width), the same way the
-          // systolic array takes its accumulator type; the per-tile BASE_C_WIDTH
-          // stays a separate free knob that only sizes one vector-matrix mul
+          // the datatype: A and B size the input and weight, C sizes the
+          // reduced result the processor accumulates and stores. C_WIDTH comes
+          // from the accumulation datatype (ACCUM_DATATYPE::width), the same
+          // way the systolic array takes its accumulator type; the per-tile
+          // BASE_C_WIDTH stays a separate free knob that only sizes one
+          // vector-matrix mul
           int A_WIDTH, int B_WIDTH, int C_WIDTH, bool SIGNED,
           // Tile-internal layout; the input axis reduces into C while the
           // output axis retains distinct B/C channels
@@ -262,6 +263,8 @@ SC_MODULE(CIMArray) {
 
   sc_signal<TileAData> bus_a[INPUT_AXIS_TILES];
   sc_signal<Set> bus_mset;
+  sc_signal<TileAData> held_a[INPUT_AXIS_TILES];
+  sc_signal<Set> held_mset;
   sc_signal<bool> mac_issue[OUTPUT_AXIS_TILES];
 
   sc_signal<bool> tile_write[INPUT_AXIS_TILES][OUTPUT_AXIS_TILES];
@@ -340,6 +343,11 @@ SC_MODULE(CIMArray) {
 
     SC_METHOD(drive_mac_issue);
     sensitive << rstn << mac_request_channel.vld << mac_request_channel.dat;
+    sensitive << held_mset;
+    for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES;
+         input_axis_idx++) {
+      sensitive << held_a[input_axis_idx];
+    }
     sensitive << completion_allocate_pointer << completion_release_pointer;
     sensitive << completion_release_pending << result_channel.vld
               << result_channel.rdy;
@@ -518,9 +526,9 @@ SC_MODULE(CIMArray) {
            result_channel.rdy.read();
   }
 
-  // Return whether the completion queue and every selected tile can accept this
+  // Return whether the completion queue and shared tile issue bus can accept an
   // operation
-  bool selected_tiles_ready(const MACRequest& request) const {
+  bool request_path_ready() const {
     const bool queue_full = result_queue_full(
         completion_allocate_pointer.read(), completion_release_pointer.read());
     bool ready = !queue_full || completion_releases_on_fire();
@@ -528,19 +536,17 @@ SC_MODULE(CIMArray) {
 #pragma hls_unroll yes
     for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES;
          output_axis_idx++) {
-      if (mac_output_axis_selected(request, output_axis_idx)) {
 #pragma hls_unroll yes
-        for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES;
-             input_axis_idx++) {
-          ready =
-              ready && tile_mac_ready[input_axis_idx][output_axis_idx].read();
-        }
+      for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES;
+           input_axis_idx++) {
+        ready = ready && tile_mac_ready[input_axis_idx][output_axis_idx].read();
       }
     }
     return ready;
   }
 
-  // Drive A, mset selection, ready, and issue pulses from the current request
+  // Drive a newly accepted request, then hold its shared operands until every
+  // tile closes the issue window
   void drive_mac_issue() {
     MACRequest request;
     request.mset = 0;
@@ -560,20 +566,22 @@ SC_MODULE(CIMArray) {
                       "MAC request output_axis_idx is outside the output axis");
     }
 #endif
-    const bool ready = valid && selected_tiles_ready(request);
+    const bool ready = rstn.read() && request_path_ready();
+    const bool fire = valid && ready;
     ConnectionsSignal::set_ready(mac_request_channel, ready);
 
-    bus_mset.write(request.mset);
+    bus_mset.write(fire ? request.mset : held_mset.read());
 #pragma hls_unroll yes
     for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES;
          input_axis_idx++) {
-      bus_a[input_axis_idx].write(request.a[input_axis_idx]);
+      bus_a[input_axis_idx].write(fire ? request.a[input_axis_idx]
+                                       : held_a[input_axis_idx].read());
     }
 #pragma hls_unroll yes
     for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES;
          output_axis_idx++) {
       mac_issue[output_axis_idx].write(
-          ready && mac_output_axis_selected(request, output_axis_idx));
+          fire && mac_output_axis_selected(request, output_axis_idx));
     }
   }
 
@@ -582,6 +590,14 @@ SC_MODULE(CIMArray) {
   void record_mac_issue() {
     ResultQueuePointer allocate_pointer = 0;
     completion_allocate_pointer.write(allocate_pointer);
+    held_mset.write(0);
+    TileAData zero_a;
+    clear_pack(zero_a);
+#pragma hls_unroll yes
+    for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES;
+         input_axis_idx++) {
+      held_a[input_axis_idx].write(zero_a);
+    }
 #pragma hls_unroll yes
     for (int queue_idx = 0; queue_idx < RESULT_QUEUE_DEPTH; queue_idx++) {
       completion_tokens[queue_idx].write(CompletionToken(0));
@@ -594,6 +610,12 @@ SC_MODULE(CIMArray) {
     while (true) {
       if (ConnectionsSignal::fired(mac_request_channel)) {
         const MACRequest request = ConnectionsSignal::peek(mac_request_channel);
+        held_mset.write(request.mset);
+#pragma hls_unroll yes
+        for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES;
+             input_axis_idx++) {
+          held_a[input_axis_idx].write(request.a[input_axis_idx]);
+        }
 
 #ifndef __SYNTHESIS__
         if (result_queue_full(allocate_pointer,
