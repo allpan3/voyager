@@ -27,8 +27,8 @@ WRAP = Alignment(wrap_text=True, vertical="top")
 CTR = Alignment(wrap_text=True, horizontal="center", vertical="center")
 THIN = Border(bottom=Side(style="thin", color="BFBFBF"))
 SAFILL = PatternFill("solid", fgColor="E8F0F8")   # systolic
-B8FILL = PatternFill("solid", fgColor="E6F2E6")   # CIM 8-bit cells
-B4FILL = PatternFill("solid", fgColor="FDF0E4")   # CIM 4-bit cells
+B8FILL = PatternFill("solid", fgColor="E6F2E6")   # CIM, 8b macro native width
+B4FILL = PatternFill("solid", fgColor="FDF0E4")   # CIM, 4b macro native width
 
 LAYER_SHORT = {
     "mobilebert_encoder_layer_0_ffn_0_output_dense_fused": "ffn_0_output_dense",
@@ -39,10 +39,29 @@ LAYER_SHORT = {
 }
 
 
+def native_width(r):
+    """Macro native operand width, e.g. "8b" -- the width the macro computes at
+    natively. Summary CSVs written before the terminology was settled call this
+    column cim_cell."""
+    return r.get("cim_macro_native_width") or r.get("cim_cell") or ""
+
+
+def tile_org(r):
+    """CIMTile organization: elements per tile as "<in>x<out>"."""
+    a, b = r.get("cim_tile_input_axis_elements"), r.get("cim_tile_output_axis_elements")
+    return f"{a}x{b}" if a and b else ""
+
+
+def tile_count(r):
+    """CIMArray organization: tiles per axis as "<in>x<out>"."""
+    a, b = r.get("input_axis_tiles"), r.get("output_axis_tiles")
+    return f"{a}x{b}" if a and b else ""
+
+
 def fill_for(r):
     if r["backend"] == "systolic":
         return SAFILL
-    return B8FILL if r["cim_cell"] == "8b" else B4FILL
+    return B8FILL if native_width(r) == "8b" else B4FILL
 
 
 def fnum(v):
@@ -72,19 +91,57 @@ def port_label(r):
     return f"{w}b matched" if r["bw_mode"] == "matched" else f"{w}b"
 
 
-# A comparison is only meaningful between designs of the same size AND the same
-# external interface, so both dimensions key the grouping.
+# The systolic array is always at its own dimension, so each CIM width answers
+# to a different systolic row and the two produce two different kinds of block:
+#
+#   per-geometry   every array at its own matched width: the systolic array of
+#                  a given K x N against the CIM arrays of that same K x N.
+#   fixed interface  the baseline array's width applied to larger CIM arrays --
+#                  the drop-in-replacement view, rated against the baseline
+#                  array itself. Kept as a separate, clearly secondary block so
+#                  it never reads as the same-size comparison.
+#
+# The baseline array comes from the manifest; older summaries predate that
+# column, so fall back to the smallest systolic point, which is what a baseline
+# geometry is by construction.
+baseline_geom = next((r["baseline_geometry"] for r in rows if r.get("baseline_geometry")), "")
+systolic = {r["config"]: r for r in rows if r["backend"] == "systolic"}
+if not baseline_geom and systolic:
+    baseline_geom = min((r["geometry"] for r in systolic.values()),
+                        key=lambda g: int(g.split("x")[0]) * int(g.split("x")[1]))
+baseline_row = next((r for r in rows if r["backend"] == "systolic"
+                     and r["geometry"] == baseline_geom), None)
+baseline_width = baseline_row["ic_port_width_bits"] if baseline_row else None
+
+
+def sort_key(d):
+    return (d["backend"] != "systolic", native_width(d),
+            int(d["cim_ch_out"] or 0), int(d["cim_ch_in"] or 0), tile_org(d),
+            int(d["macs"] or 0))
+
+
 groups = OrderedDict()
 for r in rows:
-    groups.setdefault((r["geometry"], port_label(r)), {})[variant(r)] = r
+    if r["bw_mode"] == "matched":       # every array at its own dimension
+        groups.setdefault(("geom", r["geometry"], port_label(r)), {})[variant(r)] = r
+# Everything sitting behind the baseline array's interface, whatever its size:
+# a CIM point pinned there, plus any CIM point whose own width already is it.
+if baseline_width is not None:
+    fixed = {}
+    for r in rows:
+        if r["ic_port_width_bits"] != baseline_width:
+            continue
+        if r["backend"] == "cim" or r["config"] == (baseline_row or {}).get("config"):
+            fixed[variant(r)] = r
+    if any(d["backend"] == "cim" and d["geometry"] != baseline_geom for d in fixed.values()):
+        groups[("iface", baseline_geom, f"{baseline_width}b")] = fixed
 for k, cfgs in groups.items():
-    def key(v, cfgs=cfgs):
-        d = cfgs[v]
-        return (d["backend"] != "systolic", d["cim_cell"],
-                int(d["cim_ch_out"] or 0), int(d["cim_ch_in"] or 0))
-    groups[k] = [cfgs[v] for v in sorted(cfgs, key=key)]
-group_order = sorted(groups, key=lambda k: (int(k[0].split("x")[0]) * int(k[0].split("x")[1]),
-                                            k[1]))
+    groups[k] = [cfgs[v] for v in sorted(cfgs, key=lambda v: sort_key(cfgs[v]))]
+# Per-geometry blocks first, smallest array first; the fixed-interface view last
+group_order = sorted(groups, key=lambda k: (
+    k[0] == "iface",
+    int(k[1].split("x")[0]) * int(k[1].split("x")[1]) if k[0] == "geom" else 0,
+    k[2]))
 
 cell = {(variant(r), r["layer"], r["sim"]): r for r in rows}
 
@@ -119,15 +176,37 @@ notes = [
      "II (cycles per ideal beat) = runtime/ideal, the effective initiation "
      "interval; 1.0 is perfect.", N),
     ("Every CIM point is compared against the systolic array of the SAME K x N. "
-     "Config names: cim<A>b<B>b_<KxN>_co<CH_OUT>_ci<CH_IN>, encoding the macro "
-     "cell widths and the CH_IN/CH_OUT construction. 8b cells match the INT8 "
-     "datapath (native); 4b is the vanilla sub-word macro.", N),
+     "Config names: cim<A>b<B>b_<KxN>_co<CH_OUT>_ci<CH_IN>[_t<in>x<out>], "
+     "encoding the macro native operand widths, the CH_IN/CH_OUT construction "
+     "and — when it is not the default one element per tile — the CIMTile "
+     "organization. An 8b native width matches the INT8 datapath (the native "
+     "point); 4b is the vanilla sub-word macro, which spends two cells per INT8 "
+     "weight and two A slices per MAC.", N),
+    ("Array organization: the hierarchy is CIMArray > CIMTile > CIMElement > "
+     "macro, so K x N is reached as K = tiles_in x elements_in x CH_IN and "
+     "N = tiles_out x elements_out x (CH_OUT x native/8). The 'Tiles' and "
+     "'Elements/tile' columns give both halves of that split — the same K x N "
+     "can be many tiles of few elements or few tiles of many. It is "
+     "throughput-neutral at fixed K x N (the split changes no port width), so "
+     "the two organizations should read as equal-cycle rows; it is reported "
+     "per point rather than assumed.", N),
     ("External bandwidth: idealised L2 model, one word/cycle/port (input, weight, "
-     "bias, output). Each geometry is run at its MATCHED width — one full array "
-     "row/column per cycle, so 64 B/cyc for a 64x64 INT8 array — and at a fixed "
-     "width held constant as the array grows. Comparison blocks never mix the "
-     "two: a design point is (geometry, port width), and the systolic row inside "
-     "each block is that block's baseline.", N),
+     "bias, output). The width axis is CIM-only. The systolic array is always at "
+     "its own dimension — sa_32x32 at 256 b, sa_64x64 at 512 b — because it is "
+     "the baseline, and a baseline only means anything fed one row/column per "
+     "cycle. A CIM array is built twice: at MATCHED, its own dimension (512 b = "
+     "64 B/cyc for 64x64), and at BASELINE, the baseline array's width (256 b "
+     "for a 32x32 baseline). The two coincide for a baseline-sized CIM design "
+     "and that duplicate is dropped.", N),
+    ("Consequently each CIM width answers to a different systolic row, and the "
+     "Comparison tab has two kinds of block. The per-geometry blocks put every "
+     "array at its own width and rate CIM against the systolic array of the SAME "
+     "K x N — the headline, same-size comparison. The final fixed-interface "
+     "block holds the baseline's width while the array grows and rates against "
+     "the baseline array itself — the drop-in-replacement view, kept separate "
+     "and last so it never reads as the same-size result. Each block's header "
+     "names the row it rates against. A block reporting no systolic row is a "
+     "partial sweep, not a result.", N),
     ("", N),
     ("Primary comparison sim: rtl. The Comparison tab uses RTL cosim as the "
      "cycle-accurate source of truth. SystemC rows remain in Results for "
@@ -150,26 +229,32 @@ ws.column_dimensions["A"].width = 118
 ws = wb.create_sheet("Configurations")
 ws.sheet_view.showGridLines = False
 ws["A1"] = "Design points"; ws["A1"].font = TITLE
-hdr = ["Config", "Backend", "Geometry (KxN)", "MACs", "Macro cell",
-       "CH_IN", "CH_OUT", "Input-axis tiles", "Output-axis tiles", "Port width"]
+# Columns walk the CIM hierarchy outside-in: array geometry, then how it is
+# built (tiles per axis, elements per tile), then the macro each element holds.
+hdr = ["Config", "Backend", "Geometry (KxN)", "MACs",
+       "Tiles\n(in x out)", "Elements/tile\n(in x out)",
+       "Macro native width", "CH_IN", "CH_OUT", "Port width"]
 for j, h in enumerate(hdr, 1):
     c = ws.cell(row=3, column=j, value=h); c.font = H; c.fill = HFILL; c.alignment = CTR
+ws.row_dimensions[3].height = 30
 r = 4
 seen = set()
-for k in group_order:
-    for d in groups[k]:
-        if variant(d) in seen:
-            continue
-        seen.add(variant(d))
-        vals = [d["config"], d["backend"], d["geometry"], int(float(d["macs"])),
-                d["cim_cell"] or "-", d["cim_ch_in"] or "-", d["cim_ch_out"] or "-",
-                d["input_axis_tiles"] or "-", d["output_axis_tiles"] or "-",
-                port_label(d)]
-        for j, v in enumerate(vals, 1):
-            c = ws.cell(row=r, column=j, value=v); c.font = N; c.fill = fill_for(d)
-            c.border = THIN
-        r += 1
-for j, w in enumerate([26, 10, 13, 9, 10, 8, 9, 15, 16, 14], 1):
+# Driven off the rows, not the comparison blocks, so every design point that was
+# run is listed even if it ends up in no block.
+for d in sorted(rows, key=lambda d: (int(d["macs"] or 0), d["backend"] != "systolic",
+                                     int(d["ic_port_width_bits"] or 0), d["config"])):
+    if variant(d) in seen:
+        continue
+    seen.add(variant(d))
+    vals = [d["config"], d["backend"], d["geometry"], int(float(d["macs"])),
+            tile_count(d) or "-", tile_org(d) or "-",
+            native_width(d) or "-", d["cim_ch_in"] or "-", d["cim_ch_out"] or "-",
+            port_label(d)]
+    for j, v in enumerate(vals, 1):
+        c = ws.cell(row=r, column=j, value=v); c.font = N; c.fill = fill_for(d)
+        c.border = THIN
+    r += 1
+for j, w in enumerate([26, 10, 13, 9, 12, 14, 18, 8, 9, 14], 1):
     ws.column_dimensions[get_column_letter(j)].width = w
 
 # ----------------------------------------------------- Comparison (by geom) --
@@ -180,19 +265,38 @@ ws["A1"] = (f"Utilization and II by geometry and port width — {primary_sim}; "
 ws["A1"].font = TITLE
 r = 3
 for k in group_order:
-    g, plabel = k
+    kind, g, plabel = k
     sa = next((d for d in groups[k] if d["backend"] == "systolic"), None)
-    ws.cell(row=r, column=1, value=f"Geometry {g} — external port {plabel}").font = SUB
+    if kind == "geom":
+        title = f"Geometry {g} — every array at its own port width ({plabel})"
+    else:
+        title = (f"Fixed {plabel} interface — the {g} baseline's port width held "
+                 f"while the array grows; rated against the {g} systolic array")
+    # A block with no systolic row cannot be rated. Say so rather than leaving
+    # an empty ratio column, which reads as "no difference" and invites the row
+    # being measured against whatever baseline is nearest in the sheet.
+    if sa is None:
+        title += (f"   ** INCOMPLETE: no systolic row for {g} at {plabel}, so "
+                  "these rows have no baseline and are NOT comparable to the "
+                  "systolic row of any other block **")
+    c = ws.cell(row=r, column=1, value=title)
+    c.font = SUB if sa is not None else Font(name=FONT, bold=True, size=10, color="B03A2E")
     r += 1
-    hdr = (["Config", "cell", "CH_IN", "CH_OUT"]
+    # Organization travels with every row: a CIM point is only interpretable
+    # alongside how its K x N was built, not just the macro it was built from.
+    prefix = ["Config", "geometry", "native width", "CH_IN", "CH_OUT",
+              "tiles\n(in x out)", "elem/tile\n(in x out)"]
+    hdr = (prefix
            + [f"{LAYER_SHORT.get(L, L)}\nutil" for L in layers]
-           + ["mean util", "mean II", "vs systolic\n(mean runtime)"])
+           + ["mean util", "mean II",
+              f"vs {sa['config'] if sa else 'systolic'}\n(mean runtime)"])
     for j, h in enumerate(hdr, 1):
         c = ws.cell(row=r, column=j, value=h); c.font = H; c.fill = HFILL; c.alignment = CTR
     ws.row_dimensions[r].height = 42
     r += 1
+    first_layer_col = len(prefix) + 1
     for d in groups[k]:
-        cfg, v = d["config"], variant(d)
+        v = variant(d)
         utils = [fnum(metric(v, L, "utilization")) for L in layers]
         iis = [fnum(metric(v, L, "cycles_per_ideal_beat")) for L in layers]
         runs = [fnum(metric(v, L, "runtime_cycles")) for L in layers]
@@ -203,24 +307,27 @@ for k in group_order:
         imean = sum(ivals) / len(ivals) if ivals else None
         ratios = [sr / rr for sr, rr in zip(sa_runs, runs) if sr and rr]
         rmean = sum(ratios) / len(ratios) if ratios else None
-        vals = [cfg, d["cim_cell"] or "-", d["cim_ch_in"] or "-", d["cim_ch_out"] or "-"]
-        for j, v in enumerate(vals, 1):
-            c = ws.cell(row=r, column=j, value=v); c.font = N; c.fill = fill_for(d); c.border = THIN
-        for k, u in enumerate(utils):
-            c = ws.cell(row=r, column=5 + k, value=u if u is not None else "")
+        vals = [d["config"], d["geometry"], native_width(d) or "-",
+                d["cim_ch_in"] or "-", d["cim_ch_out"] or "-",
+                tile_count(d) or "-", tile_org(d) or "-"]
+        for j, val in enumerate(vals, 1):
+            c = ws.cell(row=r, column=j, value=val); c.font = N; c.fill = fill_for(d); c.border = THIN
+        for i, u in enumerate(utils):
+            c = ws.cell(row=r, column=first_layer_col + i, value=u if u is not None else "")
             c.font = N; c.number_format = "0.0%"; c.fill = fill_for(d); c.border = THIN
-        col = 5 + len(layers)
-        for v, fmt in [(round(umean, 4) if umean is not None else "", "0.0%"),
-                       (round(imean, 3) if imean is not None else "", "0.00"),
-                       (round(rmean, 2) if rmean else "", "0.00x")]:
-            c = ws.cell(row=r, column=col, value=v); c.font = N; c.number_format = fmt
+        col = first_layer_col + len(layers)
+        ratio = round(rmean, 2) if rmean else ("no baseline" if sa is None else "")
+        for val, fmt in [(round(umean, 4) if umean is not None else "", "0.0%"),
+                         (round(imean, 3) if imean is not None else "", "0.00"),
+                         (ratio, "0.00x")]:
+            c = ws.cell(row=r, column=col, value=val); c.font = N; c.number_format = fmt
             c.fill = fill_for(d); c.border = THIN; col += 1
         r += 1
     r += 1
 ws.column_dimensions["A"].width = 26
-for j in range(2, 5):
-    ws.column_dimensions[get_column_letter(j)].width = 8
-for j in range(5, 5 + len(layers) + 3):
+for j, w in enumerate([10, 13, 8, 9, 12, 14], 2):
+    ws.column_dimensions[get_column_letter(j)].width = w
+for j in range(8, 8 + len(layers) + 3):
     ws.column_dimensions[get_column_letter(j)].width = 12
 
 # ------------------------------------------------------------ CIM Stalls -----
@@ -279,8 +386,10 @@ ws = wb.create_sheet("Results")
 ws.freeze_panes = "B2"
 fields = ["config", "sim", "bw_mode", "ic_port_width_bits", "oc_port_width_bits",
           "backend", "geometry",
-          "macs", "cim_cell", "cim_ch_in", "cim_ch_out", "input_axis_tiles",
-          "output_axis_tiles", "layer", "passed", "runtime_cycles", "runtime_us",
+          "macs", "cim_macro_native_width", "cim_ch_in", "cim_ch_out",
+          "input_axis_tiles", "output_axis_tiles",
+          "cim_tile_input_axis_elements", "cim_tile_output_axis_elements",
+          "layer", "passed", "runtime_cycles", "runtime_us",
           "ideal_cycles", "utilization", "cycles_per_ideal_beat",
           "ext_read_GBps", "ext_write_GBps", "read_bw_pct_of_peak",
           "core_cycles", "array_resident_cycles", "array_issue_cycles",
@@ -312,7 +421,7 @@ ints = {
     "cim_completion_queue_stall_cycles", "cim_result_path_stall_cycles",
 }
 srt = sorted(rows, key=lambda r: (r["geometry"], r["backend"] != "systolic",
-             r["cim_cell"], r["config"], r["sim"], r["layer"]))
+             native_width(r), r["config"], r["sim"], r["layer"]))
 for i, d in enumerate(srt, 2):
     for j, f in enumerate(fields, 1):
         v = d.get(f, "")
@@ -336,4 +445,5 @@ wb.calculation.fullCalcOnLoad = True
 wb.save(OUT)
 print(f"saved {OUT}: {len(wb.sheetnames)} sheets, {len(rows)} result rows, "
       f"primary_sim={primary_sim}, comparison blocks="
-      + ", ".join(f"{g} @ {p}" for g, p in group_order))
+      + ", ".join(f"{g} @ {p}" + (" [fixed interface]" if kind == "iface" else "")
+                  for kind, g, p in group_order))

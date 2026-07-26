@@ -41,6 +41,9 @@ if not os.path.exists(manifest_path):
 CFG = {}
 for m in csv.DictReader(open(manifest_path)):
     is_cim = m["backend"] == "1"
+    # macro_native_width_bits was called cell_bits before the terminology was
+    # settled; read either so older sweep directories still parse.
+    native = m.get("macro_native_width_bits") or m.get("cell_bits") or ""
     CFG[m["config"]] = dict(
         backend="cim" if is_cim else "systolic",
         K=int(m["K"]), N=int(m["N"]),
@@ -48,10 +51,18 @@ for m in csv.DictReader(open(manifest_path)):
         # cycle. Older manifests predate the columns, so fall back to INT8.
         ic_matched=int(m.get("ic_matched_port_bits") or int(m["K"]) * INT8_BITS),
         oc_matched=int(m.get("oc_matched_port_bits") or int(m["N"]) * INT8_BITS),
-        cell=(m["cell_bits"] + "b") if (is_cim and m["cell_bits"]) else "",
+        # The array every point is judged against. Absent in older manifests;
+        # the workbook falls back to inferring it from the systolic rows.
+        baseline_geometry=m.get("baseline_geometry") or "",
+        native_width=(native + "b") if (is_cim and native) else "",
         ch_in=m["ch_in"], ch_out=m["ch_out"],
         input_axis_tiles=m["input_axis_tiles"] or "",
         output_axis_tiles=m["output_axis_tiles"] or "",
+        # CIMTile organization: elements per tile along each axis. Manifests
+        # predating the columns come from a sweep that pinned both to 1, so
+        # that is the fallback rather than an unknown.
+        tile_in_elems=(m.get("tile_input_axis_elements") or "1") if is_cim else "",
+        tile_out_elems=(m.get("tile_output_axis_elements") or "1") if is_cim else "",
     )
 
 rows = []
@@ -119,9 +130,13 @@ for fn in sorted(os.listdir(SWEEP_DIR)):
         config=cfg, sim=sim, bw_mode="pinned" if pinned else "matched",
         ic_port_width_bits=ic_pw, oc_port_width_bits=oc_pw,
         backend=meta["backend"], geometry=f"{ic}x{oc}", IC=ic, OC=oc, macs=ic * oc,
-        cim_cell=meta["cell"], cim_ch_in=meta["ch_in"], cim_ch_out=meta["ch_out"],
+        baseline_geometry=meta["baseline_geometry"],
+        cim_macro_native_width=meta["native_width"],
+        cim_ch_in=meta["ch_in"], cim_ch_out=meta["ch_out"],
         input_axis_tiles=meta["input_axis_tiles"],
         output_axis_tiles=meta["output_axis_tiles"],
+        cim_tile_input_axis_elements=meta["tile_in_elems"],
+        cim_tile_output_axis_elements=meta["tile_out_elems"],
         layer=layer, passed=ok,
         runtime_cycles=int(cyc) if cyc else "",
         runtime_us=round(total_ns / 1000.0, 3) if cyc else "",
