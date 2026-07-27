@@ -1,449 +1,731 @@
 #!/usr/bin/env python3
-"""Build the CIM-vs-systolic comparison workbook from a parsed summary CSV.
+"""Build one RTL-only CIM-vs-systolic workbook from a parsed sweep CSV.
 
 Usage: build_comparison_workbook.py <summary_csv> <out_xlsx>
 
-Fully data-driven: configurations, geometries and layers are read from the CSV
-(produced by parse_sweep_logs.py), so any sweep design space renders without
-editing this script. Within each geometry the systolic baseline sorts first and
-every CIM variant is compared against it at matched K x N.
+The workbook is intentionally per-layer. A hardware point is performance-
+reportable only when every expected layer has a passing RTL row with the
+required hardware counters. SystemC rows help identify attempted points but
+never contribute cycles, utilization, comparisons, or stall measurements.
 """
-import csv, sys
+
+import csv
+import sys
 from collections import OrderedDict
+
 from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.comments import Comment
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.table import Table, TableStyleInfo
 
 SRC, OUT = sys.argv[1], sys.argv[2]
 rows = list(csv.DictReader(open(SRC)))
+if not rows:
+    sys.exit("summary CSV is empty")
 
 FONT = "Arial"
-H = Font(name=FONT, bold=True, color="FFFFFF", size=10)
-HFILL = PatternFill("solid", fgColor="2F4F6F")
-SUB = Font(name=FONT, bold=True, size=10)
-N = Font(name=FONT, size=10)
-TITLE = Font(name=FONT, bold=True, size=13)
-WRAP = Alignment(wrap_text=True, vertical="top")
-CTR = Alignment(wrap_text=True, horizontal="center", vertical="center")
-THIN = Border(bottom=Side(style="thin", color="BFBFBF"))
-SAFILL = PatternFill("solid", fgColor="E8F0F8")   # systolic
-B8FILL = PatternFill("solid", fgColor="E6F2E6")   # CIM, 8b macro native width
-B4FILL = PatternFill("solid", fgColor="FDF0E4")   # CIM, 4b macro native width
+NAVY = "17324D"
+TEAL = "0F6B78"
+TEAL_LIGHT = "D9EEF0"
+SA_BLUE = "DCEAF7"
+CIM_GREEN = "E2F0D9"
+PASS_GREEN = "C6E0B4"
+FAIL_RED = "F4CCCC"
+GRAY = "667085"
+WHITE = "FFFFFF"
+GRID = "D0D5DD"
 
+TITLE = Font(name=FONT, bold=True, size=15, color=WHITE)
+SECTION = Font(name=FONT, bold=True, size=11, color=WHITE)
+HEADER = Font(name=FONT, bold=True, size=10, color=WHITE)
+BODY = Font(name=FONT, size=10)
+BODY_BOLD = Font(name=FONT, bold=True, size=10)
+WRAP = Alignment(wrap_text=True, vertical="top")
+CENTER = Alignment(wrap_text=True, horizontal="center", vertical="center")
+RIGHT = Alignment(horizontal="right", vertical="center")
+THIN_BOTTOM = Border(bottom=Side(style="thin", color=GRID))
+
+LAYER_ORDER = [
+    "mobilebert_encoder_layer_0_ffn_0_output_dense_fused",
+    "mobilebert_encoder_layer_0_output_bottleneck_dense_fused",
+    "mobilebert_encoder_layer_0_attention_output_dense_fused",
+    "matmul_6_fused",
+    "matmul_2_fused",
+]
 LAYER_SHORT = {
     "mobilebert_encoder_layer_0_ffn_0_output_dense_fused": "ffn_0_output_dense",
     "mobilebert_encoder_layer_0_output_bottleneck_dense_fused": "output_bottleneck_dense",
     "mobilebert_encoder_layer_0_attention_output_dense_fused": "attention_output_dense",
-    "matmul_6_fused": "matmul_6 (attn ctx)",
-    "matmul_2_fused": "matmul_2 (attn scores)",
+    "matmul_6_fused": "matmul_6 (attention context)",
+    "matmul_2_fused": "matmul_2 (attention scores)",
+}
+REQUIRED_RTL_FIELDS = ["runtime_cycles", "ideal_cycles", "core_cycles"]
+STALL_FIELDS = [
+    ("input_unavailable_cycles", "Input unavailable"),
+    ("input_backpressure_cycles", "Input backpressure"),
+    ("weight_unavailable_cycles", "Weight unavailable"),
+    ("weight_backpressure_cycles", "Weight backpressure"),
+    ("result_backpressure_cycles", "Result backpressure"),
+    ("accumulation_stall_cycles", "Accumulation stall"),
+    ("output_fifo_full_cycles", "Output FIFO full"),
+    ("output_backpressure_cycles", "Output backpressure"),
+    ("cim_set_wait_cycles", "CIM set wait"),
+    ("cim_completion_queue_stall_cycles", "CIM completion queue"),
+    ("cim_result_path_stall_cycles", "CIM result path"),
+]
+STALL_TOOLTIPS = {
+    "input_unavailable_cycles": (
+        "The processor input channel is ready, but no input beat is valid. "
+        "This is upstream input starvation for both backends."
+    ),
+    "input_backpressure_cycles": (
+        "A valid input-side operation cannot advance. SA observes the input "
+        "skewer; CIM observes MAC-request admission."
+    ),
+    "weight_unavailable_cycles": (
+        "The processor weight channel is ready, but no weight beat is valid. "
+        "This is upstream weight starvation."
+    ),
+    "weight_backpressure_cycles": (
+        "A valid weight-side operation cannot advance. SA observes the weight "
+        "skewer; CIM observes resident-set write admission."
+    ),
+    "result_backpressure_cycles": (
+        "A produced array result cannot advance. SA observes the psum output "
+        "skewer; CIM observes the raw-result channel."
+    ),
+    "accumulation_stall_cycles": (
+        "At least one accumulation-buffer read address, expected read response, "
+        "write request, or accumulation-to-writeback enqueue is blocked."
+    ),
+    "output_fifo_full_cycles": (
+        "A final accumulation is ready, but the final-output FIFO cannot accept it."
+    ),
+    "output_backpressure_cycles": (
+        "The final output channel is valid while the downstream consumer is not ready."
+    ),
+    "cim_set_wait_cycles": (
+        "CIM only: the issue path needs a filled resident-weight set, but none is available."
+    ),
+    "cim_completion_queue_stall_cycles": (
+        "CIM only: a valid MAC request cannot be admitted because future completion "
+        "storage is reserved or occupied."
+    ),
+    "cim_result_path_stall_cycles": (
+        "CIM only: the union of accumulation-path stall and final-output FIFO full. "
+        "It intentionally overlaps those component counters."
+    ),
 }
 
 
-def native_width(r):
-    """Macro native operand width, e.g. "8b" -- the width the macro computes at
-    natively. Summary CSVs written before the terminology was settled call this
-    column cim_cell."""
-    return r.get("cim_macro_native_width") or r.get("cim_cell") or ""
-
-
-def tile_org(r):
-    """CIMTile organization: elements per tile as "<in>x<out>"."""
-    a, b = r.get("cim_tile_input_axis_elements"), r.get("cim_tile_output_axis_elements")
-    return f"{a}x{b}" if a and b else ""
-
-
-def tile_count(r):
-    """CIMArray organization: tiles per axis as "<in>x<out>"."""
-    a, b = r.get("input_axis_tiles"), r.get("output_axis_tiles")
-    return f"{a}x{b}" if a and b else ""
-
-
-def fill_for(r):
-    if r["backend"] == "systolic":
-        return SAFILL
-    return B8FILL if native_width(r) == "8b" else B4FILL
-
-
-def fnum(v):
-    try:
-        return float(v)
-    except (TypeError, ValueError):
+# Convert a CSV value to an integer when present
+def integer(value):
+    if value in ("", None):
         return None
+    return int(float(value))
 
 
-sims = sorted({r["sim"] for r in rows})
-# RTL cosimulation is the only performance source of truth
-primary_sim = "rtl"
-
-layers = list(OrderedDict((r["layer"], None) for r in rows).keys())
-layers.sort(key=lambda L: -max((fnum(r["macs"]) or 0) for r in rows if r["layer"] == L))
+# Interpret the parser's Boolean text
+def passed(value):
+    return str(value).lower() == "true"
 
 
-def variant(r):
-    """Identity of one design point. The same array behind a different external
-    port width is a distinct point, so the port width is part of the key."""
-    return (r["config"], r["ic_port_width_bits"], r["oc_port_width_bits"])
-
-
-def port_label(r):
-    ic, oc = r["ic_port_width_bits"], r["oc_port_width_bits"]
-    w = ic if ic == oc else f"{ic}/{oc}"
-    return f"{w}b matched" if r["bw_mode"] == "matched" else f"{w}b"
-
-
-# The systolic array is always at its own dimension, so each CIM width answers
-# to a different systolic row and the two produce two different kinds of block:
-#
-#   per-geometry   every array at its own matched width: the systolic array of
-#                  a given K x N against the CIM arrays of that same K x N.
-#   fixed interface  the baseline array's width applied to larger CIM arrays --
-#                  the drop-in-replacement view, rated against the baseline
-#                  array itself. Kept as a separate, clearly secondary block so
-#                  it never reads as the same-size comparison.
-#
-# The baseline array comes from the manifest; older summaries predate that
-# column, so fall back to the smallest systolic point, which is what a baseline
-# geometry is by construction.
-baseline_geom = next((r["baseline_geometry"] for r in rows if r.get("baseline_geometry")), "")
-systolic = {r["config"]: r for r in rows if r["backend"] == "systolic"}
-if not baseline_geom and systolic:
-    baseline_geom = min((r["geometry"] for r in systolic.values()),
-                        key=lambda g: int(g.split("x")[0]) * int(g.split("x")[1]))
-baseline_row = next((r for r in rows if r["backend"] == "systolic"
-                     and r["geometry"] == baseline_geom), None)
-baseline_width = baseline_row["ic_port_width_bits"] if baseline_row else None
-
-
-def sort_key(d):
-    return (d["backend"] != "systolic", native_width(d),
-            int(d["cim_ch_out"] or 0), int(d["cim_ch_in"] or 0), tile_org(d),
-            int(d["macs"] or 0))
-
-
-groups = OrderedDict()
-for r in rows:
-    if r["bw_mode"] == "matched":       # every array at its own dimension
-        groups.setdefault(("geom", r["geometry"], port_label(r)), {})[variant(r)] = r
-# Everything sitting behind the baseline array's interface, whatever its size:
-# a CIM point pinned there, plus any CIM point whose own width already is it.
-if baseline_width is not None:
-    fixed = {}
-    for r in rows:
-        if r["ic_port_width_bits"] != baseline_width:
-            continue
-        if r["backend"] == "cim" or r["config"] == (baseline_row or {}).get("config"):
-            fixed[variant(r)] = r
-    if any(d["backend"] == "cim" and d["geometry"] != baseline_geom for d in fixed.values()):
-        groups[("iface", baseline_geom, f"{baseline_width}b")] = fixed
-for k, cfgs in groups.items():
-    groups[k] = [cfgs[v] for v in sorted(cfgs, key=lambda v: sort_key(cfgs[v]))]
-# Per-geometry blocks first, smallest array first; the fixed-interface view last
-group_order = sorted(groups, key=lambda k: (
-    k[0] == "iface",
-    int(k[1].split("x")[0]) * int(k[1].split("x")[1]) if k[0] == "geom" else 0,
-    k[2]))
-
-cell = {(variant(r), r["layer"], r["sim"]): r for r in rows}
-
-
-def metric(v, layer, field, sim=None):
-    r = cell.get((v, layer, sim or primary_sim))
-    return r[field] if r else ""
-
-
-wb = Workbook()
-
-# ------------------------------------------------------------------ README ---
-ws = wb.active
-ws.title = "README"
-ws.sheet_view.showGridLines = False
-n_cfg = len({r["config"] for r in rows})
-notes = [
-    ("CIM vs. systolic matrix backend — MobileBERT matrix-unit layers", TITLE),
-    ("", N),
-    (f"Generated from {SRC.split('/')[-1]}: {len(rows)} runs, {n_cfg} configs, "
-     f"{len(layers)} layers, sim(s) = {', '.join(sims)}.", N),
-    ("", N),
-    ("Pipeline", SUB),
-    ("matrix_backend_sweep.sh <dir> -> per-run logs + manifest.csv; "
-     "parse_sweep_logs.py <dir> summary.csv -> this CSV; "
-     "build_comparison_workbook.py summary.csv out.xlsx -> this workbook. All "
-     "three live in analysis/scripts/ and are fully manifest-driven.", N),
-    ("", N),
-    ("Reading the columns", SUB),
-    ("runtime_cycles = Total Runtime / 5 ns clock (200 MHz). ideal_cycles = "
-     "total MACs / (K x N), recomputed per config. utilization = ideal/runtime. "
-     "II (cycles per ideal beat) = runtime/ideal, the effective initiation "
-     "interval; 1.0 is perfect.", N),
-    ("Every CIM point is compared against the systolic array of the SAME K x N. "
-     "Config names: cim<A>b<B>b_<KxN>_co<CH_OUT>_ci<CH_IN>[_t<in>x<out>], "
-     "encoding the macro native operand widths, the CH_IN/CH_OUT construction "
-     "and — when it is not the default one element per tile — the CIMTile "
-     "organization. An 8b native width matches the INT8 datapath (the native "
-     "point); 4b is the vanilla sub-word macro, which spends two cells per INT8 "
-     "weight and two A slices per MAC.", N),
-    ("Array organization: the hierarchy is CIMArray > CIMTile > CIMElement > "
-     "macro, so K x N is reached as K = tiles_in x elements_in x CH_IN and "
-     "N = tiles_out x elements_out x (CH_OUT x native/8). The 'Tiles' and "
-     "'Elements/tile' columns give both halves of that split — the same K x N "
-     "can be many tiles of few elements or few tiles of many. It is "
-     "throughput-neutral at fixed K x N (the split changes no port width), so "
-     "the two organizations should read as equal-cycle rows; it is reported "
-     "per point rather than assumed.", N),
-    ("External bandwidth: idealised L2 model, one word/cycle/port (input, weight, "
-     "bias, output). The width axis is CIM-only. The systolic array is always at "
-     "its own dimension — sa_32x32 at 256 b, sa_64x64 at 512 b — because it is "
-     "the baseline, and a baseline only means anything fed one row/column per "
-     "cycle. A CIM array is built twice: at MATCHED, its own dimension (512 b = "
-     "64 B/cyc for 64x64), and at BASELINE, the baseline array's width (256 b "
-     "for a 32x32 baseline). The two coincide for a baseline-sized CIM design "
-     "and that duplicate is dropped.", N),
-    ("Consequently each CIM width answers to a different systolic row, and the "
-     "Comparison tab has two kinds of block. The per-geometry blocks put every "
-     "array at its own width and rate CIM against the systolic array of the SAME "
-     "K x N — the headline, same-size comparison. The final fixed-interface "
-     "block holds the baseline's width while the array grows and rates against "
-     "the baseline array itself — the drop-in-replacement view, kept separate "
-     "and last so it never reads as the same-size result. Each block's header "
-     "names the row it rates against. A block reporting no systolic row is a "
-     "partial sweep, not a result.", N),
-    ("", N),
-    ("Primary comparison sim: rtl. The Comparison tab uses RTL cosim as the "
-     "cycle-accurate source of truth. SystemC rows remain in Results for "
-     "functional pass/fail and traffic counts only; their performance cells "
-     "are blank. Any config missing an RTL row shows blank in Comparison.", N),
-    ("CIM Stalls reports the three backend-specific counters as raw cycles and "
-     "percent of core cycles. set_wait is time awaiting a completely filled "
-     "resident set; completion_queue is a pending MAC blocked by reserved or "
-     "occupied completion storage; result_path is the union of "
-     "accumulation-channel stalls and a full final-output FIFO, so these "
-     "categories can overlap other counters.", N),
-]
-r = 1
-for text, font in notes:
-    c = ws.cell(row=r, column=1, value=text); c.font = font; c.alignment = WRAP
-    r += 1
-ws.column_dimensions["A"].width = 118
-
-# ---------------------------------------------------------- Configurations ---
-ws = wb.create_sheet("Configurations")
-ws.sheet_view.showGridLines = False
-ws["A1"] = "Design points"; ws["A1"].font = TITLE
-# Columns walk the CIM hierarchy outside-in: array geometry, then how it is
-# built (tiles per axis, elements per tile), then the macro each element holds.
-hdr = ["Config", "Backend", "Geometry (KxN)", "MACs",
-       "Tiles\n(in x out)", "Elements/tile\n(in x out)",
-       "Macro native width", "CH_IN", "CH_OUT", "Port width"]
-for j, h in enumerate(hdr, 1):
-    c = ws.cell(row=3, column=j, value=h); c.font = H; c.fill = HFILL; c.alignment = CTR
-ws.row_dimensions[3].height = 30
-r = 4
-seen = set()
-# Driven off the rows, not the comparison blocks, so every design point that was
-# run is listed even if it ends up in no block.
-for d in sorted(rows, key=lambda d: (int(d["macs"] or 0), d["backend"] != "systolic",
-                                     int(d["ic_port_width_bits"] or 0), d["config"])):
-    if variant(d) in seen:
-        continue
-    seen.add(variant(d))
-    vals = [d["config"], d["backend"], d["geometry"], int(float(d["macs"])),
-            tile_count(d) or "-", tile_org(d) or "-",
-            native_width(d) or "-", d["cim_ch_in"] or "-", d["cim_ch_out"] or "-",
-            port_label(d)]
-    for j, v in enumerate(vals, 1):
-        c = ws.cell(row=r, column=j, value=v); c.font = N; c.fill = fill_for(d)
-        c.border = THIN
-    r += 1
-for j, w in enumerate([26, 10, 13, 9, 12, 14, 18, 8, 9, 14], 1):
-    ws.column_dimensions[get_column_letter(j)].width = w
-
-# ----------------------------------------------------- Comparison (by geom) --
-ws = wb.create_sheet("Comparison")
-ws.sheet_view.showGridLines = False
-ws["A1"] = (f"Utilization and II by geometry and port width — {primary_sim}; "
-            "each block's systolic row is its baseline")
-ws["A1"].font = TITLE
-r = 3
-for k in group_order:
-    kind, g, plabel = k
-    sa = next((d for d in groups[k] if d["backend"] == "systolic"), None)
-    if kind == "geom":
-        title = f"Geometry {g} — every array at its own port width ({plabel})"
-    else:
-        title = (f"Fixed {plabel} interface — the {g} baseline's port width held "
-                 f"while the array grows; rated against the {g} systolic array")
-    # A block with no systolic row cannot be rated. Say so rather than leaving
-    # an empty ratio column, which reads as "no difference" and invites the row
-    # being measured against whatever baseline is nearest in the sheet.
-    if sa is None:
-        title += (f"   ** INCOMPLETE: no systolic row for {g} at {plabel}, so "
-                  "these rows have no baseline and are NOT comparable to the "
-                  "systolic row of any other block **")
-    c = ws.cell(row=r, column=1, value=title)
-    c.font = SUB if sa is not None else Font(name=FONT, bold=True, size=10, color="B03A2E")
-    r += 1
-    # Organization travels with every row: a CIM point is only interpretable
-    # alongside how its K x N was built, not just the macro it was built from.
-    prefix = ["Config", "geometry", "native width", "CH_IN", "CH_OUT",
-              "tiles\n(in x out)", "elem/tile\n(in x out)"]
-    hdr = (prefix
-           + [f"{LAYER_SHORT.get(L, L)}\nutil" for L in layers]
-           + ["mean util", "mean II",
-              f"vs {sa['config'] if sa else 'systolic'}\n(mean runtime)"])
-    for j, h in enumerate(hdr, 1):
-        c = ws.cell(row=r, column=j, value=h); c.font = H; c.fill = HFILL; c.alignment = CTR
-    ws.row_dimensions[r].height = 42
-    r += 1
-    first_layer_col = len(prefix) + 1
-    for d in groups[k]:
-        v = variant(d)
-        utils = [fnum(metric(v, L, "utilization")) for L in layers]
-        iis = [fnum(metric(v, L, "cycles_per_ideal_beat")) for L in layers]
-        runs = [fnum(metric(v, L, "runtime_cycles")) for L in layers]
-        sa_runs = [fnum(metric(variant(sa), L, "runtime_cycles")) for L in layers] if sa else []
-        uvals = [u for u in utils if u is not None]
-        ivals = [i for i in iis if i is not None]
-        umean = sum(uvals) / len(uvals) if uvals else None
-        imean = sum(ivals) / len(ivals) if ivals else None
-        ratios = [sr / rr for sr, rr in zip(sa_runs, runs) if sr and rr]
-        rmean = sum(ratios) / len(ratios) if ratios else None
-        vals = [d["config"], d["geometry"], native_width(d) or "-",
-                d["cim_ch_in"] or "-", d["cim_ch_out"] or "-",
-                tile_count(d) or "-", tile_org(d) or "-"]
-        for j, val in enumerate(vals, 1):
-            c = ws.cell(row=r, column=j, value=val); c.font = N; c.fill = fill_for(d); c.border = THIN
-        for i, u in enumerate(utils):
-            c = ws.cell(row=r, column=first_layer_col + i, value=u if u is not None else "")
-            c.font = N; c.number_format = "0.0%"; c.fill = fill_for(d); c.border = THIN
-        col = first_layer_col + len(layers)
-        ratio = round(rmean, 2) if rmean else ("no baseline" if sa is None else "")
-        for val, fmt in [(round(umean, 4) if umean is not None else "", "0.0%"),
-                         (round(imean, 3) if imean is not None else "", "0.00"),
-                         (ratio, "0.00x")]:
-            c = ws.cell(row=r, column=col, value=val); c.font = N; c.number_format = fmt
-            c.fill = fill_for(d); c.border = THIN; col += 1
-        r += 1
-    r += 1
-ws.column_dimensions["A"].width = 26
-for j, w in enumerate([10, 13, 8, 9, 12, 14], 2):
-    ws.column_dimensions[get_column_letter(j)].width = w
-for j in range(8, 8 + len(layers) + 3):
-    ws.column_dimensions[get_column_letter(j)].width = 12
-
-# ------------------------------------------------------------ CIM Stalls -----
-ws = wb.create_sheet("CIM Stalls")
-ws.freeze_panes = "A3"
-ws["A1"] = "CIM RTL stall attribution"
-ws["A1"].font = TITLE
-stall_fields = [
-    ("config", "Config"),
-    ("geometry", "Geometry"),
-    ("layer", "Layer"),
-    ("runtime_cycles", "Runtime"),
-    ("core_cycles", "Core cycles"),
-    ("cim_set_wait_cycles", "Set wait"),
-    ("cim_set_wait_pct_of_core", "Set wait % core"),
-    ("cim_completion_queue_stall_cycles", "Completion queue"),
-    ("cim_completion_queue_stall_pct_of_core", "Completion queue % core"),
-    ("cim_result_path_stall_cycles", "Result path"),
-    ("cim_result_path_stall_pct_of_core", "Result path % core"),
-    ("result_backpressure_cycles", "Raw-result backpressure"),
-    ("output_fifo_full_cycles", "Output FIFO full"),
-    ("output_backpressure_cycles", "Downstream output stall"),
-]
-for j, (_, heading) in enumerate(stall_fields, 1):
-    c = ws.cell(row=2, column=j, value=heading)
-    c.font = H
-    c.fill = HFILL
-    c.alignment = CTR
-ws.row_dimensions[2].height = 34
-cim_stalls = [
-    d for d in rows if d["backend"] == "cim" and d["sim"] == primary_sim
-]
-cim_stalls.sort(key=lambda d: (d["geometry"], d["config"], d["layer"]))
-for i, d in enumerate(cim_stalls, 3):
-    for j, (field, _) in enumerate(stall_fields, 1):
-        value = d.get(field, "")
-        if field.endswith("_pct_of_core") and value not in ("", None):
-            value = float(value)
-        elif field.endswith("_cycles") and value not in ("", None):
-            value = int(float(value))
-        c = ws.cell(row=i, column=j, value=value)
-        c.font = N
-        c.fill = fill_for(d)
-        c.border = THIN
-        if field.endswith("_pct_of_core") and isinstance(value, float):
-            c.number_format = '0.0"%"'
-        elif field.endswith("_cycles") and isinstance(value, int):
-            c.number_format = "#,##0"
-for j, (field, heading) in enumerate(stall_fields, 1):
-    ws.column_dimensions[get_column_letter(j)].width = max(
-        11, min(32, max(len(field), len(heading)) + 2)
+# Return the stable identity of one hardware instance
+def point_key(row):
+    latency = row.get("cim_mac_latency", "") if row["backend"] == "cim" else ""
+    return (
+        row["config"],
+        row["ic_port_width_bits"],
+        row["oc_port_width_bits"],
+        latency,
     )
 
-# ---------------------------------------------------------------- Results ----
-ws = wb.create_sheet("Results")
-ws.freeze_panes = "B2"
-fields = ["config", "sim", "bw_mode", "ic_port_width_bits", "oc_port_width_bits",
-          "backend", "geometry",
-          "macs", "cim_macro_native_width", "cim_ch_in", "cim_ch_out",
-          "input_axis_tiles", "output_axis_tiles",
-          "cim_tile_input_axis_elements", "cim_tile_output_axis_elements",
-          "layer", "passed", "runtime_cycles", "runtime_us",
-          "ideal_cycles", "utilization", "cycles_per_ideal_beat",
-          "ext_read_GBps", "ext_write_GBps", "read_bw_pct_of_peak",
-          "core_cycles", "array_resident_cycles", "array_issue_cycles",
-          "input_unavailable_cycles", "input_backpressure_cycles",
-          "weight_unavailable_cycles", "weight_backpressure_cycles",
-          "result_backpressure_cycles", "accumulation_stall_cycles",
-          "output_backpressure_cycles", "output_fifo_full_cycles",
-          "cim_set_wait_cycles", "cim_set_wait_pct_of_core",
-          "cim_completion_queue_stall_cycles",
-          "cim_completion_queue_stall_pct_of_core",
-          "cim_result_path_stall_cycles",
-          "cim_result_path_stall_pct_of_core"]
-for j, f in enumerate(fields, 1):
-    c = ws.cell(row=1, column=j, value=f); c.font = H; c.fill = HFILL; c.alignment = CTR
-ws.row_dimensions[1].height = 30
-pct = {"utilization"}
-percent_points = {
-    "read_bw_pct_of_peak", "cim_set_wait_pct_of_core",
-    "cim_completion_queue_stall_pct_of_core",
-    "cim_result_path_stall_pct_of_core",
-}
-ints = {
-    "runtime_cycles", "ideal_cycles", "macs", "core_cycles",
-    "array_resident_cycles", "array_issue_cycles", "input_unavailable_cycles",
-    "input_backpressure_cycles", "weight_unavailable_cycles",
-    "weight_backpressure_cycles", "result_backpressure_cycles",
-    "accumulation_stall_cycles", "output_backpressure_cycles",
-    "output_fifo_full_cycles", "cim_set_wait_cycles",
-    "cim_completion_queue_stall_cycles", "cim_result_path_stall_cycles",
-}
-srt = sorted(rows, key=lambda r: (r["geometry"], r["backend"] != "systolic",
-             native_width(r), r["config"], r["sim"], r["layer"]))
-for i, d in enumerate(srt, 2):
-    for j, f in enumerate(fields, 1):
-        v = d.get(f, "")
-        if f in pct and v not in ("", None):
-            v = float(v)
-        elif f in percent_points and v not in ("", None):
-            v = float(v)
-        elif f in ints and v not in ("", None):
-            v = int(float(v))
-        c = ws.cell(row=i, column=j, value=v); c.font = N; c.fill = fill_for(d); c.border = THIN
-        if f in pct and isinstance(v, float):
-            c.number_format = "0.0%"
-        if f in percent_points and isinstance(v, float):
-            c.number_format = '0.0"%"'
-        if f in ints and isinstance(v, int):
-            c.number_format = "#,##0"
-for j, f in enumerate(fields, 1):
-    ws.column_dimensions[get_column_letter(j)].width = max(9, min(24, len(f) + 2))
+
+# Return a human-readable explicit port-width label
+def port_label(row):
+    ic = row["ic_port_width_bits"]
+    oc = row["oc_port_width_bits"]
+    return f"{ic}-bit" if ic == oc else f"{ic}/{oc}-bit"
+
+
+# Return a complete instance label with CIM latency only where applicable
+def instance_label(row):
+    base = f"{'CIM' if row['backend'] == 'cim' else 'SA'} {row['geometry']} | {port_label(row)} ports"
+    if row["backend"] == "cim":
+        base += f" | MAC latency {row.get('cim_mac_latency') or '1'}"
+    return base
+
+
+# Return the configured array MAC count
+def macs(row):
+    return integer(row["macs"]) or 0
+
+
+# Apply the common title band
+def style_title(sheet, title, last_column):
+    sheet.merge_cells(start_row=1, start_column=1, end_row=1, end_column=last_column)
+    cell = sheet.cell(1, 1, title)
+    cell.font = TITLE
+    cell.fill = PatternFill("solid", fgColor=NAVY)
+    cell.alignment = Alignment(vertical="center")
+    sheet.row_dimensions[1].height = 30
+    sheet.sheet_view.showGridLines = False
+
+
+# Apply the common table header
+def style_header(sheet, row, first_column, last_column):
+    for column in range(first_column, last_column + 1):
+        cell = sheet.cell(row, column)
+        cell.font = HEADER
+        cell.fill = PatternFill("solid", fgColor=TEAL)
+        cell.alignment = CENTER
+    sheet.row_dimensions[row].height = 38
+
+
+# Apply the common body-row styling
+def style_body_row(sheet, row, first_column, last_column, fill):
+    for column in range(first_column, last_column + 1):
+        cell = sheet.cell(row, column)
+        cell.font = BODY
+        cell.fill = PatternFill("solid", fgColor=fill)
+        cell.border = THIN_BOTTOM
+        cell.alignment = WRAP if column == first_column else RIGHT
+
+
+# Add a filterable Excel table with a stable style
+def add_table(sheet, name, first_row, last_row, first_column, last_column):
+    if last_row < first_row:
+        return
+    ref = (
+        f"{get_column_letter(first_column)}{first_row}:"
+        f"{get_column_letter(last_column)}{last_row}"
+    )
+    table = Table(displayName=name, ref=ref)
+    table.tableStyleInfo = TableStyleInfo(
+        name="TableStyleMedium2",
+        showFirstColumn=False,
+        showLastColumn=False,
+        showRowStripes=True,
+        showColumnStripes=False,
+    )
+    sheet.add_table(table)
+
+
+# Assign explicit bounded column widths
+def set_widths(sheet, widths):
+    for index, width in enumerate(widths, 1):
+        sheet.column_dimensions[get_column_letter(index)].width = width
+
+
+all_layers = list(OrderedDict((row["layer"], None) for row in rows))
+layers = [layer for layer in LAYER_ORDER if layer in all_layers]
+layers.extend(sorted(layer for layer in all_layers if layer not in layers))
+
+point_rows = OrderedDict()
+for row in rows:
+    point_rows.setdefault(point_key(row), []).append(row)
+
+points = []
+for key, observations in point_rows.items():
+    representative = observations[0]
+    rtl = {row["layer"]: row for row in observations if row["sim"] == "rtl"}
+    passing_layers = [
+        layer
+        for layer in layers
+        if layer in rtl
+        and passed(rtl[layer]["passed"])
+        and all(rtl[layer].get(field) not in ("", None) for field in REQUIRED_RTL_FIELDS)
+    ]
+    reportable = len(passing_layers) == len(layers)
+    if reportable:
+        reason = ""
+    elif not rtl:
+        reason = "RTL generation or simulation did not produce layer results"
+    else:
+        reason = f"{len(passing_layers)}/{len(layers)} layers passed with complete RTL counters"
+    points.append(
+        {
+            "key": key,
+            "row": representative,
+            "rtl": rtl,
+            "reportable": reportable,
+            "passing_layers": passing_layers,
+            "reason": reason,
+        }
+    )
+
+points.sort(
+    key=lambda point: (
+        macs(point["row"]),
+        point["row"]["backend"] != "systolic",
+        integer(point["row"]["ic_port_width_bits"]) or 0,
+        integer(point["row"].get("cim_mac_latency")) or 0,
+    )
+)
+point_by_key = {point["key"]: point for point in points}
+reportable_points = [point for point in points if point["reportable"]]
+sa_points = [point for point in points if point["row"]["backend"] == "systolic"]
+cim_points = [point for point in points if point["row"]["backend"] == "cim"]
+
+if not sa_points:
+    sys.exit("no systolic design point found")
+
+baseline_sa = min(sa_points, key=lambda point: macs(point["row"]))
+baseline_geometry = baseline_sa["row"]["geometry"]
+baseline_ports = (
+    baseline_sa["row"]["ic_port_width_bits"],
+    baseline_sa["row"]["oc_port_width_bits"],
+)
+
+
+# Locate one point by backend, geometry, ports, and optional CIM latency
+def find_point(backend, geometry, ports, latency=None):
+    for point in points:
+        row = point["row"]
+        if row["backend"] != backend or row["geometry"] != geometry:
+            continue
+        if (row["ic_port_width_bits"], row["oc_port_width_bits"]) != ports:
+            continue
+        if backend == "cim" and str(row.get("cim_mac_latency") or "1") != str(latency or 1):
+            continue
+        return point
+    return None
+
+
+comparisons = []
+seen_comparisons = set()
+
+
+# Add one explicit comparison without duplicating it
+def add_comparison(kind, sa, cim):
+    if not sa or not cim:
+        return
+    key = (kind, sa["key"], cim["key"])
+    if key in seen_comparisons:
+        return
+    seen_comparisons.add(key)
+    comparisons.append({"kind": kind, "sa": sa, "cim": cim})
+
+
+for sa in sa_points:
+    row = sa["row"]
+    for cim in cim_points:
+        cim_row = cim["row"]
+        if cim_row["geometry"] != row["geometry"]:
+            continue
+        if (cim_row["ic_port_width_bits"], cim_row["oc_port_width_bits"]) != (
+            row["ic_port_width_bits"],
+            row["oc_port_width_bits"],
+        ):
+            continue
+        add_comparison("Same array size and port width", sa, cim)
+
+for cim in cim_points:
+    row = cim["row"]
+    if row["geometry"] == baseline_geometry or str(row.get("cim_mac_latency") or "1") != "1":
+        continue
+    if (row["ic_port_width_bits"], row["oc_port_width_bits"]) == baseline_ports:
+        kind = "SA baseline vs larger CIM, baseline-matched ports"
+    else:
+        kind = "SA baseline vs larger CIM, CIM-dimension-matched ports"
+    add_comparison(kind, baseline_sa, cim)
+
+wb = Workbook()
+wb.remove(wb.active)
+
+# -------------------------------------------------------------- Comparisons
+ws = wb.create_sheet("Comparisons")
+style_title(ws, "CIM vs systolic — per-layer RTL comparison", 11)
+ws["A2"] = (
+    "Every row is one layer. No cycles are added across layers. "
+    "Speedup is SA RTL cycles divided by CIM RTL cycles."
+)
+ws["A2"].font = Font(name=FONT, italic=True, color=GRAY)
+ws.merge_cells("A2:K2")
+
+comparison_headers = [
+    "Comparison",
+    "Comparison type",
+    "Layer",
+    "SA instance",
+    "CIM instance",
+    "SA RTL cycles",
+    "CIM RTL cycles",
+    "CIM speedup",
+    "SA processor-window utilization",
+    "CIM processor-window utilization",
+    "Utilization delta",
+]
+for column, heading in enumerate(comparison_headers, 1):
+    ws.cell(4, column, heading)
+style_header(ws, 4, 1, len(comparison_headers))
+
+comparison_start = 5
+comparison_row = comparison_start
+result_row_map = {}
+pending_comparison_formulas = []
+unavailable = []
+for comparison in comparisons:
+    sa = comparison["sa"]
+    cim = comparison["cim"]
+    label = f"{instance_label(sa['row'])} vs {instance_label(cim['row'])}"
+    if not sa["reportable"] or not cim["reportable"]:
+        unavailable.append((label, "FAILED"))
+        continue
+    for layer in layers:
+        ws.cell(comparison_row, 1, label)
+        ws.cell(comparison_row, 2, comparison["kind"])
+        ws.cell(comparison_row, 3, LAYER_SHORT.get(layer, layer))
+        ws.cell(comparison_row, 4, instance_label(sa["row"]))
+        ws.cell(comparison_row, 5, instance_label(cim["row"]))
+        pending_comparison_formulas.append(
+            (comparison_row, sa["key"], cim["key"], layer)
+        )
+        style_body_row(ws, comparison_row, 1, len(comparison_headers), SA_BLUE)
+        comparison_row += 1
+
+comparison_last = comparison_row - 1
+add_table(
+    ws,
+    "PerLayerComparisons",
+    4,
+    comparison_last,
+    1,
+    len(comparison_headers),
+)
+ws.freeze_panes = "F5"
+set_widths(ws, [46, 38, 29, 38, 43, 14, 15, 13, 18, 19, 16])
+
+if unavailable:
+    failed_title_row = comparison_row + 2
+    ws.cell(failed_title_row, 1, "Unavailable comparisons")
+    ws.cell(failed_title_row, 1).font = SECTION
+    ws.cell(failed_title_row, 1).fill = PatternFill("solid", fgColor=NAVY)
+    ws.merge_cells(
+        start_row=failed_title_row,
+        start_column=1,
+        end_row=failed_title_row,
+        end_column=2,
+    )
+    for index, (label, status) in enumerate(unavailable, failed_title_row + 1):
+        ws.cell(index, 1, label)
+        ws.cell(index, 2, status)
+        ws.cell(index, 2).fill = PatternFill("solid", fgColor=FAIL_RED)
+
+# --------------------------------------------------------- Per-Layer Results
+ws = wb.create_sheet("Per-Layer Results")
+style_title(ws, "Passing RTL results — one row per instance and layer", 12)
+ws["A2"] = (
+    "Processor-window utilization = ideal MAC cycles / matrix-processor cycles. "
+    "Failed hardware points are excluded and appear only in Design Points."
+)
+ws["A2"].font = Font(name=FONT, italic=True, color=GRAY)
+ws.merge_cells("A2:L2")
+result_headers = [
+    "Instance",
+    "Config",
+    "Backend",
+    "Array",
+    "Input port bits",
+    "Output port bits",
+    "CIM MAC latency",
+    "Layer",
+    "RTL cycles",
+    "Matrix-processor cycles",
+    "Ideal MAC cycles",
+    "Processor-window utilization",
+]
+for column, heading in enumerate(result_headers, 1):
+    ws.cell(4, column, heading)
+style_header(ws, 4, 1, len(result_headers))
+ws["J4"].comment = Comment(
+    "Hardware counter core_cycles. It starts when the matrix processor accepts "
+    "parameters and ends when its write-back thread reports completion. It does "
+    "not include MatrixUnit output-controller drain time.",
+    "User",
+)
+ws["K4"].comment = Comment(
+    "Total required MAC work divided by the configured array's MAC capacity per cycle.",
+    "User",
+)
+ws["L4"].comment = Comment(
+    "Ideal MAC cycles divided by matrix-processor cycles. This is a processor-window "
+    "metric, not utilization over the complete MatrixUnit start-to-done interval.",
+    "User",
+)
+
+result_row = 5
+for point in reportable_points:
+    row = point["row"]
+    fill = SA_BLUE if row["backend"] == "systolic" else CIM_GREEN
+    for layer in layers:
+        rtl = point["rtl"][layer]
+        values = [
+            instance_label(row),
+            row["config"],
+            row["backend"],
+            row["geometry"],
+            integer(row["ic_port_width_bits"]),
+            integer(row["oc_port_width_bits"]),
+            integer(row.get("cim_mac_latency")) if row["backend"] == "cim" else None,
+            LAYER_SHORT.get(layer, layer),
+            integer(rtl["runtime_cycles"]),
+            integer(rtl["core_cycles"]),
+            integer(rtl["ideal_cycles"]),
+        ]
+        for column, value in enumerate(values, 1):
+            ws.cell(result_row, column, value)
+        ws.cell(result_row, 12, f"=IFERROR(K{result_row}/J{result_row},\"\")")
+        ws.cell(result_row, 12).number_format = "0.0%"
+        for column in range(5, 12):
+            ws.cell(result_row, column).number_format = "#,##0"
+        style_body_row(ws, result_row, 1, len(result_headers), fill)
+        result_row_map[(point["key"], layer)] = result_row
+        result_row += 1
+add_table(
+    ws,
+    "PerLayerRtlResults",
+    4,
+    result_row - 1,
+    1,
+    len(result_headers),
+)
+ws.freeze_panes = "I5"
+set_widths(ws, [43, 31, 11, 11, 14, 15, 16, 29, 12, 19, 16, 18])
+
+# Link comparison formulas to the auditable per-layer results
+comparison_ws = wb["Comparisons"]
+for row, sa_key, cim_key, layer in pending_comparison_formulas:
+    sa_result_row = result_row_map[(sa_key, layer)]
+    cim_result_row = result_row_map[(cim_key, layer)]
+    comparison_ws.cell(row, 6, f"='Per-Layer Results'!I{sa_result_row}")
+    comparison_ws.cell(row, 7, f"='Per-Layer Results'!I{cim_result_row}")
+    comparison_ws.cell(row, 8, f'=IFERROR(F{row}/G{row},"")')
+    comparison_ws.cell(row, 9, f"='Per-Layer Results'!L{sa_result_row}")
+    comparison_ws.cell(row, 10, f"='Per-Layer Results'!L{cim_result_row}")
+    comparison_ws.cell(row, 11, f'=IFERROR(J{row}-I{row},"")')
+    comparison_ws.cell(row, 8).number_format = "0.00x"
+    for column in (9, 10, 11):
+        comparison_ws.cell(row, column).number_format = "0.0%"
+
+# ------------------------------------------------------------- Stall Analysis
+ws = wb.create_sheet("Stall Analysis")
+stall_headers = [
+    "Instance",
+    "Layer",
+    "Matrix-processor cycles",
+    *[heading for _, heading in STALL_FIELDS],
+]
+style_title(ws, "Passing RTL stall counters — SA and CIM", len(stall_headers))
+ws["A2"] = (
+    "Counters are simultaneous conditions and may overlap. "
+    "Hover over a stall heading for its exact meaning."
+)
+ws["A2"].font = Font(name=FONT, italic=True, color=GRAY)
+ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(stall_headers))
+for column, heading in enumerate(stall_headers, 1):
+    ws.cell(4, column, heading)
+style_header(ws, 4, 1, len(stall_headers))
+for offset, (field, _) in enumerate(STALL_FIELDS, 4):
+    ws.cell(4, offset).comment = Comment(STALL_TOOLTIPS[field], "User")
+
+stall_row = 5
+for point in reportable_points:
+    row = point["row"]
+    fill = SA_BLUE if row["backend"] == "systolic" else CIM_GREEN
+    for layer in layers:
+        rtl = point["rtl"][layer]
+        values = [
+            instance_label(row),
+            LAYER_SHORT.get(layer, layer),
+            integer(rtl["core_cycles"]),
+            *[
+                integer(rtl.get(field))
+                if row["backend"] == "cim" or not field.startswith("cim_")
+                else None
+                for field, _ in STALL_FIELDS
+            ],
+        ]
+        for column, value in enumerate(values, 1):
+            ws.cell(stall_row, column, value)
+            if column >= 3:
+                ws.cell(stall_row, column).number_format = "#,##0"
+        style_body_row(ws, stall_row, 1, len(stall_headers), fill)
+        stall_row += 1
+add_table(
+    ws,
+    "RtlStallAnalysis",
+    4,
+    stall_row - 1,
+    1,
+    len(stall_headers),
+)
+ws.freeze_panes = "D5"
+set_widths(ws, [43, 29, 19] + [18] * len(STALL_FIELDS))
+
+# -------------------------------------------------------------- Design Points
+ws = wb.create_sheet("Design Points")
+design_headers = [
+    "Instance",
+    "Config",
+    "Backend",
+    "Array",
+    "Input port bits",
+    "Output port bits",
+    "CIM MAC latency",
+    "Macro native width",
+    "CH_IN",
+    "CH_OUT",
+    "RTL status",
+    "Passing RTL layers",
+    "Failure reason",
+]
+style_title(ws, "Sweep design points and RTL status", len(design_headers))
+ws["A2"] = (
+    "MAC latency is a CIM-only parameter. SA cells are intentionally blank. "
+    "A failed point has no performance or comparison rows."
+)
+ws["A2"].font = Font(name=FONT, italic=True, color=GRAY)
+ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(design_headers))
+for column, heading in enumerate(design_headers, 1):
+    ws.cell(4, column, heading)
+style_header(ws, 4, 1, len(design_headers))
+design_row = 5
+for point in points:
+    row = point["row"]
+    values = [
+        instance_label(row),
+        row["config"],
+        row["backend"],
+        row["geometry"],
+        integer(row["ic_port_width_bits"]),
+        integer(row["oc_port_width_bits"]),
+        integer(row.get("cim_mac_latency")) if row["backend"] == "cim" else None,
+        row.get("cim_macro_native_width") or None,
+        integer(row.get("cim_ch_in")),
+        integer(row.get("cim_ch_out")),
+        "PASS" if point["reportable"] else "FAILED",
+        f"{len(point['passing_layers'])}/{len(layers)}",
+        point["reason"],
+    ]
+    for column, value in enumerate(values, 1):
+        ws.cell(design_row, column, value)
+    fill = SA_BLUE if row["backend"] == "systolic" else CIM_GREEN
+    style_body_row(ws, design_row, 1, len(design_headers), fill)
+    ws.cell(design_row, 11).fill = PatternFill(
+        "solid", fgColor=PASS_GREEN if point["reportable"] else FAIL_RED
+    )
+    ws.cell(design_row, 11).font = BODY_BOLD
+    design_row += 1
+add_table(
+    ws,
+    "SweepDesignPoints",
+    4,
+    design_row - 1,
+    1,
+    len(design_headers),
+)
+ws.freeze_panes = "E5"
+set_widths(ws, [43, 31, 11, 11, 14, 15, 16, 18, 10, 10, 12, 17, 54])
+
+# --------------------------------------------------------------- Methodology
+ws = wb.create_sheet("Methodology")
+style_title(ws, "Methodology and reproducibility", 3)
+method_rows = [
+    (
+        "Performance evidence",
+        "Passing RTL only",
+        "Cycles, utilization, comparisons, and stalls require complete SCVerify/VCS RTL rows with hardware counters.",
+    ),
+    (
+        "Failed hardware point",
+        "Mark FAILED only",
+        "SystemC performance is never substituted. The point remains in Design Points without performance or comparison rows.",
+    ),
+    (
+        "RTL cycles",
+        "Total Runtime / 5 ns",
+        "End-to-end RTL layer runtime at the generic 5 ns synthesis constraint.",
+    ),
+    (
+        "Matrix-processor cycles",
+        "Hardware core_cycles counter",
+        "Starts when the matrix processor accepts parameters and ends when its write-back thread reports completion. It excludes MatrixUnit output-controller drain time.",
+    ),
+    (
+        "Ideal MAC cycles",
+        "Total MAC work / array MACs per cycle",
+        "Minimum full-array cycles implied by the layer's MAC count and configured compute resources.",
+    ),
+    (
+        "Processor-window utilization",
+        "Ideal MAC cycles / matrix-processor cycles",
+        "Uses the hardware core_cycles window. Exact MatrixUnit utilization requires a separate start-to-done measurement.",
+    ),
+    (
+        "MatrixUnit boundary",
+        "Not measured by core_cycles",
+        "MatrixUnit done is produced after OutputController drains processor results, so the MatrixProcessor and MatrixUnit windows are not guaranteed equal.",
+    ),
+    (
+        "CIM MAC latency",
+        "CIM only",
+        "Every CIM instance label states its latency. SA has no MAC-latency setting and its cells are blank.",
+    ),
+    (
+        "Per-layer reporting",
+        "No aggregation",
+        "Cycles and utilization are never added or averaged across different layers.",
+    ),
+    (
+        "Comparison coverage",
+        "Five explicit views",
+        "SA32 is compared separately with CIM32 latency 1 and latency 3. The other views are same-size SA64/CIM64 and SA32 against CIM64 at both 256-bit and 512-bit CIM ports.",
+    ),
+    (
+        "Stall counters",
+        "SA and CIM",
+        "Stall conditions may overlap. Header comments define each signal-level condition.",
+    ),
+    (
+        "Reproduction",
+        "Checked-in scripts",
+        "Run matrix_backend_sweep.sh, then parse_sweep_logs.py, then build_comparison_workbook.py on the resulting summary CSV.",
+    ),
+    (
+        "Clock",
+        "5 ns / 200 MHz",
+        "Required for generic technology builds.",
+    ),
+]
+for column, heading in enumerate(["Field", "Definition", "Notes"], 1):
+    ws.cell(3, column, heading)
+style_header(ws, 3, 1, 3)
+for row_index, values in enumerate(method_rows, 4):
+    for column, value in enumerate(values, 1):
+        ws.cell(row_index, column, value)
+        ws.cell(row_index, column).font = BODY_BOLD if column == 1 else BODY
+        ws.cell(row_index, column).alignment = WRAP
+        ws.cell(row_index, column).border = THIN_BOTTOM
+    ws.cell(row_index, 1).fill = PatternFill("solid", fgColor=TEAL_LIGHT)
+    ws.row_dimensions[row_index].height = 34
+add_table(ws, "MethodologyTable", 3, 3 + len(method_rows), 1, 3)
+set_widths(ws, [28, 38, 92])
+
+for sheet in wb.worksheets:
+    sheet.sheet_properties.pageSetUpPr.fitToPage = True
+    sheet.page_setup.fitToWidth = 1
+    sheet.page_setup.fitToHeight = 0
+    sheet.sheet_view.zoomScale = 90
 
 wb.calculation.fullCalcOnLoad = True
+wb.calculation.forceFullCalc = True
+wb.calculation.calcMode = "auto"
 wb.save(OUT)
-print(f"saved {OUT}: {len(wb.sheetnames)} sheets, {len(rows)} result rows, "
-      f"primary_sim={primary_sim}, comparison blocks="
-      + ", ".join(f"{g} @ {p}" + (" [fixed interface]" if kind == "iface" else "")
-                  for kind, g, p in group_order))
+
+print(
+    f"saved {OUT}: {len(wb.sheetnames)} sheets, "
+    f"{len(points)} hardware points, {len(reportable_points)} RTL-pass points, "
+    f"{len(comparisons)} comparison views, {len(layers)} layers"
+)

@@ -52,6 +52,9 @@
 #                  Its dimensions set the "baseline" port width below, so the
 #                  constant-bandwidth point follows the baseline automatically
 #                  instead of being a magic number.
+#   CIM_MAC_LATENCY  fixed macro pipeline latency for this invocation. Values
+#                  other than one are appended to CIM config names so latency
+#                  experiments can coexist with the primary sweep.
 #
 # The interface model is one word per cycle per port (width/8 B/cyc each for
 # input, weight, bias and output). The width axis applies to CIM points ONLY:
@@ -85,6 +88,7 @@
 SWEEP_SET=${SWEEP_SET:-featured}
 GEOMETRIES=(32x32 64x64)          # square arrays; add 32x64 64x32 for asymmetric
 BASELINE_GEOMETRY=${BASELINE_GEOMETRY:-32x32}
+CIM_MAC_LATENCY=${CIM_MAC_LATENCY:-1}
 INCLUDE_SYSTOLIC=1
 read -r -a PORT_WIDTHS <<< "${PORT_WIDTHS:-matched baseline}"
 read -r -a TILE_ORGS <<< "${TILE_ORGS:-1x1}"   # elements per CIMTile, "<in>x<out>"
@@ -124,7 +128,8 @@ LAYERS=(
 )
 
 # --- Expand the design space into concrete config records --------------------
-# Each record: name|backend|K|N|native|ch_in|ch_out|IAT|OAT|TILE_IN_ELEMS|TILE_OUT_ELEMS
+# Each record:
+# name|backend|K|N|native|ch_in|ch_out|IAT|OAT|TILE_IN_ELEMS|TILE_OUT_ELEMS|MAC_LATENCY
 # Derivation, walking the hierarchy CIMArray > CIMTile > CIMElement > macro:
 #   N_per_element = CH_OUT * native / 8   (= CH_OUT for 8b, CH_OUT/2 for 4b)
 #   OUTPUT_AXIS_TILES = N / (TILE_OUT_ELEMS * N_per_element)
@@ -133,7 +138,7 @@ LAYERS=(
 # chosen macro and tile organization, so an over-broad design space stays safe
 # to run.
 CONFIGS=()
-emit_systolic() { CONFIGS+=("sa_$1x$2|0|$1|$2|||||||"); }
+emit_systolic() { CONFIGS+=("sa_$1x$2|0|$1|$2||||||||"); }
 emit_cim() {   # $1=K $2=N $3=native $4=ch_in $5=ch_out $6=tile_org
   local K=$1 N=$2 native=$3 chin=$4 chout=$5 org=$6
   local tie=${org%x*} toe=${org#*x}
@@ -147,7 +152,8 @@ emit_cim() {   # $1=K $2=N $3=native $4=ch_in $5=ch_out $6=tile_org
   # the tile organization when it is not the default one element per tile
   local name="cim${native}b${native}b_${K}x${N}_co${chout}_ci${chin}"
   [ "$org" = 1x1 ] || name+="_t${tie}x${toe}"
-  CONFIGS+=("$name|1|$K|$N|$native|$chin|$chout|$iat|$oat|$tie|$toe")
+  [ "$CIM_MAC_LATENCY" = 1 ] || name+="_lat${CIM_MAC_LATENCY}"
+  CONFIGS+=("$name|1|$K|$N|$native|$chin|$chout|$iat|$oat|$tie|$toe|$CIM_MAC_LATENCY")
 }
 for geom in "${GEOMETRIES[@]}"; do
   K=${geom%x*}; N=${geom#*x}
@@ -208,11 +214,11 @@ MANIFEST="$RES/manifest.csv"
 # workbook can pair a baseline-width CIM point with the baseline array itself
 # instead of guessing which systolic config that is. port_widths stays last:
 # the merge below keys on it as the final field.
-MANIFEST_HEADER="config,backend,K,N,macro_native_width_bits,ch_in,ch_out,input_axis_tiles,output_axis_tiles,tile_input_axis_elements,tile_output_axis_elements,ic_matched_port_bits,oc_matched_port_bits,baseline_geometry,port_widths"
+MANIFEST_HEADER="config,backend,K,N,macro_native_width_bits,ch_in,ch_out,input_axis_tiles,output_axis_tiles,tile_input_axis_elements,tile_output_axis_elements,cim_mac_latency,ic_matched_port_bits,oc_matched_port_bits,baseline_geometry,port_widths"
 manifest_rows() {
   local rec backend K N tok icb ocb ports
   for rec in "${CONFIGS[@]}"; do
-    IFS='|' read -r _ backend K N _ _ _ _ _ _ _ <<< "$rec"
+    IFS='|' read -r _ backend K N _ _ _ _ _ _ _ _ <<< "$rec"
     ports=""
     for tok in $(port_widths_for "$backend" "$K" "$N"); do
       read -r icb ocb <<< "$(port_bits_for "$tok" "$K" "$N")"
@@ -265,7 +271,7 @@ if [ "${DRY_RUN:-0}" = 1 ]; then
   runs=0
   echo "Design space -> ${#CONFIGS[@]} configs (baseline $BASELINE_GEOMETRY = ${BASE_IC_BITS}/${BASE_OC_BITS} b):"
   for rec in "${CONFIGS[@]}"; do
-    IFS='|' read -r name backend K N _ _ _ _ _ _ _ <<< "$rec"
+    IFS='|' read -r name backend K N _ _ _ _ _ _ _ _ <<< "$rec"
     ports=""
     for tok in $(port_widths_for "$backend" "$K" "$N"); do
       read -r icb ocb <<< "$(port_bits_for "$tok" "$K" "$N")"
@@ -286,6 +292,7 @@ want() { [ ${#WANT[@]} -eq 0 ] && return 0; for w in "${WANT[@]}"; do [ "$w" = "
 # afterwards from which files happen to exist.
 echo "port widths: ${PORT_WIDTHS[*]}  (baseline $BASELINE_GEOMETRY = ${BASE_IC_BITS}/${BASE_OC_BITS} b)"
 echo "tile orgs:   ${TILE_ORGS[*]} elements per CIMTile (in x out)"
+echo "CIM latency: ${CIM_MAC_LATENCY} cycles"
 [ ${#WANT[@]} -gt 0 ] && echo "configs:     ${WANT[*]} (subset of ${#CONFIGS[@]})"
 
 # Each CIM width is rated against a different systolic array, and both of those
@@ -301,7 +308,7 @@ have_systolic() {   # $1=config name -> is it being built now, or already on dis
   compgen -G "$RES/$1__*.log" >/dev/null
 }
 for rec in "${CONFIGS[@]}"; do
-  IFS='|' read -r name backend K N _ _ _ _ _ _ _ <<< "$rec"
+  IFS='|' read -r name backend K N _ _ _ _ _ _ _ _ <<< "$rec"
   [ "$backend" = 1 ] || continue
   want "$name" || continue
   for tok in $(port_widths_for "$backend" "$K" "$N"); do
@@ -318,7 +325,7 @@ for rec in "${CONFIGS[@]}"; do
 done
 
 for rec in "${CONFIGS[@]}"; do
-  IFS='|' read -r name backend K N native chin chout iat oat tie toe <<< "$rec"
+  IFS='|' read -r name backend K N native chin chout iat oat tie toe mac_latency <<< "$rec"
   want "$name" || continue
   # Port width is the inner axis: same design, different external interface.
   # Body left at this indent level; `continue` skips one (config, port) build.
@@ -339,7 +346,7 @@ for rec in "${CONFIGS[@]}"; do
     local_basec=20; [ "$native" = 8 ] && local_basec=24
     export CIM_CH_IN=$chin CIM_CH_OUT=$chout CIM_B_SETS=2 \
            CIM_BASE_A_WIDTH=$native CIM_BASE_B_WIDTH=$native CIM_BASE_C_WIDTH=$local_basec \
-           CIM_WRITE_CH_IN=1 CIM_MAC_LATENCY=1 CIM_MODE=0 \
+           CIM_WRITE_CH_IN=1 CIM_MAC_LATENCY=$mac_latency CIM_MODE=0 \
            CIM_TILE_INPUT_AXIS_ELEMENTS=$tie CIM_TILE_OUTPUT_AXIS_ELEMENTS=$toe \
            CIM_INPUT_AXIS_TILES=$iat CIM_OUTPUT_AXIS_TILES=$oat \
            CIM_A_PORT_TILES=$iat CIM_B_PORT_TILES=$oat CIM_C_PORT_TILES=$oat \

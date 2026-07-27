@@ -55,6 +55,7 @@ for m in csv.DictReader(open(manifest_path)):
         # the workbook falls back to inferring it from the systolic rows.
         baseline_geometry=m.get("baseline_geometry") or "",
         native_width=(native + "b") if (is_cim and native) else "",
+        mac_latency=(m.get("cim_mac_latency") or "1") if is_cim else "",
         ch_in=m["ch_in"], ch_out=m["ch_out"],
         input_axis_tiles=m["input_axis_tiles"] or "",
         output_axis_tiles=m["output_axis_tiles"] or "",
@@ -114,9 +115,10 @@ for fn in sorted(os.listdir(SWEEP_DIR)):
         except (KeyError, TypeError, ValueError, ZeroDivisionError):
             return ""
 
-    # Only RTL cosimulation is performance-reportable
-    cyc = total_ns / CLK_NS if (sim == "rtl" and total_ns) else None
-    ideal_cyc = ideal_ns / CLK_NS if (sim == "rtl" and ideal_ns) else None
+    # Only passing RTL cosimulation is performance-reportable
+    cyc = total_ns / CLK_NS if (sim == "rtl" and ok and total_ns) else None
+    ideal_cyc = ideal_ns / CLK_NS if (sim == "rtl" and ok and ideal_ns) else None
+    core_cyc = int(perf["core_cycles"]) if (ok and perf.get("core_cycles")) else None
     # Idealised L2 model: one word/cycle/port. Unpinned runs sit at the matched
     # width (one array row/column per cycle); pinned widths override both.
     ic_pw = pw_ic if pinned else meta["ic_matched"]
@@ -132,6 +134,7 @@ for fn in sorted(os.listdir(SWEEP_DIR)):
         backend=meta["backend"], geometry=f"{ic}x{oc}", IC=ic, OC=oc, macs=ic * oc,
         baseline_geometry=meta["baseline_geometry"],
         cim_macro_native_width=meta["native_width"],
+        cim_mac_latency=meta["mac_latency"],
         cim_ch_in=meta["ch_in"], cim_ch_out=meta["ch_out"],
         input_axis_tiles=meta["input_axis_tiles"],
         output_axis_tiles=meta["output_axis_tiles"],
@@ -141,8 +144,8 @@ for fn in sorted(os.listdir(SWEEP_DIR)):
         runtime_cycles=int(cyc) if cyc else "",
         runtime_us=round(total_ns / 1000.0, 3) if cyc else "",
         ideal_cycles=int(ideal_cyc) if ideal_cyc else "",
-        utilization=round(ideal_cyc / cyc, 4) if (cyc and ideal_cyc) else "",
-        cycles_per_ideal_beat=round(cyc / ideal_cyc, 3) if (cyc and ideal_cyc) else "",
+        matrix_utilization=round(ideal_cyc / core_cyc, 4)
+        if (ideal_cyc and core_cyc) else "",
         ext_read_bytes=rd, ext_write_bytes=wr,
         ext_read_GBps=round(rd_bpc * FREQ_HZ / 1e9, 2) if rd_bpc else "",
         ext_write_GBps=round(wr_bpc * FREQ_HZ / 1e9, 2) if wr_bpc else "",
@@ -166,5 +169,6 @@ with open(OUT, "w", newline="") as f:
     w.writeheader()
     w.writerows(rows)
 print(f"wrote {OUT} ({len(rows)} rows, "
-      f"{len({r['config'] for r in rows})} configs, "
+      f"{len({(r['config'], r['ic_port_width_bits'], r['oc_port_width_bits'], r['cim_mac_latency']) for r in rows})} "
+      "hardware points, "
       f"sims={sorted({r['sim'] for r in rows})})")
