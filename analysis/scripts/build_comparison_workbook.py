@@ -14,7 +14,6 @@ import sys
 from collections import OrderedDict
 
 from openpyxl import Workbook
-from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table, TableStyleInfo
@@ -60,7 +59,12 @@ LAYER_SHORT = {
     "matmul_6_fused": "matmul_6 (attention context)",
     "matmul_2_fused": "matmul_2 (attention scores)",
 }
-REQUIRED_RTL_FIELDS = ["runtime_cycles", "ideal_cycles", "core_cycles"]
+REQUIRED_RTL_FIELDS = [
+    "runtime_cycles",
+    "matrix_unit_cycles",
+    "ideal_cycles",
+    "processor_active_cycles",
+]
 STALL_FIELDS = [
     ("input_unavailable_cycles", "Input unavailable"),
     ("input_backpressure_cycles", "Input backpressure"),
@@ -72,49 +76,68 @@ STALL_FIELDS = [
     ("output_backpressure_cycles", "Output backpressure"),
     ("cim_set_wait_cycles", "CIM set wait"),
     ("cim_completion_queue_stall_cycles", "CIM completion queue"),
-    ("cim_result_path_stall_cycles", "CIM result path"),
 ]
-STALL_TOOLTIPS = {
+STALL_DEFINITIONS = {
     "input_unavailable_cycles": (
-        "The processor input channel is ready, but no input beat is valid. "
-        "This is upstream input starvation for both backends."
+        "Counted when the MatrixProcessor or CIMProcessor is ready to consume the next input/A beat, but "
+        "InputController's window-buffer output has valid low.\n\n"
+        "The beat may still be waiting for a memory response, input-buffer read, packing, transposition, or "
+        "window formation. This counter identifies upstream input starvation but not which upstream stage caused it."
     ),
     "input_backpressure_cycles": (
-        "A valid input-side operation cannot advance. SA observes the input "
-        "skewer; CIM observes MAC-request admission."
+        "SA: a valid input beat is waiting at the input skewer because the array-side consumer is not ready.\n\n"
+        "CIM: a fully formed MAC request is valid, but CIMArray has ready low. The current CIM counter therefore "
+        "matches CIM completion-queue stall cycles."
     ),
     "weight_unavailable_cycles": (
-        "The processor weight channel is ready, but no weight beat is valid. "
-        "This is upstream weight starvation."
+        "Counted when the processor's weight loader is ready for the next weight beat, but the upstream weight "
+        "channel has valid low.\n\n"
+        "SA may be waiting for WeightController, weight-buffer fill/read, memory response, packing, or transposition. "
+        "CIM streams directly from WeightController and may be waiting for memory response, packing, transposition, "
+        "or production of the next resident-set row beat."
     ),
     "weight_backpressure_cycles": (
-        "A valid weight-side operation cannot advance. SA observes the weight "
-        "skewer; CIM observes resident-set write admission."
+        "SA: push_weights has already popped a valid weight beat and is presenting it to the serialized weight "
+        "skewer, but one or more per-column skewer FIFOs cannot accept the vector while earlier weights drain into "
+        "the array.\n\n"
+        "CIM: load_weights has already popped a beat and is presenting a resident-set write request, but CIMArray "
+        "has ready low. The current CIMArray write port is always ready outside reset, so this counter is expected "
+        "to remain zero. Waiting for set_consumed happens before a request is presented and is not counted here."
     ),
     "result_backpressure_cycles": (
-        "A produced array result cannot advance. SA observes the psum output "
-        "skewer; CIM observes the raw-result channel."
+        "A raw array result is valid but the processor-side result consumer is not ready.\n\n"
+        "Raw means the array's partial-sum output before bias addition, cross-tile accumulation, and final write-back. "
+        "SA observes the psum output skewer. CIM observes CIMArray's CBeat result channel; it blocks when "
+        "collect_results cannot forward the beat into the accumulation pipeline."
     ),
     "accumulation_stall_cycles": (
-        "At least one accumulation-buffer read address, expected read response, "
-        "write request, or accumulation-to-writeback enqueue is blocked."
+        "Union of accumulation-path blocking conditions for both SA and CIM: an accumulation-buffer read address is "
+        "valid but not accepted; the accumulator expects read data that is not valid; a write request is valid but "
+        "not accepted; or the accumulation-to-writeback FIFO cannot accept another completed sum.\n\n"
+        "The component conditions can overlap, so this counter is not additive with other stalls."
     ),
     "output_fifo_full_cycles": (
-        "A final accumulation is ready, but the final-output FIFO cannot accept it."
+        "Producer-side final-output blockage. write_back has a completed final accumulation and asserts enqueue "
+        "valid, but the eight-entry final-output FIFO has no available slot.\n\n"
+        "The FIFO drains through the processor output channel into MatrixUnit OutputController."
     ),
     "output_backpressure_cycles": (
-        "The final output channel is valid while the downstream consumer is not ready."
+        "Consumer-side final-output blockage. The final-output FIFO presents a valid entry on the processor output "
+        "channel, but MatrixUnit OutputController is not ready to pop it.\n\n"
+        "OutputController serializes the value and either sends it to memory or pushes it to the vector unit. This "
+        "differs from Output FIFO full, which is measured at the FIFO's enqueue side."
     ),
     "cim_set_wait_cycles": (
-        "CIM only: the issue path needs a filled resident-weight set, but none is available."
+        "CIM only. The MAC issue loop has reached a weight-set swap and is ready to pop set_filled, but the loader has "
+        "not finished every row of that resident set. The loader may still be receiving weight beats or writing them "
+        "into CIMArray."
     ),
     "cim_completion_queue_stall_cycles": (
-        "CIM only: a valid MAC request cannot be admitted because future completion "
-        "storage is reserved or occupied."
-    ),
-    "cim_result_path_stall_cycles": (
-        "CIM only: the union of accumulation-path stall and final-output FIFO full. "
-        "It intentionally overlaps those component counters."
+        "CIM only. Each accepted MAC immediately reserves one entry in CIMArray's central completion queue because "
+        "the fixed-latency tile pipeline cannot be stopped after issue.\n\n"
+        "The entry first holds request metadata, then the captured tile results, and is released only after its final "
+        "CBeat is accepted by CIMProcessor. This stall means all entries are reserved and no entry is being released "
+        "on the current cycle; it does not refer to a speculative result."
     ),
 }
 
@@ -139,6 +162,7 @@ def point_key(row):
         row["ic_port_width_bits"],
         row["oc_port_width_bits"],
         latency,
+        row.get("clock_period_ns", ""),
     )
 
 
@@ -353,8 +377,8 @@ comparison_headers = [
     "SA RTL cycles",
     "CIM RTL cycles",
     "CIM speedup",
-    "SA processor-window utilization",
-    "CIM processor-window utilization",
+    "SA MatrixUnit utilization",
+    "CIM MatrixUnit utilization",
     "Utilization delta",
 ]
 for column, heading in enumerate(comparison_headers, 1):
@@ -417,7 +441,7 @@ if unavailable:
 ws = wb.create_sheet("Per-Layer Results")
 style_title(ws, "Passing RTL results — one row per instance and layer", 12)
 ws["A2"] = (
-    "Processor-window utilization = ideal MAC cycles / matrix-processor cycles. "
+    "MatrixUnit utilization = ideal MAC cycles / MatrixUnit start-to-done cycles. "
     "Failed hardware points are excluded and appear only in Design Points."
 )
 ws["A2"].font = Font(name=FONT, italic=True, color=GRAY)
@@ -432,28 +456,13 @@ result_headers = [
     "CIM MAC latency",
     "Layer",
     "RTL cycles",
-    "Matrix-processor cycles",
+    "MatrixUnit cycles",
     "Ideal MAC cycles",
-    "Processor-window utilization",
+    "MatrixUnit utilization",
 ]
 for column, heading in enumerate(result_headers, 1):
     ws.cell(4, column, heading)
 style_header(ws, 4, 1, len(result_headers))
-ws["J4"].comment = Comment(
-    "Hardware counter core_cycles. It starts when the matrix processor accepts "
-    "parameters and ends when its write-back thread reports completion. It does "
-    "not include MatrixUnit output-controller drain time.",
-    "User",
-)
-ws["K4"].comment = Comment(
-    "Total required MAC work divided by the configured array's MAC capacity per cycle.",
-    "User",
-)
-ws["L4"].comment = Comment(
-    "Ideal MAC cycles divided by matrix-processor cycles. This is a processor-window "
-    "metric, not utilization over the complete MatrixUnit start-to-done interval.",
-    "User",
-)
 
 result_row = 5
 for point in reportable_points:
@@ -471,7 +480,7 @@ for point in reportable_points:
             integer(row.get("cim_mac_latency")) if row["backend"] == "cim" else None,
             LAYER_SHORT.get(layer, layer),
             integer(rtl["runtime_cycles"]),
-            integer(rtl["core_cycles"]),
+            integer(rtl["matrix_unit_cycles"]),
             integer(rtl["ideal_cycles"]),
         ]
         for column, value in enumerate(values, 1):
@@ -514,21 +523,19 @@ ws = wb.create_sheet("Stall Analysis")
 stall_headers = [
     "Instance",
     "Layer",
-    "Matrix-processor cycles",
+    "Processor active cycles",
     *[heading for _, heading in STALL_FIELDS],
 ]
 style_title(ws, "Passing RTL stall counters — SA and CIM", len(stall_headers))
 ws["A2"] = (
     "Counters are simultaneous conditions and may overlap. "
-    "Hover over a stall heading for its exact meaning."
+    "Complete signal-level definitions are in the final Definition sheet."
 )
 ws["A2"].font = Font(name=FONT, italic=True, color=GRAY)
 ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(stall_headers))
 for column, heading in enumerate(stall_headers, 1):
     ws.cell(4, column, heading)
 style_header(ws, 4, 1, len(stall_headers))
-for offset, (field, _) in enumerate(STALL_FIELDS, 4):
-    ws.cell(4, offset).comment = Comment(STALL_TOOLTIPS[field], "User")
 
 stall_row = 5
 for point in reportable_points:
@@ -539,7 +546,7 @@ for point in reportable_points:
         values = [
             instance_label(row),
             LAYER_SHORT.get(layer, layer),
-            integer(rtl["core_cycles"]),
+            integer(rtl["processor_active_cycles"]),
             *[
                 integer(rtl.get(field))
                 if row["backend"] == "cim" or not field.startswith("cim_")
@@ -573,6 +580,7 @@ design_headers = [
     "Array",
     "Input port bits",
     "Output port bits",
+    "Clock period (ns)",
     "CIM MAC latency",
     "Macro native width",
     "CH_IN",
@@ -601,6 +609,7 @@ for point in points:
         row["geometry"],
         integer(row["ic_port_width_bits"]),
         integer(row["oc_port_width_bits"]),
+        float(row["clock_period_ns"]),
         integer(row.get("cim_mac_latency")) if row["backend"] == "cim" else None,
         row.get("cim_macro_native_width") or None,
         integer(row.get("cim_ch_in")),
@@ -613,10 +622,10 @@ for point in points:
         ws.cell(design_row, column, value)
     fill = SA_BLUE if row["backend"] == "systolic" else CIM_GREEN
     style_body_row(ws, design_row, 1, len(design_headers), fill)
-    ws.cell(design_row, 11).fill = PatternFill(
+    ws.cell(design_row, 12).fill = PatternFill(
         "solid", fgColor=PASS_GREEN if point["reportable"] else FAIL_RED
     )
-    ws.cell(design_row, 11).font = BODY_BOLD
+    ws.cell(design_row, 12).font = BODY_BOLD
     design_row += 1
 add_table(
     ws,
@@ -627,31 +636,18 @@ add_table(
     len(design_headers),
 )
 ws.freeze_panes = "E5"
-set_widths(ws, [43, 31, 11, 11, 14, 15, 16, 18, 10, 10, 12, 17, 54])
+set_widths(ws, [43, 31, 11, 11, 14, 15, 16, 16, 18, 10, 10, 12, 17, 54])
 
-# --------------------------------------------------------------- Methodology
-ws = wb.create_sheet("Methodology")
-style_title(ws, "Methodology and reproducibility", 3)
+# ---------------------------------------------------------------- Definition
+ws = wb.create_sheet("Definition")
+style_title(ws, "Definition", 3)
 method_rows = [
     (
-        "Performance evidence",
-        "Passing RTL only",
-        "Cycles, utilization, comparisons, and stalls require complete SCVerify/VCS RTL rows with hardware counters.",
-    ),
-    (
-        "Failed hardware point",
-        "Mark FAILED only",
-        "SystemC performance is never substituted. The point remains in Design Points without performance or comparison rows.",
-    ),
-    (
-        "RTL cycles",
-        "Total Runtime / 5 ns",
-        "End-to-end RTL layer runtime at the generic 5 ns synthesis constraint.",
-    ),
-    (
-        "Matrix-processor cycles",
-        "Hardware core_cycles counter",
-        "Starts when the matrix processor accepts parameters and ends when its write-back thread reports completion. It excludes MatrixUnit output-controller drain time.",
+        "MatrixUnit cycles",
+        "Harness Matrix Unit Runtime / clock period",
+        "Measured from the MatrixUnit start handshake through the MatrixUnit done handshake. It includes "
+        "OutputController drain and excludes any later vector-unit tail. The clock period comes from the sweep "
+        "manifest.",
     ),
     (
         "Ideal MAC cycles",
@@ -659,46 +655,34 @@ method_rows = [
         "Minimum full-array cycles implied by the layer's MAC count and configured compute resources.",
     ),
     (
-        "Processor-window utilization",
-        "Ideal MAC cycles / matrix-processor cycles",
-        "Uses the hardware core_cycles window. Exact MatrixUnit utilization requires a separate start-to-done measurement.",
+        "MatrixUnit utilization",
+        "Ideal MAC cycles / MatrixUnit cycles",
+        "The workbook's utilization metric for matrix operations.",
     ),
     (
-        "MatrixUnit boundary",
-        "Not measured by core_cycles",
-        "MatrixUnit done is produced after OutputController drains processor results, so the MatrixProcessor and MatrixUnit windows are not guaranteed equal.",
-    ),
-    (
-        "CIM MAC latency",
-        "CIM only",
-        "Every CIM instance label states its latency. SA has no MAC-latency setting and its cells are blank.",
-    ),
-    (
-        "Per-layer reporting",
-        "No aggregation",
-        "Cycles and utilization are never added or averaged across different layers.",
-    ),
-    (
-        "Comparison coverage",
-        "Five explicit views",
-        "SA32 is compared separately with CIM32 latency 1 and latency 3. The other views are same-size SA64/CIM64 and SA32 against CIM64 at both 256-bit and 512-bit CIM ports.",
+        "Processor active cycles",
+        "Hardware processor_active_cycles counter",
+        "Internal diagnostic window from processor parameter acceptance through processor write-back completion. "
+        "Retained on Stall Analysis but not used for utilization.",
     ),
     (
         "Stall counters",
         "SA and CIM",
-        "Stall conditions may overlap. Header comments define each signal-level condition.",
-    ),
-    (
-        "Reproduction",
-        "Checked-in scripts",
-        "Run matrix_backend_sweep.sh, then parse_sweep_logs.py, then build_comparison_workbook.py on the resulting summary CSV.",
-    ),
-    (
-        "Clock",
-        "5 ns / 200 MHz",
-        "Required for generic technology builds.",
+        "Stall conditions may overlap and must not be added. Complete signal-level definitions follow below.",
     ),
 ]
+method_rows.extend(
+    [
+        *[
+            (
+                heading,
+                "CIM only" if field.startswith("cim_") else "SA and CIM",
+                STALL_DEFINITIONS[field].replace("\n\n", " "),
+            )
+            for field, heading in STALL_FIELDS
+        ],
+    ]
+)
 for column, heading in enumerate(["Field", "Definition", "Notes"], 1):
     ws.cell(3, column, heading)
 style_header(ws, 3, 1, 3)
@@ -709,8 +693,8 @@ for row_index, values in enumerate(method_rows, 4):
         ws.cell(row_index, column).alignment = WRAP
         ws.cell(row_index, column).border = THIN_BOTTOM
     ws.cell(row_index, 1).fill = PatternFill("solid", fgColor=TEAL_LIGHT)
-    ws.row_dimensions[row_index].height = 34
-add_table(ws, "MethodologyTable", 3, 3 + len(method_rows), 1, 3)
+    ws.row_dimensions[row_index].height = max(34, 15 * (1 + len(str(values[2])) // 82))
+add_table(ws, "DefinitionTable", 3, 3 + len(method_rows), 1, 3)
 set_widths(ws, [28, 38, 92])
 
 for sheet in wb.worksheets:

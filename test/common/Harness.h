@@ -254,6 +254,7 @@ SC_MODULE(Harness) {
   Connections::SyncChannel CCS_INIT_S1(tile_done);
   Connections::SyncChannel CCS_INIT_S1(operation_done);
 
+  std::deque<sc_time> matrix_unit_start_times;
   std::deque<sc_time> start_times;
   std::deque<sc_time> operation_start_times;
 #if ENABLE_PERF_COUNTERS && defined(SIM_Accelerator)
@@ -369,6 +370,8 @@ SC_MODULE(Harness) {
   void start_monitor();
   void done_monitor();
 
+  void record_matrix_unit_start();
+  void record_matrix_unit_done();
   void send_params(const std::deque<BaseParams*>& params);
   void record_start(const std::deque<BaseParams*>& params,
                     const Operation& operation, bool is_first);

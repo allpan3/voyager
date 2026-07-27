@@ -16,6 +16,8 @@
 # Env toggles:  RTL=0      skip synthesis/cosim and run the SystemC gate only
 #                          (default is RTL=1; only use RTL=0 for a quick smoke check)
 #               DRY_RUN=1  print the expanded design space and exit (no build)
+#               CLOCK_PERIOD=<ns>
+#                          synthesis and simulation period (default 5)
 #
 # ============================ DESIGN SPACE ===================================
 # A CIM design point is fully described by (array K x N, macro native width,
@@ -115,7 +117,7 @@ fi
 mkdir -p "$RES"
 
 export DATATYPE=INT8 INPUT_BUFFER_SIZE=1024 WEIGHT_BUFFER_SIZE=1024 ACCUM_BUFFER_SIZE=1024
-export CLOCK_PERIOD=5 NETWORK=mobilebert_encoder SIMS=gold,accelerator
+export CLOCK_PERIOD=${CLOCK_PERIOD:-5} NETWORK=mobilebert_encoder SIMS=gold,accelerator
 export CODEGEN_DIR=${CODEGEN_DIR:-test/compiler}
 DTYPE_BITS=8                           # INT8 operands on both ports
 
@@ -214,7 +216,7 @@ MANIFEST="$RES/manifest.csv"
 # workbook can pair a baseline-width CIM point with the baseline array itself
 # instead of guessing which systolic config that is. port_widths stays last:
 # the merge below keys on it as the final field.
-MANIFEST_HEADER="config,backend,K,N,macro_native_width_bits,ch_in,ch_out,input_axis_tiles,output_axis_tiles,tile_input_axis_elements,tile_output_axis_elements,cim_mac_latency,ic_matched_port_bits,oc_matched_port_bits,baseline_geometry,port_widths"
+MANIFEST_HEADER="config,backend,K,N,macro_native_width_bits,ch_in,ch_out,input_axis_tiles,output_axis_tiles,tile_input_axis_elements,tile_output_axis_elements,cim_mac_latency,ic_matched_port_bits,oc_matched_port_bits,baseline_geometry,clock_period_ns,port_widths"
 manifest_rows() {
   local rec backend K N tok icb ocb ports
   for rec in "${CONFIGS[@]}"; do
@@ -225,7 +227,7 @@ manifest_rows() {
       [ "$icb" = "$ocb" ] && ports+="${ports:+ }${icb}:${tok}" \
                           || ports+="${ports:+ }${icb}x${ocb}:${tok}"
     done
-    echo "$(echo "$rec" | tr '|' ','),$(( K * DTYPE_BITS )),$(( N * DTYPE_BITS )),$BASELINE_GEOMETRY,$ports"
+    echo "$(echo "$rec" | tr '|' ','),$(( K * DTYPE_BITS )),$(( N * DTYPE_BITS )),$BASELINE_GEOMETRY,$CLOCK_PERIOD,$ports"
   done
 }
 
@@ -293,6 +295,7 @@ want() { [ ${#WANT[@]} -eq 0 ] && return 0; for w in "${WANT[@]}"; do [ "$w" = "
 echo "port widths: ${PORT_WIDTHS[*]}  (baseline $BASELINE_GEOMETRY = ${BASE_IC_BITS}/${BASE_OC_BITS} b)"
 echo "tile orgs:   ${TILE_ORGS[*]} elements per CIMTile (in x out)"
 echo "CIM latency: ${CIM_MAC_LATENCY} cycles"
+echo "clock period: ${CLOCK_PERIOD} ns"
 [ ${#WANT[@]} -gt 0 ] && echo "configs:     ${WANT[*]} (subset of ${#CONFIGS[@]})"
 
 # Each CIM width is rated against a different systolic array, and both of those

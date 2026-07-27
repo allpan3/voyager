@@ -14,24 +14,20 @@ import csv, os, re, sys
 
 SWEEP_DIR = sys.argv[1]
 OUT = sys.argv[2]
-CLK_NS = 5.0
-FREQ_HZ = 200e6
 INT8_BITS = 8
 
 # MatrixPerfHardware counters carried through to the CSV (present in RTL logs)
 PERF_COUNTERS = [
-    "core_cycles", "array_resident_cycles", "array_issue_cycles",
+    "processor_active_cycles", "array_resident_cycles", "array_issue_cycles",
     "input_unavailable_cycles", "input_backpressure_cycles",
     "weight_unavailable_cycles", "weight_backpressure_cycles",
     "result_backpressure_cycles", "accumulation_stall_cycles",
     "output_backpressure_cycles", "output_fifo_full_cycles",
     "cim_set_wait_cycles", "cim_completion_queue_stall_cycles",
-    "cim_result_path_stall_cycles",
 ]
 CIM_STALL_COUNTERS = [
     "cim_set_wait_cycles",
     "cim_completion_queue_stall_cycles",
-    "cim_result_path_stall_cycles",
 ]
 
 manifest_path = os.path.join(SWEEP_DIR, "manifest.csv")
@@ -41,6 +37,12 @@ if not os.path.exists(manifest_path):
 CFG = {}
 for m in csv.DictReader(open(manifest_path)):
     is_cim = m["backend"] == "1"
+    clock_period = m.get("clock_period_ns") or os.environ.get("CLOCK_PERIOD")
+    if not clock_period:
+        sys.exit(
+            "manifest lacks clock_period_ns; set CLOCK_PERIOD when parsing this "
+            "legacy sweep"
+        )
     # macro_native_width_bits was called cell_bits before the terminology was
     # settled; read either so older sweep directories still parse.
     native = m.get("macro_native_width_bits") or m.get("cell_bits") or ""
@@ -54,6 +56,7 @@ for m in csv.DictReader(open(manifest_path)):
         # The array every point is judged against. Absent in older manifests;
         # the workbook falls back to inferring it from the systolic rows.
         baseline_geometry=m.get("baseline_geometry") or "",
+        clock_period_ns=float(clock_period),
         native_width=(native + "b") if (is_cim and native) else "",
         mac_latency=(m.get("cim_mac_latency") or "1") if is_cim else "",
         ch_in=m["ch_in"], ch_out=m["ch_out"],
@@ -94,31 +97,61 @@ for fn in sorted(os.listdir(SWEEP_DIR)):
         g = re.search(pat, txt, re.M | re.I)
         return int(g.group(1)) if g else None
 
+    def grab_number(pat):
+        g = re.search(pat, txt, re.M | re.I)
+        return float(g.group(1)) if g else None
+
+    def grab_sum_number(pat):
+        values = re.findall(pat, txt, re.M | re.I)
+        return sum(float(value) for value in values) if values else None
+
     ok = bool(re.search(r"Error\s+count:\s+0\b", txt))
-    total_ns = grab(r"^Total Runtime:\s+(\d+)\s*ns")
-    ideal_ns = grab(r"matrix unit ideal runtime:\s+(\d+)\s*ns")
+    number = r"(\d+(?:\.\d+)?)"
+    total_ns = grab_number(rf"^Total Runtime:\s+{number}\s*ns")
+    matrix_unit_ns = grab_sum_number(rf"^Matrix Unit Runtime:\s+{number}\s*ns")
+    ideal_cycles_logged = grab_sum_number(
+        r"matrix unit ideal cycles:\s+(\d+)"
+    )
+    ideal_ns = grab_sum_number(rf"matrix unit ideal runtime:\s+{number}\s*ns")
     rd = grab(r"^harness:\s+(\d+)") or 0
     wr = grab(r"^harness_outputs:\s+(\d+)") or 0
     perf = {}
     pm = re.search(r"^MatrixPerfHardware:(.*)$", txt, re.M)
     if pm:
         perf = dict(kv.split("=") for kv in pm.group(1).split())
+        if "processor_active_cycles" not in perf and "core_cycles" in perf:
+            perf["processor_active_cycles"] = perf["core_cycles"]
         if "cim_completion_queue_stall_cycles" not in perf:
             perf["cim_completion_queue_stall_cycles"] = perf.get(
                 "cim_array_credit_stall_cycles", ""
             )
 
     # Normalize one synthesized stall counter against its snapshot duration
-    def perf_pct_of_core(name):
+    def perf_pct_of_processor(name):
         try:
-            return round(100 * int(perf[name]) / int(perf["core_cycles"]), 1)
+            return round(
+                100 * int(perf[name]) / int(perf["processor_active_cycles"]), 1
+            )
         except (KeyError, TypeError, ValueError, ZeroDivisionError):
             return ""
 
     # Only passing RTL cosimulation is performance-reportable
-    cyc = total_ns / CLK_NS if (sim == "rtl" and ok and total_ns) else None
-    ideal_cyc = ideal_ns / CLK_NS if (sim == "rtl" and ok and ideal_ns) else None
-    core_cyc = int(perf["core_cycles"]) if (ok and perf.get("core_cycles")) else None
+    clock_ns = meta["clock_period_ns"]
+    freq_hz = 1e9 / clock_ns
+    cyc = total_ns / clock_ns if (sim == "rtl" and ok and total_ns) else None
+    matrix_unit_cyc = (
+        matrix_unit_ns / clock_ns
+        if (sim == "rtl" and ok and matrix_unit_ns)
+        else None
+    )
+    if sim == "rtl" and ok:
+        ideal_cyc = (
+            ideal_cycles_logged
+            if ideal_cycles_logged is not None
+            else ideal_ns / clock_ns if ideal_ns is not None else None
+        )
+    else:
+        ideal_cyc = None
     # Idealised L2 model: one word/cycle/port. Unpinned runs sit at the matched
     # width (one array row/column per cycle); pinned widths override both.
     ic_pw = pw_ic if pinned else meta["ic_matched"]
@@ -131,6 +164,7 @@ for fn in sorted(os.listdir(SWEEP_DIR)):
     rows.append(dict(
         config=cfg, sim=sim, bw_mode="pinned" if pinned else "matched",
         ic_port_width_bits=ic_pw, oc_port_width_bits=oc_pw,
+        clock_period_ns=clock_ns,
         backend=meta["backend"], geometry=f"{ic}x{oc}", IC=ic, OC=oc, macs=ic * oc,
         baseline_geometry=meta["baseline_geometry"],
         cim_macro_native_width=meta["native_width"],
@@ -141,21 +175,22 @@ for fn in sorted(os.listdir(SWEEP_DIR)):
         cim_tile_input_axis_elements=meta["tile_in_elems"],
         cim_tile_output_axis_elements=meta["tile_out_elems"],
         layer=layer, passed=ok,
-        runtime_cycles=int(cyc) if cyc else "",
+        runtime_cycles=round(cyc) if cyc else "",
         runtime_us=round(total_ns / 1000.0, 3) if cyc else "",
-        ideal_cycles=int(ideal_cyc) if ideal_cyc else "",
-        matrix_utilization=round(ideal_cyc / core_cyc, 4)
-        if (ideal_cyc and core_cyc) else "",
+        matrix_unit_cycles=round(matrix_unit_cyc) if matrix_unit_cyc else "",
+        ideal_cycles=round(ideal_cyc) if ideal_cyc else "",
+        matrix_utilization=round(ideal_cyc / matrix_unit_cyc, 4)
+        if (ideal_cyc and matrix_unit_cyc) else "",
         ext_read_bytes=rd, ext_write_bytes=wr,
-        ext_read_GBps=round(rd_bpc * FREQ_HZ / 1e9, 2) if rd_bpc else "",
-        ext_write_GBps=round(wr_bpc * FREQ_HZ / 1e9, 2) if wr_bpc else "",
-        peak_read_GBps=round(peak_rd_bpc * FREQ_HZ / 1e9, 2),
-        peak_write_GBps=round(peak_wr_bpc * FREQ_HZ / 1e9, 2),
+        ext_read_GBps=round(rd_bpc * freq_hz / 1e9, 2) if rd_bpc else "",
+        ext_write_GBps=round(wr_bpc * freq_hz / 1e9, 2) if wr_bpc else "",
+        peak_read_GBps=round(peak_rd_bpc * freq_hz / 1e9, 2),
+        peak_write_GBps=round(peak_wr_bpc * freq_hz / 1e9, 2),
         read_bw_pct_of_peak=round(100 * rd_bpc / peak_rd_bpc, 1) if rd_bpc else "",
         write_bw_pct_of_peak=round(100 * wr_bpc / peak_wr_bpc, 1) if wr_bpc else "",
         **{name: perf.get(name, "") for name in PERF_COUNTERS},
         **{
-            name.removesuffix("_cycles") + "_pct_of_core": perf_pct_of_core(name)
+            name.removesuffix("_cycles") + "_pct_of_processor": perf_pct_of_processor(name)
             for name in CIM_STALL_COUNTERS
         },
     ))

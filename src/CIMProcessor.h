@@ -940,7 +940,7 @@ SC_MODULE(CIMProcessor) {
         active = true;
       } else if (active && !completed) {
         counters[MatrixPerformance::storage_index(
-            MatrixPerformance::CORE_CYCLES)]++;
+            MatrixPerformance::PROCESSOR_ACTIVE_CYCLES)]++;
 
         if (inflight != 0 || issue)
           counters[MatrixPerformance::storage_index(
@@ -1012,9 +1012,6 @@ SC_MODULE(CIMProcessor) {
           counters[MatrixPerformance::storage_index(
               MatrixPerformance::OUTPUT_FIFO_FULL_CYCLES)]++;
 #endif
-        if (accumulation_stalled || final_output_stalled)
-          counters[MatrixPerformance::storage_index(
-              MatrixPerformance::CIM_RESULT_PATH_STALL_CYCLES)]++;
         if (output_channel.vld.read() && !output_channel.rdy.read())
           counters[MatrixPerformance::storage_index(
               MatrixPerformance::OUTPUT_BACKPRESSURE_CYCLES)]++;
@@ -1037,7 +1034,8 @@ SC_MODULE(CIMProcessor) {
       value = perf_snapshot_sequence.read();
 #pragma hls_unroll yes
     for (int i = 0; i < MatrixPerformance::PERFORMANCE_COUNTER_COUNT; i++) {
-      if (perf_counter_select.read() == MatrixPerformance::CORE_CYCLES + i)
+      if (perf_counter_select.read() ==
+          MatrixPerformance::PROCESSOR_ACTIVE_CYCLES + i)
         value = perf_snapshot[i].read();
     }
     perf_counter_value.write(value);

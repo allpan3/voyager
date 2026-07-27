@@ -848,7 +848,7 @@ struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
         active = true;
       } else if (active && !completed) {
         counters[MatrixPerformance::storage_index(
-            MatrixPerformance::CORE_CYCLES)]++;
+            MatrixPerformance::PROCESSOR_ACTIVE_CYCLES)]++;
 
         if (inflight != 0 || issue)
           counters[MatrixPerformance::storage_index(
@@ -924,7 +924,8 @@ struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
       value = perf_snapshot_sequence.read();
 #pragma hls_unroll yes
     for (int i = 0; i < MatrixPerformance::PERFORMANCE_COUNTER_COUNT; i++) {
-      if (perf_counter_select.read() == MatrixPerformance::CORE_CYCLES + i)
+      if (perf_counter_select.read() ==
+          MatrixPerformance::PROCESSOR_ACTIVE_CYCLES + i)
         value = perf_snapshot[i].read();
     }
     perf_counter_value.write(value);

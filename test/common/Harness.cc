@@ -378,6 +378,23 @@ T* get_param(const std::deque<BaseParams*>& params, int& index) {
   return nullptr;
 }
 
+// Record the MatrixUnit start handshake independently of fused-stage timing
+void Harness::record_matrix_unit_start() {
+  matrix_unit_start.SyncPop();
+  matrix_unit_start_times.push_back(sc_time_stamp());
+}
+
+// Report one exact MatrixUnit start-to-done interval
+void Harness::record_matrix_unit_done() {
+  matrix_unit_done.SyncPop();
+  assert(!matrix_unit_start_times.empty());
+  const sc_time start = matrix_unit_start_times.front();
+  matrix_unit_start_times.pop_front();
+  const double runtime =
+      sc_time_stamp().to_default_time_units() - start.to_default_time_units();
+  std::cout << "Matrix Unit Runtime: " << runtime << " ns" << std::endl;
+}
+
 void Harness::send_params(const std::deque<BaseParams*>& params) {
   int idx = 0;
   while (idx < params.size()) {
@@ -440,13 +457,13 @@ void Harness::record_start(const std::deque<BaseParams*>& params,
 #if SUPPORT_SPMM
           if (matrix_params->is_spmm) {
         if (auto* dense_params = get_param<MatrixParams>(params, idx)) {
-          matrix_unit_start.SyncPop();
+          record_matrix_unit_start();
         }
         spmm_unit_start.SyncPop();
       } else
 #endif
       {
-        matrix_unit_start.SyncPop();
+        record_matrix_unit_start();
       }
 
       auto start = sc_time_stamp();
@@ -516,7 +533,7 @@ void Harness::record_done(const std::deque<BaseParams*>& params,
 #if SUPPORT_SPMM
           if (matrix_params->is_spmm) {
         if (auto* dense_params = get_param<MatrixParams>(params, idx)) {
-          matrix_unit_done.SyncPop();
+          record_matrix_unit_done();
 #if ENABLE_PERF_COUNTERS && defined(SIM_Accelerator)
           matrix_unit_completed = true;
 #endif
@@ -525,7 +542,7 @@ void Harness::record_done(const std::deque<BaseParams*>& params,
       } else
 #endif
       {
-        matrix_unit_done.SyncPop();
+        record_matrix_unit_done();
 #if ENABLE_PERF_COUNTERS && defined(SIM_Accelerator)
         matrix_unit_completed = true;
 #endif
@@ -567,7 +584,7 @@ void Harness::record_done(const std::deque<BaseParams*>& params,
       auto start = operation_start_times.front();
       operation_start_times.pop_front();
 
-      int total_runtime =
+      double total_runtime =
           end.to_default_time_units() - start.to_default_time_units();
       std::cout << "Total Runtime: " << total_runtime << " ns" << std::endl;
     }
@@ -593,21 +610,13 @@ void Harness::matrix_performance_monitor() {
 // Print one coherent hardware snapshot through the indexed RTL read port
 void Harness::print_matrix_performance() {
   static const char* names[MatrixPerformance::COUNTER_COUNT] = {
-      "snapshot_sequence",
-      "core_cycles",
-      "array_resident_cycles",
-      "array_issue_cycles",
-      "input_unavailable_cycles",
-      "input_backpressure_cycles",
-      "weight_unavailable_cycles",
-      "weight_backpressure_cycles",
-      "result_backpressure_cycles",
-      "accumulation_stall_cycles",
-      "output_backpressure_cycles",
-      "output_fifo_full_cycles",
-      "cim_set_wait_cycles",
-      "cim_completion_queue_stall_cycles",
-      "cim_result_path_stall_cycles",
+      "snapshot_sequence",          "processor_active_cycles",
+      "array_resident_cycles",      "array_issue_cycles",
+      "input_unavailable_cycles",   "input_backpressure_cycles",
+      "weight_unavailable_cycles",  "weight_backpressure_cycles",
+      "result_backpressure_cycles", "accumulation_stall_cycles",
+      "output_backpressure_cycles", "output_fifo_full_cycles",
+      "cim_set_wait_cycles",        "cim_completion_queue_stall_cycles",
   };
 
   MatrixPerformance::Counter values[MatrixPerformance::COUNTER_COUNT];

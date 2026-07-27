@@ -138,7 +138,11 @@ void Simulation::print_ideal_runtime(const Operation operation) {
 
   long cycles;
 
-  const long clock_period_ns = getenv_int("CLOCK_PERIOD", 1);
+  const char* clock_period = std::getenv("CLOCK_PERIOD");
+  if (clock_period == nullptr) {
+    throw std::runtime_error("CLOCK_PERIOD is required");
+  }
+  const double clock_period_ns = std::stod(clock_period);
   const int num_tiles = is_soc_sim() ? get_tile_count(param) : 1;
 
   if (is_gemm_op(first_op.target())) {
@@ -164,6 +168,8 @@ void Simulation::print_ideal_runtime(const Operation operation) {
       cycles = num_macs / K / (IC_DIMENSION * OC_DIMENSION);
     }
 
+    spdlog::info("{}, matrix unit ideal cycles: {}\n", get_op_name(param),
+                 cycles);
     spdlog::info("{}, matrix unit ideal runtime: {} ns\n", get_op_name(param),
                  cycles * clock_period_ns);
   } else {
