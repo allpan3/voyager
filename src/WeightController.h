@@ -85,11 +85,32 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
   // Carry one complete logical weight row after optional transposition
   Connections::Combinational<ac_int<buffer_width, false>> transpose_out;
 #if MATRIX_BACKEND == MATRIX_BACKEND_CIM
-  Connections::Combinational<ac_int<4, false>> packing_indices;
+  // Queue one unpacking tag for each in-order response
+  //
+  // Two tags are live before steady response retirement begins
+  // Connections::Fifo cannot replace an entry in a cycle that starts full, so
+  // use two live-tag entries plus one replacement slot
+  //
+  // A two-entry FIFO therefore circulated one request bubble every five cycles
+  // The third entry also retains a registered response-to-request boundary
+  //
+  // Connections::Fifo depth one is an II-one pipeline but throttles this
+  // two-tag startup window A custom two-entry full-replacement queue avoids the
+  // extra slot at the cost of bespoke control
+  Connections::Fifo<ac_int<4, false>, 3> CCS_INIT_S1(packing_indices_fifo);
+  Connections::Combinational<ac_int<4, false>> CCS_INIT_S1(packing_indices_enq);
+  Connections::Combinational<ac_int<4, false>> CCS_INIT_S1(packing_indices_deq);
   sc_fifo<bool> reader_tile_valid;
 #endif
 
   SC_CTOR(WeightController) {
+#if MATRIX_BACKEND == MATRIX_BACKEND_CIM
+    packing_indices_fifo.clk(clk);
+    packing_indices_fifo.rst(rstn);
+    packing_indices_fifo.enq(packing_indices_enq);
+    packing_indices_fifo.deq(packing_indices_deq);
+#endif
+
     SC_THREAD(read_params);
     sensitive << clk.pos();
     async_reset_signal_is(rstn, false);
@@ -429,7 +450,7 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
 
 #if MATRIX_BACKEND == MATRIX_BACKEND_CIM
     weight_req.Reset();
-    packing_indices.ResetWrite();
+    packing_indices_enq.ResetWrite();
 #else
     read_request[0].Reset();
     read_request[1].Reset();
@@ -610,7 +631,7 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
                                         params.weight_dtype,
                                         params.weight_offset, address,
                                         params.weight_burst_size, weight_req);
-                                    packing_indices.Push(packing_index);
+                                    packing_indices_enq.Push(packing_index);
                                     fetcher_done.write(false);
                                     fetcher_done_2.write(false);
                                   }
@@ -810,7 +831,7 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
     transposer_params.ResetRead();
     packed_bits.ResetRead();
     transpose_out.ResetWrite();
-    packing_indices.ResetRead();
+    packing_indices_deq.ResetRead();
 
     wait();
 
@@ -851,7 +872,7 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
             }
 
             const ac_int<MAX_FETCH_WIDTH, false> bits = packed_bits.Pop();
-            const ac_int<4, false> packing_index = packing_indices.Pop();
+            const ac_int<4, false> packing_index = packing_indices_deq.Pop();
             // Hold one transposed source row before scattering it by row
             ac_int<SOURCE_ROW_WIDTH, false> source_values = 0;
             const bool handled =
@@ -890,7 +911,7 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
 #pragma hls_pipeline_stall_mode flush
         while (!fetcher_done_2.read()) {
           const ac_int<MAX_FETCH_WIDTH, false> bits = packed_bits.Pop();
-          const ac_int<4, false> packing_index = packing_indices.Pop();
+          const ac_int<4, false> packing_index = packing_indices_deq.Pop();
           ac_int<buffer_width, false> outputs = 0;
           const bool handled =
               (unpack_bits<WeightTypes, cols, buffer_width, MAX_FETCH_WIDTH,
