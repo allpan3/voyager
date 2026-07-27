@@ -33,7 +33,7 @@ proc get_accelerator_config {} {
 
   lappend config_list [dict create \
     name "WeightController" \
-    template "WeightController<WeightTypeList, $ACCUM_BUFFER_DATATYPE, $IC_DIMENSION, $OC_DIMENSION, $OC_PORT_WIDTH, $WEIGHT_BUFFER_WIDTH, $WEIGHT_WRITE_WIDTH>" \
+    template "WeightController<WeightTypeList, $ACCUM_BUFFER_DATATYPE, $IC_DIMENSION, $OC_DIMENSION, $OC_PORT_WIDTH, $WEIGHT_BUFFER_WIDTH, $WEIGHT_WRITE_WIDTH, $CIM_B_SETS>" \
   ]
 
   if {$MATRIX_BACKEND == $MATRIX_BACKEND_CIM} {

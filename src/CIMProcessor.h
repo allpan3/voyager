@@ -8,6 +8,7 @@
 
 #include "ArchitectureParams.h"
 #include "CIMArray.h"
+#include "CIMWeightSchedule.h"
 #include "Params.h"
 #include "PerfMonitor.h"
 
@@ -104,6 +105,7 @@ SC_MODULE(CIMProcessor) {
   static constexpr int LOOP_WIDTH = 10;
   static constexpr int ACCUM_TO_WB_FIFO_DEPTH = SUPPORT_MX ? 8 : 1;
   static constexpr int OUTPUT_FIFO_DEPTH = 8;
+  static constexpr int SETS_PER_BANK = B_SETS / 2;
 #if DOUBLE_BUFFERED_ACCUM_BUFFER
   static constexpr int ACCUM_BUFFER_BANKS = 2;
 #else
@@ -134,9 +136,10 @@ SC_MODULE(CIMProcessor) {
                 "in one C beat");
   static_assert(WRITE_CH_IN == 1,
                 "CIMProcessor currently stores one CIM weight row per request");
-  static_assert(
-      B_SETS >= 2,
-      "CIMProcessor currently alternates at least two resident weight sets");
+  static_assert(B_SETS >= 2 && B_SETS % 2 == 0,
+                "CIM resident sets must split into two equal banks");
+  static_assert(SETS_PER_BANK <= 0xFFFF,
+                "CIM resident bank size exceeds schedule metadata");
   static_assert(K == Array::K, "CIMProcessor K must match the CIM input axis");
   static_assert(K == CIM_ARRAY_K_DIMENSION,
                 "CIMProcessor rows must match the CIM array K dimension");
@@ -172,6 +175,7 @@ SC_MODULE(CIMProcessor) {
   // Retain MatrixProcessor's weight_channel protocol at physical B-beat width
   Connections::In<ac_int<WEIGHT_WRITE_WIDTH, false>> CCS_INIT_S1(
       weight_channel);
+  Connections::In<CIMWeightGroup> CCS_INIT_S1(weight_group_channel);
   Connections::In<Pack1D<Buffer, N>> CCS_INIT_S1(bias_channel);
   Connections::In<MatrixParams> CCS_INIT_S1(params_in);
 
@@ -201,6 +205,38 @@ SC_MODULE(CIMProcessor) {
 #endif
 
  private:
+  // Bind one logical resident group to one physical set bank
+  struct ScheduledWeightGroup {
+    CIMWeightGroup logical;
+    ac_int<1, false> bank;
+
+    static const unsigned int width = CIMWeightGroup::width + 1;
+
+    template <unsigned int Size>
+    void Marshall(Marshaller<Size> &m) {
+      m & logical;
+      m & bank;
+    }
+
+    inline friend void sc_trace(sc_trace_file *tf,
+                                const ScheduledWeightGroup &group,
+                                const std::string &name) {
+      sc_trace(tf, group.logical, name + ".logical");
+      sc_trace(tf, group.bank, name + ".bank");
+    }
+
+    inline friend std::ostream &operator<<(std::ostream &os,
+                                           const ScheduledWeightGroup &group) {
+      os << group.logical << " " << group.bank;
+      return os;
+    }
+
+    inline friend bool operator==(const ScheduledWeightGroup &lhs,
+                                  const ScheduledWeightGroup &rhs) {
+      return lhs.logical == rhs.logical && lhs.bank == rhs.bank;
+    }
+  };
+
   Array CCS_INIT_S1(cim_array);
   Connections::Combinational<MACRequest> CCS_INIT_S1(mac_request_channel);
   Connections::Combinational<WriteRequest> CCS_INIT_S1(write_request_channel);
@@ -229,13 +265,19 @@ SC_MODULE(CIMProcessor) {
       accum_output_fifo);
   Connections::Combinational<Pack1D<Buffer, N>> CCS_INIT_S1(accum_output_enq);
 
-  // Swap interlock mirroring the weight DoubleBuffer's bank alternation: a set
-  // becomes MAC-able once completely filled and becomes refillable after the
-  // first MAC using the next set is accepted, which proves the old issue window
-  // has closed
-  // The release tokens pass through small FIFOs until the loader revisits each
-  // physical set
-  Connections::Combinational<bool> set_filled[2];
+  // Buffer the next bank assignment and every newly filled physical set
+  Connections::Fifo<ScheduledWeightGroup, 2> CCS_INIT_S1(
+      scheduled_weight_group_fifo);
+  Connections::Combinational<ScheduledWeightGroup> CCS_INIT_S1(
+      scheduled_weight_group_enq);
+  Connections::Combinational<ScheduledWeightGroup> CCS_INIT_S1(
+      scheduled_weight_group_deq);
+  Connections::Fifo<Set, SETS_PER_BANK> CCS_INIT_S1(set_ready_fifo);
+  Connections::Combinational<Set> CCS_INIT_S1(set_ready_enq);
+  Connections::Combinational<Set> CCS_INIT_S1(set_ready_deq);
+
+  // Release each physical bank after the replacement bank accepts its first
+  // MAC, proving every prior issue window has closed
   Connections::Fifo<bool, 2> CCS_INIT_S1(set_consumed_fifo_0);
   Connections::Fifo<bool, 2> CCS_INIT_S1(set_consumed_fifo_1);
   Connections::Combinational<bool> set_consumed_enq[2];
@@ -288,6 +330,16 @@ SC_MODULE(CIMProcessor) {
     accumulation_metadata_fifo.rst(rstn);
     accumulation_metadata_fifo.enq(accumulation_metadata_enq);
     accumulation_metadata_fifo.deq(accumulation_metadata_deq);
+
+    scheduled_weight_group_fifo.clk(clk);
+    scheduled_weight_group_fifo.rst(rstn);
+    scheduled_weight_group_fifo.enq(scheduled_weight_group_enq);
+    scheduled_weight_group_fifo.deq(scheduled_weight_group_deq);
+
+    set_ready_fifo.clk(clk);
+    set_ready_fifo.rst(rstn);
+    set_ready_fifo.enq(set_ready_enq);
+    set_ready_fifo.deq(set_ready_deq);
 
     process_accumulation_params_fifo.clk(clk);
     process_accumulation_params_fifo.rst(rstn);
@@ -469,37 +521,60 @@ SC_MODULE(CIMProcessor) {
     write_request_channel.Push(request);
   }
 
-  // Load each fixed-size beat stream into alternating resident sets
+  // Load each logical group into the next physical set bank
   void load_weights() {
     weight_channel.Reset();
+    weight_group_channel.Reset();
     write_request_channel.ResetWrite();
-    set_filled[0].ResetWrite();
-    set_filled[1].ResetWrite();
+    scheduled_weight_group_enq.ResetWrite();
+    set_ready_enq.ResetWrite();
     set_consumed_deq[0].ResetRead();
     set_consumed_deq[1].ResetRead();
 
     wait();
 
-    bool bank = 0;
-    bool filled_before[2] = {false, false};
+    ac_int<1, false> bank = 0;
+    bool used_before[2] = {false, false};
     while (true) {
-      if (filled_before[bank]) {
-        // The DoubleBuffer's write-after-read interlock: no overwrite of a live
-        // set
+      const CIMWeightGroup logical = weight_group_channel.Pop();
+
+#ifndef __SYNTHESIS__
+      if (logical.set_count == 0 || logical.set_count > SETS_PER_BANK ||
+          logical.replay_count == 0) {
+        SC_REPORT_FATAL("CIMProcessor", "invalid resident weight group");
+      }
+#endif
+
+      if (used_before[bank]) {
+        // No set in this bank may be overwritten before the replacement bank
+        // closes its final issue window
         set_consumed_deq[bank].Pop();
       }
 
+      ScheduledWeightGroup scheduled;
+      scheduled.logical = logical;
+      scheduled.bank = bank;
+      scheduled_weight_group_enq.Push(scheduled);
+
+      for (int slot = 0; slot < SETS_PER_BANK; slot++) {
+        if (slot < logical.set_count) {
+          const Set wset = Set(bank * SETS_PER_BANK + slot);
+
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
-      for (int k = 0; k < K; k++) {
-        for (int span = 0; span < WEIGHT_BEATS_PER_ROW; span++) {
-          const ac_int<WEIGHT_WRITE_WIDTH, false> beat = weight_channel.Pop();
-          write_weight_beat(Set(bank), k, span, beat);
+          for (int k = 0; k < K; k++) {
+            for (int span = 0; span < WEIGHT_BEATS_PER_ROW; span++) {
+              const ac_int<WEIGHT_WRITE_WIDTH, false> beat =
+                  weight_channel.Pop();
+              write_weight_beat(wset, k, span, beat);
+            }
+          }
+
+          set_ready_enq.Push(wset);
         }
       }
 
-      set_filled[bank].Push(true);
-      filled_before[bank] = true;
+      used_before[bank] = true;
       bank = !bank;
     }
   }
@@ -526,18 +601,21 @@ SC_MODULE(CIMProcessor) {
     collect_results_params_enq.ResetWrite();
     write_back_params_enq.ResetWrite();
     mac_request_channel.ResetWrite();
-    set_filled[0].ResetRead();
-    set_filled[1].ResetRead();
+    scheduled_weight_group_deq.ResetRead();
+    set_ready_deq.ResetRead();
     set_consumed_enq[0].ResetWrite();
     set_consumed_enq[1].ResetWrite();
     start.Reset();
 
     wait();
 
-    // The active set follows the controller's bank alternation; this thread
-    // only times the swaps, it no longer chooses which set to load
+    ScheduledWeightGroup group;
     Set active_wset = 0;
-    bool have_active = false;
+    ac_int<16, false> set_slot = 0;
+    ac_int<16, false> replay = 0;
+    bool need_group = true;
+    bool have_active_bank = false;
+    ac_int<1, false> active_bank = 0;
     while (true) {
       const MatrixParams params = params_in.Pop();
       // MatrixProcessor::push_inputs also sends params to push_weights_params;
@@ -576,19 +654,55 @@ SC_MODULE(CIMProcessor) {
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
       for (ac_int<32, false> step = 0; step < total_ops; step++) {
-        // needs_weight_load times the swap exactly like MatrixProcessor
-        // push_inputs swap_weights Waiting on set_filled guarantees every row
-        // of the incoming set is committed first
-        Set previous_wset = active_wset;
-        bool switched_wset = false;
+        bool release_after_issue = false;
+        ac_int<1, false> release_bank = 0;
         if (needs_weight_load(params, loop_counters, outer_reuse_indices,
                               reuse_weights, step)) {
-          if (have_active) {
-            active_wset = (active_wset & 1) ? Set(0) : Set(1);
-            switched_wset = true;
+          if (need_group) {
+            group = scheduled_weight_group_deq.Pop();
+
+#ifndef __SYNTHESIS__
+            if (group.logical.set_count == 0 ||
+                group.logical.set_count > SETS_PER_BANK ||
+                group.logical.replay_count == 0) {
+              SC_REPORT_FATAL("CIMProcessor",
+                              "invalid scheduled resident weight group");
+            }
+#endif
+
+            if (have_active_bank) {
+              release_after_issue = true;
+              release_bank = active_bank;
+            }
+            active_bank = group.bank;
+            have_active_bank = true;
+            set_slot = 0;
+            replay = 0;
+            need_group = false;
           }
-          set_filled[active_wset & 1].Pop();
-          have_active = true;
+
+          const Set expected_wset = Set(group.bank * SETS_PER_BANK + set_slot);
+          if (replay == 0) {
+            active_wset = set_ready_deq.Pop();
+#ifndef __SYNTHESIS__
+            if (active_wset != expected_wset) {
+              SC_REPORT_FATAL("CIMProcessor",
+                              "resident set ready order does not match group");
+            }
+#endif
+          } else {
+            active_wset = expected_wset;
+          }
+
+          set_slot++;
+          if (set_slot == group.logical.set_count) {
+            set_slot = 0;
+            replay++;
+            if (replay == group.logical.replay_count) {
+              replay = 0;
+              need_group = true;
+            }
+          }
         }
 
         MACRequest request;
@@ -606,15 +720,21 @@ SC_MODULE(CIMProcessor) {
         // CIMArray
         mac_request_channel.Push(request);
 
-        // Acceptance on the new set proves every selected tile has closed the
-        // previous set's issue window, so refilling can overlap result
-        // retirement
-        if (switched_wset) {
-          set_consumed_enq[previous_wset & 1].Push(true);
+        // The first accepted issue on the replacement bank closes every issue
+        // window in the previous bank
+        if (release_after_issue) {
+          set_consumed_enq[release_bank].Push(true);
         }
 
         advance_loop_counters(loop_counters, params);
       }
+
+#ifndef __SYNTHESIS__
+      if (!need_group) {
+        SC_REPORT_FATAL("CIMProcessor",
+                        "matrix job ended inside a resident weight group");
+      }
+#endif
     }
   }
 
@@ -962,8 +1082,7 @@ SC_MODULE(CIMProcessor) {
           counters[MatrixPerformance::storage_index(
               MatrixPerformance::CIM_COMPLETION_QUEUE_STALL_CYCLES)]++;
         const bool set_wait =
-            (set_filled[0].rdy.read() && !set_filled[0].vld.read()) ||
-            (set_filled[1].rdy.read() && !set_filled[1].vld.read());
+            set_ready_deq.rdy.read() && !set_ready_deq.vld.read();
         if (set_wait)
           counters[MatrixPerformance::storage_index(
               MatrixPerformance::CIM_SET_WAIT_CYCLES)]++;

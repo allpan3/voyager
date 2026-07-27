@@ -39,10 +39,14 @@
 #define CIM_PROCESSOR_TEST_BASE_C_WIDTH 12
 #endif
 
+#ifndef CIM_PROCESSOR_TEST_B_SETS
+#define CIM_PROCESSOR_TEST_B_SETS 8
+#endif
+
 #if CIM_PROCESSOR_LARGE_TEST
 static constexpr int CH_IN = 64;
 static constexpr int CH_OUT = 64;
-static constexpr int B_SETS = 4;
+static constexpr int B_SETS = CIM_PROCESSOR_TEST_B_SETS;
 static constexpr int BASE_A_WIDTH = 4;
 static constexpr int BASE_B_WIDTH = 4;
 static constexpr int BASE_C_WIDTH = 20;
@@ -53,7 +57,7 @@ static constexpr int OUTPUT_AXIS_TILES = 2;
 #else
 static constexpr int CH_IN = 2;
 static constexpr int CH_OUT = CIM_PROCESSOR_TEST_CH_OUT;
-static constexpr int B_SETS = 2;
+static constexpr int B_SETS = CIM_PROCESSOR_TEST_B_SETS;
 static constexpr int BASE_A_WIDTH = CIM_PROCESSOR_TEST_BASE_A_WIDTH;
 static constexpr int BASE_B_WIDTH = CIM_PROCESSOR_TEST_BASE_B_WIDTH;
 static constexpr int BASE_C_WIDTH = CIM_PROCESSOR_TEST_BASE_C_WIDTH;
@@ -114,6 +118,7 @@ SC_MODULE(CIMProcessorTb) {
   Connections::Combinational<ac_int<INPUT_BUFFER_WIDTH, false>> input_channel;
   Connections::Combinational<ac_int<Processor::WEIGHT_WRITE_WIDTH, false>>
       weight_channel;
+  Connections::Combinational<CIMWeightGroup> weight_group_channel;
   Connections::Combinational<BufferVector> bias_channel;
   Connections::Combinational<MatrixParams> params_channel;
   Connections::Combinational<BufferVector> output_channel;
@@ -145,10 +150,12 @@ SC_MODULE(CIMProcessorTb) {
 
   std::deque<ExpectedOutput> expected_outputs;
   std::deque<BufferVector> pending_biases;
+  std::deque<CIMWeightGroup> pending_weight_groups;
   std::vector<unsigned long> throughput_input_cycles;
   std::vector<unsigned long> throughput_output_cycles;
   sc_event expected_output_event;
   sc_event bias_event;
+  sc_event weight_group_event;
   int checked_outputs;
   bool test_failed;
 
@@ -171,6 +178,7 @@ SC_MODULE(CIMProcessorTb) {
     dut.rstn(rstn);
     dut.input_channel(input_channel);
     dut.weight_channel(weight_channel);
+    dut.weight_group_channel(weight_group_channel);
     dut.bias_channel(bias_channel);
     dut.params_in(params_channel);
     dut.output_channel(output_channel);
@@ -206,6 +214,9 @@ SC_MODULE(CIMProcessorTb) {
     sensitive << clk.posedge_event();
 
     SC_THREAD(drive_bias);
+    sensitive << clk.posedge_event();
+
+    SC_THREAD(drive_weight_groups);
     sensitive << clk.posedge_event();
 
     SC_THREAD(check_outputs);
@@ -316,6 +327,20 @@ SC_MODULE(CIMProcessorTb) {
     return params;
   }
 
+  // Create four resident tiles replayed across two outer-X positions
+  MatrixParams make_multiset_reuse_params() const {
+    MatrixParams params = make_base_params();
+    params.weight_loop_idx[0] = 0;
+    params.x_loop_idx[0] = 1;
+    params.y_loop_idx[0] = 2;
+    params.fy_loop_idx[0] = 3;
+    params.reduction_loop_idx[0] = 4;
+    params.loops[0][params.x_loop_idx[0]] = 2;
+    params.loops[1][params.weight_loop_idx[1]] = 4;
+    params.has_bias = false;
+    return params;
+  }
+
   // Create one result redirected into the selected accumulation-buffer bank
   MatrixParams make_double_buffer_params() const {
     MatrixParams params = make_base_params();
@@ -393,6 +418,35 @@ SC_MODULE(CIMProcessorTb) {
     return bias;
   }
 
+  // Queue one physical-bank group for the independent metadata producer
+  CIMWeightGroup make_weight_group(int set_count, int replay_count) const {
+    CIMWeightGroup group;
+    group.set_count = set_count;
+    group.replay_count = replay_count;
+    return group;
+  }
+
+  // Match WeightController's bank-fit decision for a simple tile sequence
+  std::vector<CIMWeightGroup> make_weight_groups(int set_count) const {
+    std::vector<CIMWeightGroup> groups;
+    if (set_count <= Processor::SETS_PER_BANK) {
+      groups.push_back(make_weight_group(set_count, 1));
+    } else {
+      for (int set = 0; set < set_count; set++) {
+        groups.push_back(make_weight_group(1, 1));
+      }
+    }
+    return groups;
+  }
+
+  // Queue group metadata without blocking the weight-data producer
+  void queue_weight_groups(const std::vector<CIMWeightGroup> &groups) {
+    for (const CIMWeightGroup &group : groups) {
+      pending_weight_groups.push_back(group);
+    }
+    weight_group_event.notify(SC_ZERO_TIME);
+  }
+
   // Queue one expected output and its deliberate ready stall
   void expect_output(const std::string &label, const BufferVector &values,
                      int stall_cycles) {
@@ -403,9 +457,11 @@ SC_MODULE(CIMProcessorTb) {
   // Send one mapper job with an exact resident-weight load schedule
   void send_job(const MatrixParams &params,
                 const std::vector<int> &weight_patterns,
-                const std::vector<bool> &load_weights, int input_pattern) {
+                const std::vector<bool> &load_weights,
+                const std::vector<CIMWeightGroup> &groups, int input_pattern) {
     require(weight_patterns.size() == load_weights.size(),
             "test job vectors must have equal lengths");
+    queue_weight_groups(groups);
     params_channel.Push(params);
     start_channel.SyncPop();
 
@@ -431,6 +487,7 @@ SC_MODULE(CIMProcessorTb) {
   // Send a no-accumulation stream that reuses one resident weight set
   void send_throughput_job(int operations, int weight_pattern,
                            int input_pattern) {
+    queue_weight_groups({make_weight_group(1, 1)});
     params_channel.Push(make_throughput_params(operations));
     start_channel.SyncPop();
 
@@ -490,6 +547,25 @@ SC_MODULE(CIMProcessorTb) {
       const BufferVector bias = pending_biases.front();
       pending_biases.pop_front();
       bias_channel.Push(bias);
+    }
+  }
+
+  // Drive resident-group metadata independently of the weight beat stream
+  void drive_weight_groups() {
+    weight_group_channel.ResetWrite();
+    wait();
+    while (!rstn.read()) {
+      wait();
+    }
+
+    while (true) {
+      if (pending_weight_groups.empty()) {
+        wait(weight_group_event);
+        continue;
+      }
+      const CIMWeightGroup group = pending_weight_groups.front();
+      pending_weight_groups.pop_front();
+      weight_group_channel.Push(group);
     }
   }
 
@@ -678,7 +754,7 @@ SC_MODULE(CIMProcessorTb) {
     expect_output("nominal address 0", nominal_0, 0);
     expect_output("nominal address 1", nominal_1, 0);
     send_job(make_accumulation_params(true), {0, 1, 2, 3},
-             {true, true, true, true}, 0);
+             {true, true, true, true}, make_weight_groups(4), 0);
 
     const BufferVector reused_x = expected_partial(1, 20);
     for (int output_x = 0; output_x < 4; output_x++) {
@@ -687,7 +763,7 @@ SC_MODULE(CIMProcessorTb) {
       expect_output(label.str(), reused_x, 3);
     }
     send_job(make_weight_reuse_params(true), {20, 20, 20, 20},
-             {true, false, false, false}, 1);
+             {true, false, false, false}, {make_weight_group(1, 1)}, 1);
 
     const BufferVector reused_y = expected_partial(2, 30);
     for (int output_y = 0; output_y < 4; output_y++) {
@@ -696,16 +772,31 @@ SC_MODULE(CIMProcessorTb) {
       expect_output(label.str(), reused_y, 3);
     }
     send_job(make_weight_reuse_params(false), {30, 30, 30, 30},
-             {true, false, false, false}, 2);
+             {true, false, false, false}, {make_weight_group(1, 1)}, 2);
 
     const BufferVector backpressure_bias = queue_bias(100);
     BufferVector backpressured = backpressure_bias;
     add_vector(backpressured, expected_partial(3, 40));
     add_vector(backpressured, expected_partial(3, 41));
     expect_output("backpressured temporal accumulation", backpressured, 25);
-    send_job(make_backpressure_params(), {40, 41}, {true, true}, 3);
+    send_job(make_backpressure_params(), {40, 41}, {true, true},
+             make_weight_groups(2), 3);
 
-    const int expected_output_count = 11 + kThroughputOperations;
+    if constexpr (B_SETS >= 8) {
+      for (int replay = 0; replay < 2; replay++) {
+        for (int set = 0; set < 4; set++) {
+          std::ostringstream label;
+          label << "multiset replay " << replay << " set " << set;
+          expect_output(label.str(), expected_partial(8, 8 + set), 0);
+        }
+      }
+      send_job(make_multiset_reuse_params(), {8, 9, 10, 11, 8, 9, 10, 11},
+               {true, true, true, true, false, false, false, false},
+               {make_weight_group(4, 2)}, 8);
+    }
+
+    const int expected_output_count =
+        11 + kThroughputOperations + (B_SETS >= 8 ? 8 : 0);
     while (checked_outputs < expected_output_count) {
       tick();
     }
@@ -719,9 +810,11 @@ SC_MODULE(CIMProcessorTb) {
 
 #if DOUBLE_BUFFERED_ACCUM_BUFFER
     const BufferVector bank_0_expected = expected_partial(4, 50);
-    send_job(make_double_buffer_params(), {50}, {true}, 4);
+    send_job(make_double_buffer_params(), {50}, {true},
+             {make_weight_group(1, 1)}, 4);
     const BufferVector bank_1_expected = expected_partial(5, 55);
-    send_job(make_double_buffer_params(), {55}, {true}, 5);
+    send_job(make_double_buffer_params(), {55}, {true},
+             {make_weight_group(1, 1)}, 5);
 
     while (done_count[0] < 1 || done_count[1] < 1 || write_count[0] < 4 ||
            write_count[1] < 1) {
@@ -758,7 +851,8 @@ SC_MODULE(CIMProcessorTb) {
     const BufferVector direct_resume_expected = expected_partial(7, 70);
     expect_output("direct output after double buffering",
                   direct_resume_expected, 0);
-    send_job(make_throughput_params(1), {70}, {true}, 7);
+    send_job(make_throughput_params(1), {70}, {true}, {make_weight_group(1, 1)},
+             7);
     while (checked_outputs == outputs_before_direct_resume) {
       tick();
     }
@@ -770,6 +864,9 @@ SC_MODULE(CIMProcessorTb) {
       std::cout << "[PASS] cim_processor_weight_reuse" << std::endl;
       std::cout << "[PASS] cim_processor_backpressure" << std::endl;
       std::cout << "[PASS] cim_processor_heterogeneous_jobs" << std::endl;
+      if constexpr (B_SETS >= 8) {
+        std::cout << "[PASS] cim_processor_multiset_replay" << std::endl;
+      }
 #if DOUBLE_BUFFERED_ACCUM_BUFFER
       std::cout << "[PASS] cim_processor_double_buffered_accumulation"
                 << std::endl;

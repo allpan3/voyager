@@ -17,6 +17,7 @@
 static constexpr int ROWS = IC_DIMENSION;
 static constexpr int COLS = OC_DIMENSION;
 static constexpr int CLOCK_NS = 10;
+static constexpr int SETS_PER_BANK = CIM_B_SETS / 2;
 
 using Buffer = ACCUM_BUFFER_DATATYPE;
 using BufferVector = Pack1D<Buffer, COLS>;
@@ -41,6 +42,7 @@ enum MatrixJob {
   MATRIX_ACCUMULATION,
   MATRIX_CONV,
   MATRIX_CONV_SPATIAL,
+  MATRIX_MULTISET,
   MATRIX_PARTIAL
 };
 
@@ -140,6 +142,7 @@ SC_MODULE(MatrixUnitTb) {
   // Return the number of full-array operations in one job
   static int operation_count(MatrixJob job) {
     if (job == MATRIX_ACCUMULATION) return 2;
+    if (job == MATRIX_MULTISET) return 8;
     if (is_conv(job)) {
       return spatial_x_extent(job) * conv_tile_count(job);
     }
@@ -150,14 +153,25 @@ SC_MODULE(MatrixUnitTb) {
   // Return the number of completed output vectors in one job
   static int output_count(MatrixJob job) {
     if (job == MATRIX_CONV_SPATIAL) return spatial_x_extent(job);
+    if (job == MATRIX_MULTISET) return operation_count(job);
     return job == MATRIX_REUSE || job == MATRIX_RELOAD ? 4 : 1;
   }
 
+  // Return the exact number of distinct input vectors in one job
+  static int input_request_count_for_job(MatrixJob job) {
+    return job == MATRIX_MULTISET ? 2 : operation_count(job);
+  }
+
   // Identify jobs that accumulate a convolution filter nest
-  static bool is_conv(MatrixJob job) { return job == MATRIX_CONV || job == MATRIX_CONV_SPATIAL; }
+  static bool is_conv(MatrixJob job) {
+    return job == MATRIX_CONV || job == MATRIX_CONV_SPATIAL;
+  }
 
   // Return the K2 extent in one job
   static int k2_extent(MatrixJob job) { return job == MATRIX_RELOAD ? 4 : 1; }
+
+  // Return the K1 extent in one job
+  static int k1_extent(MatrixJob job) { return job == MATRIX_MULTISET ? 4 : 1; }
 
   // Return the C2 extent in one job
   static int c2_extent(MatrixJob job) {
@@ -174,16 +188,28 @@ SC_MODULE(MatrixUnitTb) {
   static int fy_extent(MatrixJob job) { return is_conv(job) ? 2 : 1; }
 
   // Return the number of L0 output-X positions in one job
-  static int spatial_x_extent(MatrixJob job) { return job == MATRIX_CONV_SPATIAL ? 2 : 1; }
+  static int spatial_x_extent(MatrixJob job) {
+    return job == MATRIX_CONV_SPATIAL ? 2 : 1;
+  }
 
   // Return the number of resident weight tiles in one convolution filter
-  static int conv_tile_count(MatrixJob job) { return c1_extent(job) * fy_extent(job) * fx_extent(job); }
+  static int conv_tile_count(MatrixJob job) {
+    return c1_extent(job) * fy_extent(job) * fx_extent(job);
+  }
 
   // Return the exact number of resident tile fills in one job
-  static int weight_tile_count(MatrixJob job) { return job == MATRIX_REUSE ? 1 : operation_count(job); }
+  static int weight_tile_count(MatrixJob job) {
+    if (job == MATRIX_REUSE) return 1;
+    if (job == MATRIX_MULTISET) {
+      return SETS_PER_BANK >= 4 ? 4 : operation_count(job);
+    }
+    return operation_count(job);
+  }
 
   // Return the exact number of direct weight-row requests in one job
-  static int weight_request_count_for_job(MatrixJob job) { return weight_tile_count(job) * valid_rows(job); }
+  static int weight_request_count_for_job(MatrixJob job) {
+    return weight_tile_count(job) * valid_rows(job);
+  }
 
   // Return the number of source rows in one resident tile
   static int valid_rows(MatrixJob job) {
@@ -255,19 +281,21 @@ SC_MODULE(MatrixUnitTb) {
       params.loops[1][params.fy_loop_idx[1]] = fy_extent(job);
       params.loops[1][params.fx_loop_idx] = fx_extent(job);
       if (job == MATRIX_CONV_SPATIAL) {
-        // Put output X outside the weight loop to force one refetch per position
+        // Put output X outside the weight loop to force one refetch per
+        // position
         params.weight_loop_idx[0] = 0;
         params.x_loop_idx[0] = 1;
         params.y_loop_idx[0] = 2;
         params.loops[0][params.x_loop_idx[0]] = spatial_x_extent(job);
       }
-    } else if (job == MATRIX_REUSE) {
+    } else if (job == MATRIX_REUSE || job == MATRIX_MULTISET) {
       params.weight_loop_idx[0] = 0;
       params.x_loop_idx[0] = 1;
       params.y_loop_idx[0] = 2;
       params.fy_loop_idx[0] = 3;
       params.reduction_loop_idx[0] = 4;
-      params.loops[0][params.x_loop_idx[0]] = 4;
+      params.loops[0][params.x_loop_idx[0]] = job == MATRIX_MULTISET ? 2 : 4;
+      params.loops[1][params.weight_loop_idx[1]] = k1_extent(job);
     } else {
       // Reload and accumulation live at L0 so each bank fill is one tile
       params.loops[0][params.weight_loop_idx[0]] = k2_extent(job);
@@ -293,6 +321,8 @@ SC_MODULE(MatrixUnitTb) {
     params.weight_addr_loops[1][params.weight_addr_fx_idx] = fx_extent(job);
     params.weight_addr_loops[1][params.weight_addr_reduction_loop_idx[2]] =
         valid_rows(job);
+    params.weight_addr_loops[1][params.weight_addr_weight_loop_idx[1]] =
+        k1_extent(job);
 
     params.input_offset = input_offset(job);
     params.weight_offset = weight_offset(job);
@@ -306,9 +336,16 @@ SC_MODULE(MatrixUnitTb) {
     params.weight_burst_size = weight_burst_size(job);
     params.weight_num_beats = 1;
     params.weight_pack_factor_lg2 = 0;
-    // Spatial conv uses two overlapping stride-one windows across four input columns
+    // Spatial conv uses two overlapping stride-one windows across four input
+    // columns
     params.input_y = is_conv(job) ? fy_extent(job) : 1;
-    params.input_x = job == MATRIX_REUSE ? 4 : (is_conv(job) ? fx_extent(job) + spatial_x_extent(job) - 1 : 1);
+    params.input_x =
+        job == MATRIX_REUSE
+            ? 4
+            : (job == MATRIX_MULTISET
+                   ? 2
+                   : (is_conv(job) ? fx_extent(job) + spatial_x_extent(job) - 1
+                                   : 1));
     params.stride = 1;
     params.padding = 0;
     params.has_bias = job == MATRIX_ACCUMULATION;
@@ -335,6 +372,10 @@ SC_MODULE(MatrixUnitTb) {
     if (job == MATRIX_RELOAD) {
       return input_offset(job);
     }
+    if (job == MATRIX_MULTISET) {
+      return input_offset(job) +
+             operation / k1_extent(job) * ROWS * INPUT_DTYPE_WIDTH / 8;
+    }
     if (is_conv(job)) {
       const int tile = operation % conv_tile_count(job);
       const int spatial_x = operation / conv_tile_count(job);
@@ -342,7 +383,8 @@ SC_MODULE(MatrixUnitTb) {
       const int fy = (tile / fx_extent(job)) % fy_extent(job);
       const int fx = tile % fx_extent(job);
       const int input_x = fx_extent(job) + spatial_x_extent(job) - 1;
-      const int element_address = (fy * input_x + spatial_x + fx) * c1_extent(job) + c1;
+      const int element_address =
+          (fy * input_x + spatial_x + fx) * c1_extent(job) + c1;
       return input_offset(job) + element_address * ROWS * INPUT_DTYPE_WIDTH / 8;
     }
     return input_offset(job) + operation * ROWS * INPUT_DTYPE_WIDTH / 8;
@@ -358,39 +400,49 @@ SC_MODULE(MatrixUnitTb) {
     return job == MATRIX_ACCUMULATION ? operation : 0;
   }
 
+  // Return the K1 coordinate used by one operation
+  static int operation_k1(MatrixJob job, int operation) {
+    return job == MATRIX_MULTISET ? operation % k1_extent(job) : 0;
+  }
+
   // Return the C1 coordinate used by one operation
   static int operation_c1(MatrixJob job, int operation) {
-    const int tile = is_conv(job) ? operation % conv_tile_count(job) : operation;
+    const int tile =
+        is_conv(job) ? operation % conv_tile_count(job) : operation;
     return is_conv(job) ? tile / (fy_extent(job) * fx_extent(job)) : 0;
   }
 
   // Return the FY coordinate used by one operation
   static int operation_fy(MatrixJob job, int operation) {
-    const int tile = is_conv(job) ? operation % conv_tile_count(job) : operation;
+    const int tile =
+        is_conv(job) ? operation % conv_tile_count(job) : operation;
     return is_conv(job) ? (tile / fx_extent(job)) % fy_extent(job) : 0;
   }
 
   // Return the FX coordinate used by one operation
   static int operation_fx(MatrixJob job, int operation) {
-    const int tile = is_conv(job) ? operation % conv_tile_count(job) : operation;
+    const int tile =
+        is_conv(job) ? operation % conv_tile_count(job) : operation;
     return is_conv(job) ? tile % fx_extent(job) : 0;
   }
 
   // Return the direct weight-row request address used by one operation
   static uint64_t weight_address(MatrixJob job, int operation, int row) {
     const int k2 = operation_k2(job, operation);
+    const int k1 = operation_k1(job, operation);
     const int c2 = operation_c2(job, operation);
     const int c1 = operation_c1(job, operation);
     const int fy = operation_fy(job, operation);
     const int fx = operation_fx(job, operation);
     const uint64_t k_stride = COLS;
-    const uint64_t c_stride = k2_extent(job) * k_stride;
+    const uint64_t c_stride = k2_extent(job) * k1_extent(job) * k_stride;
     const uint64_t fx_stride =
         c2_extent(job) * c1_extent(job) * valid_rows(job) * c_stride;
     const uint64_t fy_stride = fx_extent(job) * fx_stride;
     const uint64_t c = (c2 * c1_extent(job) + c1) * valid_rows(job) + row;
-    const uint64_t element_address =
-        fy * fy_stride + fx * fx_stride + c * c_stride + k2 * k_stride;
+    const uint64_t element_address = fy * fy_stride + fx * fx_stride +
+                                     c * c_stride +
+                                     (k2 * k1_extent(job) + k1) * k_stride;
     return weight_offset(job) + element_address * WEIGHT_DTYPE_WIDTH / 8;
   }
 
@@ -440,12 +492,16 @@ SC_MODULE(MatrixUnitTb) {
   // Queue all expected memory requests before releasing reset
   void append_expected_requests(MatrixJob job) {
     // The reload job refetches its unchanged input once per L0 weight tile
-    for (int operation = 0; operation < operation_count(job); operation++) {
+    for (int request = 0; request < input_request_count_for_job(job);
+         request++) {
+      const int operation =
+          job == MATRIX_MULTISET ? request * k1_extent(job) : request;
       expected_input_addresses.push_back(input_address(job, operation));
     }
 
     for (int operation = 0; operation < operation_count(job); operation++) {
-      if (job == MATRIX_REUSE && operation != 0) {
+      if ((job == MATRIX_REUSE && operation != 0) ||
+          (job == MATRIX_MULTISET && operation >= weight_tile_count(job))) {
         continue;
       }
       for (int row = 0; row < valid_rows(job); row++) {
@@ -585,13 +641,20 @@ SC_MODULE(MatrixUnitTb) {
     done_channel.SyncPop();
 
     std::ostringstream input_request_message;
-    input_request_message << "job " << static_cast<int>(job) << " expected " << operation_count(job)
-                          << " input requests got " << input_request_count - input_requests_before;
-    require(input_request_count - input_requests_before == operation_count(job), input_request_message.str());
+    input_request_message << "job " << static_cast<int>(job) << " expected "
+                          << input_request_count_for_job(job)
+                          << " input requests got "
+                          << input_request_count - input_requests_before;
+    require(input_request_count - input_requests_before ==
+                input_request_count_for_job(job),
+            input_request_message.str());
     std::ostringstream weight_request_message;
-    weight_request_message << "job " << static_cast<int>(job) << " expected " << weight_request_count_for_job(job)
-                           << " weight requests got " << weight_request_count - weight_requests_before;
-    require(weight_request_count - weight_requests_before == weight_request_count_for_job(job),
+    weight_request_message << "job " << static_cast<int>(job) << " expected "
+                           << weight_request_count_for_job(job)
+                           << " weight requests got "
+                           << weight_request_count - weight_requests_before;
+    require(weight_request_count - weight_requests_before ==
+                weight_request_count_for_job(job),
             weight_request_message.str());
 
     const double measured_cycles =
@@ -615,7 +678,7 @@ SC_MODULE(MatrixUnitTb) {
     return utilization;
   }
 
-  // Run reuse, reload, accumulation, reordered conv, spatial conv, and partial jobs
+  // Run direct, spatial, multi-set, and partial-weight schedules
   void run() {
     serial_params_channel.ResetWrite();
     output_channel.ResetRead();
@@ -629,6 +692,7 @@ SC_MODULE(MatrixUnitTb) {
     append_expected_requests(MATRIX_ACCUMULATION);
     append_expected_requests(MATRIX_CONV);
     append_expected_requests(MATRIX_CONV_SPATIAL);
+    append_expected_requests(MATRIX_MULTISET);
     append_expected_requests(MATRIX_PARTIAL);
 
     rstn.write(false);
@@ -642,6 +706,7 @@ SC_MODULE(MatrixUnitTb) {
     run_job(MATRIX_ACCUMULATION);
     run_job(MATRIX_CONV);
     run_job(MATRIX_CONV_SPATIAL);
+    run_job(MATRIX_MULTISET);
     run_job(MATRIX_PARTIAL);
     require(reuse_utilization > reload_utilization,
             "resident-weight reuse must outperform four direct reloads");
@@ -655,19 +720,31 @@ SC_MODULE(MatrixUnitTb) {
             "all expected weight bursts must be consumed");
     require(expected_bias_addresses.empty(),
             "all expected bias requests must be consumed");
-    const int expected_input_requests = operation_count(MATRIX_REUSE) + operation_count(MATRIX_RELOAD) +
-                                        operation_count(MATRIX_ACCUMULATION) + operation_count(MATRIX_CONV) +
-                                        operation_count(MATRIX_CONV_SPATIAL) + operation_count(MATRIX_PARTIAL);
-    require(input_request_count == expected_input_requests, "received the exact native input-vector request count");
+    const int expected_input_requests =
+        input_request_count_for_job(MATRIX_REUSE) +
+        input_request_count_for_job(MATRIX_RELOAD) +
+        input_request_count_for_job(MATRIX_ACCUMULATION) +
+        input_request_count_for_job(MATRIX_CONV) +
+        input_request_count_for_job(MATRIX_CONV_SPATIAL) +
+        input_request_count_for_job(MATRIX_MULTISET) +
+        input_request_count_for_job(MATRIX_PARTIAL);
+    require(input_request_count == expected_input_requests,
+            "received the exact native input-vector request count");
     const int expected_weight_requests =
-        weight_request_count_for_job(MATRIX_REUSE) + weight_request_count_for_job(MATRIX_RELOAD) +
-        weight_request_count_for_job(MATRIX_ACCUMULATION) + weight_request_count_for_job(MATRIX_CONV) +
-        weight_request_count_for_job(MATRIX_CONV_SPATIAL) + weight_request_count_for_job(MATRIX_PARTIAL);
-    require(weight_request_count == expected_weight_requests, "received the exact direct weight-row request count");
+        weight_request_count_for_job(MATRIX_REUSE) +
+        weight_request_count_for_job(MATRIX_RELOAD) +
+        weight_request_count_for_job(MATRIX_ACCUMULATION) +
+        weight_request_count_for_job(MATRIX_CONV) +
+        weight_request_count_for_job(MATRIX_CONV_SPATIAL) +
+        weight_request_count_for_job(MATRIX_MULTISET) +
+        weight_request_count_for_job(MATRIX_PARTIAL);
+    require(weight_request_count == expected_weight_requests,
+            "received the exact direct weight-row request count");
     require(bias_request_count == 1, "expected one direct bias request");
 
     if (!test_failed) {
       std::cout << "[PASS] matrix_unit_cim_direct_weights" << std::endl;
+      std::cout << "[PASS] matrix_unit_cim_multiset_replay" << std::endl;
     }
     sc_stop();
   }
