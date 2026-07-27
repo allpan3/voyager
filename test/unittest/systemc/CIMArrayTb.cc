@@ -764,6 +764,13 @@ int sc_main(int argc, char** argv) {
                  false, 2, 2, 2, 2>
       two_axis_serial_unsigned("two_axis_serial_unsigned");
 
+  // Signed bit-serial is the case the mode actually risks: the MSB slice carries
+  // negative weight, so the macro negates that partial sum before accumulating.
+  // The unsigned serial cases above never exercise that negation
+  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_SERIAL_VALUE, 4, 4,
+                 true, 2, 2, 2, 2>
+      two_axis_serial_signed("two_axis_serial_signed");
+
   CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 4,
                  true, 2, 2, 2, 3, 2, 3, 2, CIM_C_BEAT_OUTPUT_MAJOR>
       output_major_signed("output_major_signed");

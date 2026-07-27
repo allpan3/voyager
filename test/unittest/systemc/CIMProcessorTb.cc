@@ -43,6 +43,13 @@
 #define CIM_PROCESSOR_TEST_B_SETS 8
 #endif
 
+// Macro MAC mode: 0 bit-parallel, 1 bit-serial. The same vectors must pass in
+// either mode -- bit-serial only lengthens the issue window, so a mode change
+// is a timing change and never a numerical one
+#ifndef CIM_PROCESSOR_TEST_MODE
+#define CIM_PROCESSOR_TEST_MODE 0
+#endif
+
 #if CIM_PROCESSOR_LARGE_TEST
 static constexpr int CH_IN = 64;
 static constexpr int CH_OUT = 64;
@@ -64,12 +71,15 @@ static constexpr int BASE_C_WIDTH = CIM_PROCESSOR_TEST_BASE_C_WIDTH;
 static constexpr int TILE_INPUT_AXIS_ELEMENTS = 2;
 static constexpr int TILE_OUTPUT_AXIS_ELEMENTS = 1;
 static constexpr int INPUT_AXIS_TILES = 2;
-static constexpr int OUTPUT_AXIS_TILES = 3;
+// N = TILE_N * OUTPUT_AXIS_TILES, and TILE_N is 1 here, so the tile count is
+// the output dimension. Keep this in step with CIM_PROCESSOR_OC_DIMENSION and
+// the -DCIM_OUTPUT_AXIS_TILES / -DCIM_C_PORT_TILES flags in the Makefile
+static constexpr int OUTPUT_AXIS_TILES = 8;
 #endif
 
 static constexpr int WRITE_CH_IN = 1;
 static constexpr int MAC_LATENCY = 1;
-static constexpr int MODE = 0;
+static constexpr int MODE = CIM_PROCESSOR_TEST_MODE;
 static constexpr int A_WIDTH = 8;
 static constexpr int B_WIDTH = 8;
 static constexpr bool SIGNED = true;

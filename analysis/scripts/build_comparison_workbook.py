@@ -177,7 +177,9 @@ def port_label(row):
 def instance_label(row):
     base = f"{'CIM' if row['backend'] == 'cim' else 'SA'} {row['geometry']} | {port_label(row)} ports"
     if row["backend"] == "cim":
-        base += f" | MAC latency {row.get('cim_mac_latency') or '1'}"
+        mode = row.get("cim_mode") or "bit-parallel"
+        sets = row.get("cim_b_sets") or "2"
+        base += f" | {mode} | {sets} sets | MAC latency {row.get('cim_mac_latency') or '1'}"
     return base
 
 
@@ -347,7 +349,7 @@ for sa in sa_points:
 
 for cim in cim_points:
     row = cim["row"]
-    if row["geometry"] == baseline_geometry or str(row.get("cim_mac_latency") or "1") != "1":
+    if row["geometry"] == baseline_geometry:
         continue
     if (row["ic_port_width_bits"], row["oc_port_width_bits"]) == baseline_ports:
         kind = "SA baseline vs larger CIM, baseline-matched ports"
@@ -582,6 +584,8 @@ design_headers = [
     "Output port bits",
     "Clock period (ns)",
     "CIM MAC latency",
+    "CIM mode",
+    "CIM B sets",
     "Macro native width",
     "CH_IN",
     "CH_OUT",
@@ -611,6 +615,8 @@ for point in points:
         integer(row["oc_port_width_bits"]),
         float(row["clock_period_ns"]),
         integer(row.get("cim_mac_latency")) if row["backend"] == "cim" else None,
+        row.get("cim_mode") if row["backend"] == "cim" else None,
+        integer(row.get("cim_b_sets")) if row["backend"] == "cim" else None,
         row.get("cim_macro_native_width") or None,
         integer(row.get("cim_ch_in")),
         integer(row.get("cim_ch_out")),
@@ -622,10 +628,10 @@ for point in points:
         ws.cell(design_row, column, value)
     fill = SA_BLUE if row["backend"] == "systolic" else CIM_GREEN
     style_body_row(ws, design_row, 1, len(design_headers), fill)
-    ws.cell(design_row, 12).fill = PatternFill(
+    ws.cell(design_row, 14).fill = PatternFill(
         "solid", fgColor=PASS_GREEN if point["reportable"] else FAIL_RED
     )
-    ws.cell(design_row, 12).font = BODY_BOLD
+    ws.cell(design_row, 14).font = BODY_BOLD
     design_row += 1
 add_table(
     ws,
@@ -636,7 +642,7 @@ add_table(
     len(design_headers),
 )
 ws.freeze_panes = "E5"
-set_widths(ws, [43, 31, 11, 11, 14, 15, 16, 16, 18, 10, 10, 12, 17, 54])
+set_widths(ws, [43, 31, 11, 11, 14, 15, 16, 16, 16, 12, 18, 10, 10, 12, 17, 54])
 
 # ---------------------------------------------------------------- Definition
 ws = wb.create_sheet("Definition")

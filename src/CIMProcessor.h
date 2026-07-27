@@ -121,9 +121,16 @@ SC_MODULE(CIMProcessor) {
                 "the input axis");
   static_assert(!SUPPORT_CODEBOOK_QUANT,
                 "CIMProcessor currently does not decode codebook operands");
-  static_assert(
-      MODE == 0,
-      "CIMProcessor currently requires native bit-parallel CIM macros");
+  // Both macro modes are driven identically from here. The processor never
+  // assumes an issue-window length: it hands MAC requests to the array and
+  // waits on the array's ready/credit handshake, and every window- and
+  // latency-derived constant below the array comes from Element::issue_window(),
+  // which already accounts for the per-slice serial walk. Bit-serial therefore
+  // only makes each issue longer -- it does not change the protocol.
+  // The widths one serial slice needs are enforced in CIMElement
+  static_assert(MODE == 0 || MODE == 1,
+                "CIMProcessor supports bit-parallel (0) and bit-serial (1) CIM "
+                "macros");
   static_assert(
       SIGNED, "CIMProcessor currently requires signed native INT8 arithmetic");
   static_assert(C_BEAT_LAYOUT == CIM_C_BEAT_OUTPUT_MAJOR,

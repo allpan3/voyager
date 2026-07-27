@@ -390,9 +390,6 @@ if {$MATRIX_BACKEND == $MATRIX_BACKEND_CIM} {
   if {$CIM_WRITE_CH_IN != 1} {
     error "CIMProcessor currently requires CIM_WRITE_CH_IN=1"
   }
-  if {$CIM_MODE != 0} {
-    error "CIMProcessor currently requires native bit-parallel CIM_MODE=0"
-  }
   if {$CIM_B_SETS < 2} {
     error "CIMProcessor currently requires at least two resident B sets"
   }

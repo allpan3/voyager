@@ -1,10 +1,10 @@
 // SystemC HLS adapter for the integer CIM element RTL block
 //
-// CIMElement is a PE-level Catapult block boundary for the native CIM vector and
-// matrix interface. The synthesized implementation blackboxes the existing
-// SystemVerilog CIMIntElement, while the C++ body provides event-level simulation
-// of the issue/retire protocol: mac_issue accepted while mac_ready, results
-// retiring into c with a c_retire toggle after a fixed latency
+// CIMElement is a PE-level Catapult block boundary for the native CIM vector
+// and matrix interface. The synthesized implementation blackboxes the existing
+// SystemVerilog CIMIntElement, while the C++ body provides event-level
+// simulation of the issue/retire protocol: mac_issue accepted while mac_ready,
+// results retiring into c with a c_retire toggle after a fixed latency
 //
 // tensor geometry:
 //
@@ -36,25 +36,35 @@
 // K, N, and BK describe the logical tensor shape
 // A_WIDTH, B_WIDTH, and SIGNED describe the logical arithmetic
 // CIMElementPacked owns the Catapult blackbox ABI with packed A/B/C buses
-template <int CH_IN, int CH_OUT, int B_SETS, int BASE_A_WIDTH, int BASE_B_WIDTH, int BASE_C_WIDTH, int WRITE_CH_IN,
-          int MAC_LATENCY, int MODE, int A_WIDTH, int B_WIDTH, bool SIGNED>
+template <int CH_IN, int CH_OUT, int B_SETS, int BASE_A_WIDTH, int BASE_B_WIDTH,
+          int BASE_C_WIDTH, int WRITE_CH_IN, int MAC_LATENCY, int MODE,
+          int A_WIDTH, int B_WIDTH, bool SIGNED>
 SC_MODULE(CIMElementPacked) {
  private:
   // Return the ceil log2 used for static port widths
-  static constexpr int log2_ceil(int value) { return (value <= 1) ? 0 : 1 + log2_ceil((value + 1) / 2); }
+  static constexpr int log2_ceil(int value) {
+    return (value <= 1) ? 0 : 1 + log2_ceil((value + 1) / 2);
+  }
 
   // Return the ceiling division for static latency derivation
-  static constexpr int ceil_div(int dividend, int divisor) { return (dividend + divisor - 1) / divisor; }
+  static constexpr int ceil_div(int dividend, int divisor) {
+    return (dividend + divisor - 1) / divisor;
+  }
 
   // Return the smaller of two static integers
-  static constexpr int min_int(int lhs, int rhs) { return (lhs < rhs) ? lhs : rhs; }
+  static constexpr int min_int(int lhs, int rhs) {
+    return (lhs < rhs) ? lhs : rhs;
+  }
 
  public:
+  static constexpr int CIM_MODE_BIT_PARALLEL_VALUE = 0;
   static constexpr int CIM_MODE_BIT_SERIAL_VALUE = 1;
   static constexpr int K = CH_IN;
   static constexpr int BK = WRITE_CH_IN;
   static constexpr int SUM_GUARD_WIDTH = (K <= 1) ? 1 : log2_ceil(K);
-  static constexpr int NUM_B_SLICES = (BASE_B_WIDTH > 0 && B_WIDTH >= BASE_B_WIDTH) ? (B_WIDTH / BASE_B_WIDTH) : 0;
+  static constexpr int NUM_B_SLICES =
+      (BASE_B_WIDTH > 0 && B_WIDTH >= BASE_B_WIDTH) ? (B_WIDTH / BASE_B_WIDTH)
+                                                    : 0;
   static constexpr int N = (NUM_B_SLICES > 0) ? (CH_OUT / NUM_B_SLICES) : 0;
   static constexpr int C_WIDTH = A_WIDTH + B_WIDTH + SUM_GUARD_WIDTH;
   static constexpr int BITS_K = (K <= 1) ? 1 : log2_ceil(K);
@@ -77,30 +87,50 @@ SC_MODULE(CIMElementPacked) {
   static_assert(MAC_LATENCY > 0, "MAC_LATENCY must be positive");
   static_assert(A_WIDTH > 0, "A_WIDTH must be positive");
   static_assert(B_WIDTH > 0, "B_WIDTH must be positive");
-  static_assert(B_WIDTH >= BASE_B_WIDTH, "B_WIDTH must be at least BASE_B_WIDTH");
-  static_assert((BASE_B_WIDTH > 0) && ((B_WIDTH % BASE_B_WIDTH) == 0), "B_WIDTH must be a multiple of BASE_B_WIDTH");
-  static_assert((NUM_B_SLICES > 0) && ((CH_OUT % NUM_B_SLICES) == 0), "CH_OUT must be divisible by NUM_B_SLICES");
+  static_assert(B_WIDTH >= BASE_B_WIDTH,
+                "B_WIDTH must be at least BASE_B_WIDTH");
+  static_assert((BASE_B_WIDTH > 0) && ((B_WIDTH % BASE_B_WIDTH) == 0),
+                "B_WIDTH must be a multiple of BASE_B_WIDTH");
+  static_assert((NUM_B_SLICES > 0) && ((CH_OUT % NUM_B_SLICES) == 0),
+                "CH_OUT must be divisible by NUM_B_SLICES");
+  static_assert(MODE == 0 || MODE == CIM_MODE_BIT_SERIAL_VALUE,
+                "MODE must be bit-parallel (0) or bit-serial (1)");
+  // A bit-serial macro shift-accumulates one A slice internally, so its own
+  // accumulator has to hold that slice's partial sum: the slice itself, one B
+  // operand, and the reduction guard over K.
+  static_assert(MODE == CIM_MODE_BIT_PARALLEL_VALUE ||
+                    BASE_C_WIDTH > BASE_B_WIDTH + SUM_GUARD_WIDTH,
+                "bit-serial requires BASE_C_WIDTH > BASE_B_WIDTH + "
+                "SUM_GUARD_WIDTH so one A slice is at least 1 bit");
 
-  // Return the number of mclk cycles an accepted issue keeps the element not ready
+  // Return the number of mclk cycles an accepted issue keeps the element not
+  // ready
   static constexpr int issue_window() {
-    constexpr int serial_max_slice_width = BASE_C_WIDTH - BASE_B_WIDTH - SUM_GUARD_WIDTH;
+    constexpr int serial_max_slice_width =
+        BASE_C_WIDTH - BASE_B_WIDTH - SUM_GUARD_WIDTH;
     constexpr int serial_slice_width = min_int(A_WIDTH, serial_max_slice_width);
-    constexpr int slice_width = (MODE == CIM_MODE_BIT_SERIAL_VALUE) ? serial_slice_width : BASE_A_WIDTH;
+    constexpr int slice_width =
+        (MODE == CIM_MODE_BIT_SERIAL_VALUE) ? serial_slice_width : BASE_A_WIDTH;
     constexpr int num_slices = ceil_div(A_WIDTH, slice_width);
-    constexpr int serial_slice_interval = ceil_div(serial_slice_width, BASE_A_WIDTH) * BASE_A_WIDTH;
-    constexpr int slice_launch_interval = (MODE == CIM_MODE_BIT_SERIAL_VALUE) ? serial_slice_interval : 1;
+    constexpr int serial_slice_interval =
+        ceil_div(serial_slice_width, BASE_A_WIDTH) * BASE_A_WIDTH;
+    constexpr int slice_launch_interval =
+        (MODE == CIM_MODE_BIT_SERIAL_VALUE) ? serial_slice_interval : 1;
     return num_slices * slice_launch_interval;
   }
 
   // Return the number of mclk cycles from an accepted issue to its retirement
-  static constexpr int operation_latency() { return issue_window() + MAC_LATENCY - 1; }
+  static constexpr int operation_latency() {
+    return issue_window() + MAC_LATENCY - 1;
+  }
 
   // CIMElement clock and reset interface
   sc_in<bool> CCS_INIT_S1(wclk);
   sc_in<bool> CCS_INIT_S1(mclk);
   sc_in<bool> CCS_INIT_S1(rstn);
 
-  // Packed logical A vector; a_bus and mset remain stable throughout an accepted issue window
+  // Packed logical A vector; a_bus and mset remain stable throughout an
+  // accepted issue window
   sc_in<ac_int<A_BUS_WIDTH, false>> CCS_INIT_S1(a_bus);
 
   // Packed logical B matrix with all N columns and BK rows along K
@@ -140,7 +170,8 @@ SC_MODULE(CIMElementPacked) {
 
  public:
   // Construct the packed CIMElement behavioral model and blackbox metadata
-  SC_CTOR(CIMElementPacked) : pending_results_size(0), window_remaining(0), retire_state(false) {
+  SC_CTOR(CIMElementPacked)
+      : pending_results_size(0), window_remaining(0), retire_state(false) {
     initialize_model_state();
 
     SC_METHOD(write_b);
@@ -182,7 +213,8 @@ SC_MODULE(CIMElementPacked) {
   }
 
  private:
-  // Initialize observable model state while leaving resetless B storage untouched
+  // Initialize observable model state while leaving resetless B storage
+  // untouched
   void initialize_model_state() {
     pending_results_size = 0;
     window_remaining = 0;
@@ -199,7 +231,9 @@ SC_MODULE(CIMElementPacked) {
   }
 
   // Return the packed B bus bit offset for one logical B value
-  static constexpr int b_bus_offset(int bk, int n) { return ((bk * N) + n) * B_WIDTH; }
+  static constexpr int b_bus_offset(int bk, int n) {
+    return ((bk * N) + n) * B_WIDTH;
+  }
 
   // Write one logical BK-wide B block into the C++ model
   void write_b() {
@@ -237,9 +271,10 @@ SC_MODULE(CIMElementPacked) {
 
       if (set < B_SETS) {
         for (int k = 0; k < K; k++) {
-          const ac_int<A_WIDTH, SIGNED> a_value =
-              decode_operand<A_WIDTH>(a_value_bus.template slc<A_WIDTH>(k * A_WIDTH));
-          const ac_int<B_WIDTH, SIGNED> b_value = decode_operand<B_WIDTH>(b_mem[set][k][n]);
+          const ac_int<A_WIDTH, SIGNED> a_value = decode_operand<A_WIDTH>(
+              a_value_bus.template slc<A_WIDTH>(k * A_WIDTH));
+          const ac_int<B_WIDTH, SIGNED> b_value =
+              decode_operand<B_WIDTH>(b_mem[set][k][n]);
           acc += a_value * b_value;
         }
       }
@@ -271,7 +306,8 @@ SC_MODULE(CIMElementPacked) {
     // Advance the retire pipeline; ops are spaced by at least the issue window,
     // so at most one result retires per edge
     if (pending_results_size > 0) {
-      for (int pending_idx = 0; pending_idx < MAX_PENDING_RESULTS; pending_idx++) {
+      for (int pending_idx = 0; pending_idx < MAX_PENDING_RESULTS;
+           pending_idx++) {
         if (pending_idx < pending_results_size) {
           pending_results[pending_idx].cycles_remaining--;
         }
@@ -284,7 +320,8 @@ SC_MODULE(CIMElementPacked) {
         c_bus.write(packed_result);
         retire_state = !retire_state;
         c_retire.write(retire_state);
-        for (int pending_idx = 1; pending_idx < MAX_PENDING_RESULTS; pending_idx++) {
+        for (int pending_idx = 1; pending_idx < MAX_PENDING_RESULTS;
+             pending_idx++) {
           if (pending_idx < pending_results_size) {
             pending_results[pending_idx - 1] = pending_results[pending_idx];
           }
@@ -309,32 +346,42 @@ SC_MODULE(CIMElementPacked) {
   }
 
   // Drive combinational ready state from reset and the issue-window state
-  void drive_mac_ready() { mac_ready.write(rstn.read() && window_idle_state.read()); }
+  void drive_mac_ready() {
+    mac_ready.write(rstn.read() && window_idle_state.read());
+  }
 
 #ifndef __SYNTHESIS__
   // Report an illegal write to the B set consumed by the active issue window
   void check_write_mac_collision() {
     const bool window_active = !window_idle_state.read();
     const bool issue_start = mac_issue.read() && !window_active;
-    if (rstn.read() && wen.read() && (issue_start || window_active) && wset.read() == mset.read()) {
+    if (rstn.read() && wen.read() && (issue_start || window_active) &&
+        wset.read() == mset.read()) {
       std::ostringstream message;
-      message << "write targets B set " << wset.read().to_int() << " while its MAC issue window is active";
-      SC_REPORT_ERROR("CIMElement B set protocol violation", message.str().c_str());
+      message << "write targets B set " << wset.read().to_int()
+              << " while its MAC issue window is active";
+      SC_REPORT_ERROR("CIMElement B set protocol violation",
+                      message.str().c_str());
     }
   }
 #endif
 };
 
-// CIMElement keeps the native A/B/C interface and adapts it to the packed blackbox ABI
-template <int CH_IN, int CH_OUT, int B_SETS, int BASE_A_WIDTH, int BASE_B_WIDTH, int BASE_C_WIDTH, int WRITE_CH_IN,
-          int MAC_LATENCY, int MODE, int A_WIDTH, int B_WIDTH, bool SIGNED>
+// CIMElement keeps the native A/B/C interface and adapts it to the packed
+// blackbox ABI
+template <int CH_IN, int CH_OUT, int B_SETS, int BASE_A_WIDTH, int BASE_B_WIDTH,
+          int BASE_C_WIDTH, int WRITE_CH_IN, int MAC_LATENCY, int MODE,
+          int A_WIDTH, int B_WIDTH, bool SIGNED>
 SC_MODULE(CIMElement) {
  private:
-  using PackedElement = CIMElementPacked<CH_IN, CH_OUT, B_SETS, BASE_A_WIDTH, BASE_B_WIDTH, BASE_C_WIDTH, WRITE_CH_IN,
-                                         MAC_LATENCY, MODE, A_WIDTH, B_WIDTH, SIGNED>;
+  using PackedElement =
+      CIMElementPacked<CH_IN, CH_OUT, B_SETS, BASE_A_WIDTH, BASE_B_WIDTH,
+                       BASE_C_WIDTH, WRITE_CH_IN, MAC_LATENCY, MODE, A_WIDTH,
+                       B_WIDTH, SIGNED>;
 
  public:
-  static constexpr int CIM_MODE_BIT_SERIAL_VALUE = PackedElement::CIM_MODE_BIT_SERIAL_VALUE;
+  static constexpr int CIM_MODE_BIT_SERIAL_VALUE =
+      PackedElement::CIM_MODE_BIT_SERIAL_VALUE;
   static constexpr int K = PackedElement::K;
   static constexpr int BK = PackedElement::BK;
   static constexpr int SUM_GUARD_WIDTH = PackedElement::SUM_GUARD_WIDTH;
@@ -347,24 +394,29 @@ SC_MODULE(CIMElement) {
   static constexpr int B_BUS_WIDTH = PackedElement::B_BUS_WIDTH;
   static constexpr int C_BUS_WIDTH = PackedElement::C_BUS_WIDTH;
 
-  // CIMElement data shapes match one K-wide A vector, one BK-by-N B block, and one N-wide C vector
+  // CIMElement data shapes match one K-wide A vector, one BK-by-N B block, and
+  // one N-wide C vector
   using WSet = typename PackedElement::WSet;
   using AData = Pack1D<ac_int<A_WIDTH, false>, K>;
   using BData = Pack1D<Pack1D<ac_int<B_WIDTH, false>, N>, BK>;
   using CData = Pack1D<ac_int<C_WIDTH, false>, N>;
 
-  // Return the number of mclk cycles an accepted issue keeps the element not ready
+  // Return the number of mclk cycles an accepted issue keeps the element not
+  // ready
   static constexpr int issue_window() { return PackedElement::issue_window(); }
 
   // Return the number of mclk cycles from an accepted issue to its retirement
-  static constexpr int operation_latency() { return PackedElement::operation_latency(); }
+  static constexpr int operation_latency() {
+    return PackedElement::operation_latency();
+  }
 
   // CIMElement clock and reset interface
   sc_in<bool> CCS_INIT_S1(wclk);
   sc_in<bool> CCS_INIT_S1(mclk);
   sc_in<bool> CCS_INIT_S1(rstn);
 
-  // Logical A vector; a and mset remain stable throughout an accepted issue window
+  // Logical A vector; a and mset remain stable throughout an accepted issue
+  // window
   sc_in<AData> CCS_INIT_S1(a);
 
   // Logical B matrix block with all N columns and BK rows along K
@@ -414,7 +466,9 @@ SC_MODULE(CIMElement) {
 
  private:
   // Return the packed B bus bit offset for one logical B value
-  static constexpr int b_bus_offset(int bk, int n) { return ((bk * N) + n) * B_WIDTH; }
+  static constexpr int b_bus_offset(int bk, int n) {
+    return ((bk * N) + n) * B_WIDTH;
+  }
 
   // Pack array-shaped public A/B ports into stable vector ports for Catapult
   void pack_inputs() {
