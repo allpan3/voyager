@@ -582,14 +582,6 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
           for (loop_counters[0][2] = 0;; loop_counters[0][2]++) {
             for (loop_counters[0][3] = 0;; loop_counters[0][3]++) {
               for (loop_counters[0][4] = 0;; loop_counters[0][4]++) {
-#if MATRIX_BACKEND == MATRIX_BACKEND_CIM
-                if (retain_group) {
-                  CIMWeightGroup group;
-                  group.set_count = resident_set_count;
-                  group.replay_count = spatial_reuse_bound;
-                  weight_group_channel.Push(group);
-                }
-#endif
                 for (ac_int<LOOP_WIDTH, false> spatial_reuse_idx = 0;;
                      spatial_reuse_idx++) {
                   for (int transpose_reuse_idx = 0;
@@ -605,10 +597,22 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
                               for (loop_counters[1][5] = 0;;
                                    loop_counters[1][5]++) {
 #if MATRIX_BACKEND == MATRIX_BACKEND_CIM
-                                if (!retain_group) {
+                                const bool first_resident_set =
+                                    loop_counters[1][0] == 0 &&
+                                    loop_counters[1][1] == 0 &&
+                                    loop_counters[1][2] == 0 &&
+                                    loop_counters[1][3] == 0 &&
+                                    loop_counters[1][4] == 0 &&
+                                    loop_counters[1][5] == 0;
+                                if (!retain_group || first_resident_set) {
                                   CIMWeightGroup group;
-                                  group.set_count = 1;
-                                  group.replay_count = 1;
+                                  if (retain_group) {
+                                    group.set_count = resident_set_count;
+                                    group.replay_count = spatial_reuse_bound;
+                                  } else {
+                                    group.set_count = 1;
+                                    group.replay_count = 1;
+                                  }
                                   weight_group_channel.Push(group);
                                 }
 
