@@ -329,6 +329,14 @@ SC_MODULE(CIMProcessorTb) {
     return params;
   }
 
+  // Create one direct output per independently loaded resident set
+  MatrixParams make_weight_reload_params(int operations) const {
+    MatrixParams params = make_base_params();
+    params.loops[0][params.weight_loop_idx[0]] = operations;
+    params.has_bias = false;
+    return params;
+  }
+
   // Create one output address with two contributions for the backpressure case
   MatrixParams make_backpressure_params() const {
     MatrixParams params = make_base_params();
@@ -485,6 +493,31 @@ SC_MODULE(CIMProcessorTb) {
           }
         }
       }
+      input_channel.Push(make_inputs(input_pattern));
+    }
+  }
+
+  // Preload independent one-set groups before admitting their MAC inputs
+  void send_preloaded_groups_job(const MatrixParams &params,
+                                 const std::vector<int> &weight_patterns,
+                                 int input_pattern) {
+    std::vector<CIMWeightGroup> groups;
+    for (std::size_t group = 0; group < weight_patterns.size(); group++) {
+      groups.push_back(make_weight_group(1, 1));
+    }
+    queue_weight_groups(groups);
+    params_channel.Push(params);
+    start_channel.SyncPop();
+
+    for (const int weight_pattern : weight_patterns) {
+      for (int k = 0; k < K; k++) {
+        for (int span = 0; span < Processor::WEIGHT_BEATS_PER_ROW; span++) {
+          weight_channel.Push(make_weight_beat(weight_pattern, k, span));
+        }
+      }
+    }
+    for (std::size_t operation = 0; operation < weight_patterns.size();
+         operation++) {
       input_channel.Push(make_inputs(input_pattern));
     }
   }
@@ -803,10 +836,18 @@ SC_MODULE(CIMProcessorTb) {
       send_job(make_multiset_reuse_params(), {8, 9, 10, 11, 8, 9, 10, 11},
                {true, true, true, true, false, false, false, false},
                {make_weight_group(4, 2)}, 8);
+
+      for (int group = 0; group < 4; group++) {
+        std::ostringstream label;
+        label << "preloaded group " << group;
+        expect_output(label.str(), expected_partial(9, 44 + group), 0);
+      }
+      send_preloaded_groups_job(make_weight_reload_params(4), {44, 45, 46, 47},
+                                9);
     }
 
     const int expected_output_count =
-        11 + kThroughputOperations + (B_SETS >= 8 ? 8 : 0);
+        11 + kThroughputOperations + (B_SETS >= 8 ? 12 : 0);
     while (checked_outputs < expected_output_count) {
       tick();
     }
@@ -876,6 +917,8 @@ SC_MODULE(CIMProcessorTb) {
       std::cout << "[PASS] cim_processor_heterogeneous_jobs" << std::endl;
       if constexpr (B_SETS >= 8) {
         std::cout << "[PASS] cim_processor_multiset_replay" << std::endl;
+        std::cout << "[PASS] cim_processor_sequential_group_preload"
+                  << std::endl;
       }
 #if DOUBLE_BUFFERED_ACCUM_BUFFER
       std::cout << "[PASS] cim_processor_double_buffered_accumulation"

@@ -212,17 +212,19 @@ SC_MODULE(CIMProcessor) {
 #endif
 
  private:
-  // Bind one logical resident group to one physical set bank
+  // Bind one logical resident group to a contiguous physical set range
   struct ScheduledWeightGroup {
     CIMWeightGroup logical;
     ac_int<1, false> bank;
+    ac_int<16, false> first_slot;
 
-    static const unsigned int width = CIMWeightGroup::width + 1;
+    static const unsigned int width = CIMWeightGroup::width + 17;
 
     template <unsigned int Size>
     void Marshall(Marshaller<Size> &m) {
       m & logical;
       m & bank;
+      m & first_slot;
     }
 
     inline friend void sc_trace(sc_trace_file *tf,
@@ -230,17 +232,19 @@ SC_MODULE(CIMProcessor) {
                                 const std::string &name) {
       sc_trace(tf, group.logical, name + ".logical");
       sc_trace(tf, group.bank, name + ".bank");
+      sc_trace(tf, group.first_slot, name + ".first_slot");
     }
 
     inline friend std::ostream &operator<<(std::ostream &os,
                                            const ScheduledWeightGroup &group) {
-      os << group.logical << " " << group.bank;
+      os << group.logical << " " << group.bank << " " << group.first_slot;
       return os;
     }
 
     inline friend bool operator==(const ScheduledWeightGroup &lhs,
                                   const ScheduledWeightGroup &rhs) {
-      return lhs.logical == rhs.logical && lhs.bank == rhs.bank;
+      return lhs.logical == rhs.logical && lhs.bank == rhs.bank &&
+             lhs.first_slot == rhs.first_slot;
     }
   };
 
@@ -272,8 +276,8 @@ SC_MODULE(CIMProcessor) {
       accum_output_fifo);
   Connections::Combinational<Pack1D<Buffer, N>> CCS_INIT_S1(accum_output_enq);
 
-  // Buffer the next bank assignment and every newly filled physical set
-  Connections::Fifo<ScheduledWeightGroup, 2> CCS_INIT_S1(
+  // Buffer one bank of group assignments and newly filled physical sets
+  Connections::Fifo<ScheduledWeightGroup, SETS_PER_BANK> CCS_INIT_S1(
       scheduled_weight_group_fifo);
   Connections::Combinational<ScheduledWeightGroup> CCS_INIT_S1(
       scheduled_weight_group_enq);
@@ -528,7 +532,7 @@ SC_MODULE(CIMProcessor) {
     write_request_channel.Push(request);
   }
 
-  // Load each logical group into the next physical set bank
+  // Pack logical groups sequentially into each physical set bank
   void load_weights() {
     weight_channel.Reset();
     weight_group_channel.Reset();
@@ -541,6 +545,7 @@ SC_MODULE(CIMProcessor) {
     wait();
 
     ac_int<1, false> bank = 0;
+    ac_int<16, false> next_slot = 0;
     bool used_before[2] = {false, false};
     while (true) {
       const CIMWeightGroup logical = weight_group_channel.Pop();
@@ -552,7 +557,12 @@ SC_MODULE(CIMProcessor) {
       }
 #endif
 
-      if (used_before[bank]) {
+      if (logical.set_count > SETS_PER_BANK - next_slot) {
+        bank = !bank;
+        next_slot = 0;
+      }
+
+      if (next_slot == 0 && used_before[bank]) {
         // No set in this bank may be overwritten before the replacement bank
         // closes its final issue window
         set_consumed_deq[bank].Pop();
@@ -561,28 +571,31 @@ SC_MODULE(CIMProcessor) {
       ScheduledWeightGroup scheduled;
       scheduled.logical = logical;
       scheduled.bank = bank;
+      scheduled.first_slot = next_slot;
       scheduled_weight_group_enq.Push(scheduled);
 
-      for (int slot = 0; slot < SETS_PER_BANK; slot++) {
-        if (slot < logical.set_count) {
-          const Set wset = Set(bank * SETS_PER_BANK + slot);
+      for (ac_int<16, false> group_slot = 0; group_slot < logical.set_count;
+           group_slot++) {
+        const Set wset = Set(bank * SETS_PER_BANK + next_slot + group_slot);
 
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
-          for (int k = 0; k < K; k++) {
-            for (int span = 0; span < WEIGHT_BEATS_PER_ROW; span++) {
-              const ac_int<WEIGHT_WRITE_WIDTH, false> beat =
-                  weight_channel.Pop();
-              write_weight_beat(wset, k, span, beat);
-            }
+        for (int k = 0; k < K; k++) {
+          for (int span = 0; span < WEIGHT_BEATS_PER_ROW; span++) {
+            const ac_int<WEIGHT_WRITE_WIDTH, false> beat = weight_channel.Pop();
+            write_weight_beat(wset, k, span, beat);
           }
-
-          set_ready_enq.Push(wset);
         }
+
+        set_ready_enq.Push(wset);
       }
 
       used_before[bank] = true;
-      bank = !bank;
+      next_slot += logical.set_count;
+      if (next_slot == SETS_PER_BANK) {
+        bank = !bank;
+        next_slot = 0;
+      }
     }
   }
 
@@ -669,15 +682,19 @@ SC_MODULE(CIMProcessor) {
             group = scheduled_weight_group_deq.Pop();
 
 #ifndef __SYNTHESIS__
+            const ac_int<17, false> group_limit =
+                ac_int<17, false>(group.first_slot) +
+                ac_int<17, false>(group.logical.set_count);
             if (group.logical.set_count == 0 ||
                 group.logical.set_count > SETS_PER_BANK ||
+                group_limit > SETS_PER_BANK ||
                 group.logical.replay_count == 0) {
               SC_REPORT_FATAL("CIMProcessor",
                               "invalid scheduled resident weight group");
             }
 #endif
 
-            if (have_active_bank) {
+            if (have_active_bank && group.bank != active_bank) {
               release_after_issue = true;
               release_bank = active_bank;
             }
@@ -688,7 +705,8 @@ SC_MODULE(CIMProcessor) {
             need_group = false;
           }
 
-          const Set expected_wset = Set(group.bank * SETS_PER_BANK + set_slot);
+          const Set expected_wset =
+              Set(group.bank * SETS_PER_BANK + group.first_slot + set_slot);
           if (replay == 0) {
             active_wset = set_ready_deq.Pop();
 #ifndef __SYNTHESIS__
