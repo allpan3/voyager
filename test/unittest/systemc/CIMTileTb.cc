@@ -10,7 +10,8 @@
 
 #include "CIMTile.h"
 
-// Verify aggregate A/B/C ports, tile-local B channel decoding, and consecutive retirements
+// Verify aggregate A/B/C ports, tile-local B channel decoding, and consecutive
+// retirements
 struct CIMTileTb : sc_module {
   static constexpr int CH_IN = 4;
   static constexpr int CH_OUT = 2;
@@ -28,8 +29,10 @@ struct CIMTileTb : sc_module {
   static constexpr int OUTPUT_AXIS_ELEMENTS = 3;
   static constexpr int OPERATIONS = 6;
 
-  using Dut = CIMTile<CH_IN, CH_OUT, B_SETS, BASE_A_WIDTH, BASE_B_WIDTH, BASE_C_WIDTH, WRITE_CH_IN, MAC_LATENCY, MODE,
-                      A_WIDTH, B_WIDTH, IS_SIGNED, INPUT_AXIS_ELEMENTS, OUTPUT_AXIS_ELEMENTS>;
+  using Dut =
+      CIMTile<CH_IN, CH_OUT, B_SETS, BASE_A_WIDTH, BASE_B_WIDTH, BASE_C_WIDTH,
+              WRITE_CH_IN, MAC_LATENCY, MODE, A_WIDTH, B_WIDTH, IS_SIGNED,
+              INPUT_AXIS_ELEMENTS, OUTPUT_AXIS_ELEMENTS>;
   using WSet = typename Dut::WSet;
   using WChi = typename Dut::WChi;
   using AValue = typename Dut::AValue;
@@ -54,11 +57,12 @@ struct CIMTileTb : sc_module {
   sc_signal<WSet> mset;
   sc_signal<bool> mac_issue;
   sc_signal<bool> mac_ready;
+  sc_signal<bool> mac_busy;
+  bool seen_retire;
   sc_signal<CData> c;
   sc_signal<bool> c_retire;
 
   std::deque<ExpectedResult> expected_results;
-  bool seen_retire;
   int cycle;
   int last_retire_cycle;
   int retirements;
@@ -70,8 +74,8 @@ struct CIMTileTb : sc_module {
       : sc_module(name),
         dut("dut"),
         clk("clk", 10, SC_NS),
-        seen_retire(false),
         cycle(0),
+        seen_retire(false),
         last_retire_cycle(-1),
         retirements(0) {
     dut.wclk(clk);
@@ -85,6 +89,7 @@ struct CIMTileTb : sc_module {
     dut.mset(mset);
     dut.mac_issue(mac_issue);
     dut.mac_ready(mac_ready);
+    dut.mac_busy(mac_busy);
     dut.c(c);
     dut.c_retire(c_retire);
 
@@ -123,7 +128,8 @@ struct CIMTileTb : sc_module {
     const int element_k = k % Dut::ELEMENT_K;
     const int output_element_idx = n / Dut::ELEMENT_N;
     const int element_n = n % Dut::ELEMENT_N;
-    return BValue(1 + set_idx + input_element_idx + output_element_idx + element_n + element_k);
+    return BValue(1 + set_idx + input_element_idx + output_element_idx +
+                  element_n + element_k);
   }
 
   // Compute the expected input-axis reduction for one operation
@@ -157,7 +163,8 @@ struct CIMTileTb : sc_module {
     }
 
     if (last_retire_cycle >= 0) {
-      require(cycle == last_retire_cycle + 1, "back-to-back issues did not retire on consecutive cycles");
+      require(cycle == last_retire_cycle + 1,
+              "back-to-back issues did not retire on consecutive cycles");
     }
     last_retire_cycle = cycle;
     retirements++;
@@ -244,7 +251,8 @@ struct CIMTileTb : sc_module {
     load_b_sets();
     issue_back_to_back();
 
-    for (int drain_cycle = 0; drain_cycle < 20 && !expected_results.empty(); drain_cycle++) {
+    for (int drain_cycle = 0; drain_cycle < 20 && !expected_results.empty();
+         drain_cycle++) {
       tick();
     }
 

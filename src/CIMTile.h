@@ -98,6 +98,12 @@ SC_MODULE(CIMTile) {
   sc_in<WSet> CCS_INIT_S1(mset);
   sc_in<bool> CCS_INIT_S1(mac_issue);
   sc_out<bool> CCS_INIT_S1(mac_ready);
+  // High while the elements still hold mset's B set for an in-flight MAC.
+  // mac_ready reports the TILE's window, which opens a cycle before the
+  // elements see the issue, so it runs a cycle ahead of the set actually being
+  // busy. A B write reaches an element combinationally, with no such cycle, so
+  // it must consult the elements themselves and not the tile's window
+  sc_out<bool> CCS_INIT_S1(mac_busy);
 
   // Tile C interface
   sc_out<CData> CCS_INIT_S1(c);
@@ -175,6 +181,16 @@ SC_MODULE(CIMTile) {
 
     SC_METHOD(drive_mac_ready);
     sensitive << rstn << window_idle_state;
+
+    SC_METHOD(drive_mac_busy);
+    sensitive << rstn << element_mac_issue;
+    for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_ELEMENTS;
+         input_axis_idx++) {
+      for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_ELEMENTS;
+           output_axis_idx++) {
+        sensitive << element_mac_ready[input_axis_idx][output_axis_idx];
+      }
+    }
   }
 
  private:
@@ -397,6 +413,25 @@ SC_MODULE(CIMTile) {
   }
 
   // Drive ready when the tile A station can accept an operation
+  // Report the B set as busy from the cycle the issue is handed to the elements
+  // until the last element retires it. element_mac_issue covers the handoff
+  // cycle, on which an element is already committed but its own mac_ready has
+  // not fallen yet
+  void drive_mac_busy() {
+    bool busy = element_mac_issue.read();
+#pragma hls_unroll yes
+    for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_ELEMENTS;
+         input_axis_idx++) {
+#pragma hls_unroll yes
+      for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_ELEMENTS;
+           output_axis_idx++) {
+        busy =
+            busy || !element_mac_ready[input_axis_idx][output_axis_idx].read();
+      }
+    }
+    mac_busy.write(rstn.read() && busy);
+  }
+
   void drive_mac_ready() {
     mac_ready.write(rstn.read() && window_idle_state.read());
   }

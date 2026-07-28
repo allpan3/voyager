@@ -275,6 +275,7 @@ SC_MODULE(CIMArray) {
   sc_signal<TileCData> tile_c[INPUT_AXIS_TILES][OUTPUT_AXIS_TILES];
   sc_signal<bool> tile_c_retire[INPUT_AXIS_TILES][OUTPUT_AXIS_TILES];
   sc_signal<bool> tile_mac_ready[INPUT_AXIS_TILES][OUTPUT_AXIS_TILES];
+  sc_signal<bool> tile_mac_busy[INPUT_AXIS_TILES][OUTPUT_AXIS_TILES];
 
   // Each allocated completion slot carries request metadata and a bank per
   // physical tile
@@ -331,6 +332,8 @@ SC_MODULE(CIMArray) {
             mac_issue[output_axis_idx]);
         tiles[input_axis_idx][output_axis_idx]->mac_ready(
             tile_mac_ready[input_axis_idx][output_axis_idx]);
+        tiles[input_axis_idx][output_axis_idx]->mac_busy(
+            tile_mac_busy[input_axis_idx][output_axis_idx]);
         tiles[input_axis_idx][output_axis_idx]->c(
             tile_c[input_axis_idx][output_axis_idx]);
         tiles[input_axis_idx][output_axis_idx]->c_retire(
@@ -340,6 +343,21 @@ SC_MODULE(CIMArray) {
 
     SC_METHOD(drive_write_admission);
     sensitive << rstn << write_request_channel.vld << write_request_channel.dat;
+    // Write admission now also depends on which set the MAC holds, so it needs
+    // the same issue-path sensitivity as drive_mac_issue
+    sensitive << held_mset << mac_request_channel.vld
+              << mac_request_channel.dat;
+    sensitive << completion_allocate_pointer << completion_release_pointer;
+    sensitive << completion_release_pending << result_channel.vld
+              << result_channel.rdy;
+    for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES;
+         output_axis_idx++) {
+      for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES;
+           input_axis_idx++) {
+        sensitive << tile_mac_ready[input_axis_idx][output_axis_idx];
+        sensitive << tile_mac_busy[input_axis_idx][output_axis_idx];
+      }
+    }
 
     SC_METHOD(drive_mac_issue);
     sensitive << rstn << mac_request_channel.vld << mac_request_channel.dat;
@@ -441,7 +459,9 @@ SC_MODULE(CIMArray) {
     if (request_valid) {
       request = ConnectionsSignal::peek(write_request_channel);
     }
-    ConnectionsSignal::set_ready(write_request_channel, true);
+    // A write to the set the MAC is using waits for the MAC to release it
+    const bool blocked = request_valid && write_blocked_by_mac(request);
+    ConnectionsSignal::set_ready(write_request_channel, !blocked);
 
 #ifndef __SYNTHESIS__
     if (request_valid && request.input_axis_idx.to_int() >= INPUT_AXIS_TILES) {
@@ -473,7 +493,7 @@ SC_MODULE(CIMArray) {
     }
 #endif
 
-    drive_write_request(request, request_valid);
+    drive_write_request(request, request_valid && !blocked);
   }
 
   // Return the exact-depth storage index selected by one completion queue
@@ -524,6 +544,46 @@ SC_MODULE(CIMArray) {
   bool completion_releases_on_fire() const {
     return completion_release_pending.read() && result_channel.vld.read() &&
            result_channel.rdy.read();
+  }
+
+  // Return whether any element still holds the B set of an in-flight MAC
+  bool mac_set_busy() const {
+    bool busy = false;
+#pragma hls_unroll yes
+    for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES;
+         output_axis_idx++) {
+#pragma hls_unroll yes
+      for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES;
+           input_axis_idx++) {
+        busy = busy || tile_mac_busy[input_axis_idx][output_axis_idx].read();
+      }
+    }
+    return busy;
+  }
+
+  // Return whether a B write must wait for the MAC to release its set.
+  //
+  // An element forbids writing the B set an issue window is using. The window
+  // is one cycle wide only for a bit-parallel macro; a bit-serial macro walks A
+  // a slice at a time and holds its set for the whole walk, so a single-cycle
+  // write is illegal anywhere inside it. The write is what yields, because the
+  // MAC side already waits for every window to close before it is admitted.
+  //
+  // The two terms are mutually exclusive. held_mset registers on the firing
+  // edge, so it names the busy set for the remainder of an open window; on the
+  // firing edge itself the set is still only in the request being accepted.
+  bool write_blocked_by_mac(const WriteRequest& request) const {
+    const bool blocked_by_open_window =
+        mac_set_busy() && request.wset == held_mset.read();
+
+    const bool mac_fires = rstn.read() &&
+                           ConnectionsSignal::valid(mac_request_channel) &&
+                           request_path_ready();
+    const bool blocked_by_firing_mac =
+        mac_fires &&
+        request.wset == ConnectionsSignal::peek(mac_request_channel).mset;
+
+    return blocked_by_open_window || blocked_by_firing_mac;
   }
 
   // Return whether the completion queue and shared tile issue bus can accept an
