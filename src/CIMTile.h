@@ -107,6 +107,7 @@ SC_MODULE(CIMTile) {
 
   // Tile C interface
   sc_out<CData> CCS_INIT_S1(c);
+  // One-cycle pulse when c holds a new tile result
   sc_out<bool> CCS_INIT_S1(c_retire);
 
  private:
@@ -368,8 +369,6 @@ SC_MODULE(CIMTile) {
 
   // Register the tile C payload when representative element [0][0] retires
   void run_collect() {
-    bool seen_retire = false;
-    bool tile_retire_state = false;
     CData reset_c;
     clear_pack(reset_c);
     c.write(reset_c);
@@ -378,12 +377,17 @@ SC_MODULE(CIMTile) {
     wait();
 
     while (true) {
-      const bool representative_retire = element_c_retire[0][0].read();
+      // The elements retire in lockstep and pulse for exactly one cycle, so the
+      // pulse is the trigger directly -- no retire phase to remember
+      const bool element_retired = element_c_retire[0][0].read();
 #ifndef __SYNTHESIS__
-      check_element_lockstep(representative_retire);
+      check_element_lockstep(element_retired);
 #endif
 
-      if (representative_retire != seen_retire) {
+      // Republish the tile pulse every cycle so it is one cycle wide
+      c_retire.write(element_retired);
+
+      if (element_retired) {
         CData tile_c;
         // Keep the reduction inline so Catapult can statically enumerate every
         // element_c signal
@@ -403,10 +407,6 @@ SC_MODULE(CIMTile) {
           }
         }
         c.write(tile_c);
-        seen_retire = representative_retire;
-        // Publish one new tile result generation
-        tile_retire_state = !tile_retire_state;
-        c_retire.write(tile_retire_state);
       }
       wait();
     }

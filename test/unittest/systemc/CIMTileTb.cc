@@ -58,7 +58,6 @@ struct CIMTileTb : sc_module {
   sc_signal<bool> mac_issue;
   sc_signal<bool> mac_ready;
   sc_signal<bool> mac_busy;
-  bool seen_retire;
   sc_signal<CData> c;
   sc_signal<bool> c_retire;
 
@@ -75,7 +74,6 @@ struct CIMTileTb : sc_module {
         dut("dut"),
         clk("clk", 10, SC_NS),
         cycle(0),
-        seen_retire(false),
         last_retire_cycle(-1),
         retirements(0) {
     dut.wclk(clk);
@@ -146,10 +144,9 @@ struct CIMTileTb : sc_module {
     return expected;
   }
 
-  // Check and consume one retirement toggle
+  // Check and consume one retirement pulse
   void check_retirement() {
-    const bool retire_now = c_retire.read();
-    if (retire_now == seen_retire) {
+    if (!c_retire.read()) {
       return;
     }
 
@@ -168,7 +165,6 @@ struct CIMTileTb : sc_module {
     }
     last_retire_cycle = cycle;
     retirements++;
-    seen_retire = retire_now;
     expected_results.pop_front();
   }
 
@@ -203,7 +199,6 @@ struct CIMTileTb : sc_module {
     tick();
     rstn.write(true);
     tick();
-    seen_retire = c_retire.read();
   }
 
   // Load every BK-wide B block in both sets through the aggregate tile port

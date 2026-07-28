@@ -63,7 +63,6 @@ struct CIMElementTbCase : sc_module {
   sc_signal<bool> c_retire;
   sc_signal<bool> mac_ready;
 
-  bool last_retire_ = false;
 
   SC_HAS_PROCESS(CIMElementTbCase);
 
@@ -263,7 +262,6 @@ struct CIMElementTbCase : sc_module {
     settle_and_compare("reset release");
     require(mac_ready.read(), "mac_ready stayed low after reset release");
     require(!c_retire.read(), "c_retire recovered high after reset release");
-    last_retire_ = false;
   }
 
   // Drive one A vector
@@ -304,11 +302,10 @@ struct CIMElementTbCase : sc_module {
     }
   }
 
-  // Wait until both models flip c_retire or fail on timeout
+  // Wait until both models pulse c_retire or fail on timeout
   void wait_for_retire() {
     for (int cycle = 0; cycle < 128; cycle++) {
-      if (c_retire.read() != last_retire_) {
-        last_retire_ = c_retire.read();
+      if (c_retire.read()) {
         return;
       }
       tick("wait retire");
@@ -360,8 +357,7 @@ struct CIMElementTbCase : sc_module {
       tick("pipelined");
       mac_issue.write(false);
 
-      if (c_retire.read() != last_retire_) {
-        last_retire_ = c_retire.read();
+      if (c_retire.read()) {
         retired++;
       }
 
@@ -387,7 +383,6 @@ struct CIMElementTbCase : sc_module {
     settle_and_compare("mid-operation reset release");
     require(mac_ready.read(), "mac_ready stayed low after mid-operation reset");
     require(!c_retire.read(), "c_retire recovered high after mid-operation reset");
-    last_retire_ = false;
 
     run_mac_check(B_SETS - 1, 8, false);
   }
@@ -401,7 +396,6 @@ struct CIMElementTbCase : sc_module {
     settle_and_compare("idle reset release");
     require(mac_ready.read(), "mac_ready stayed low after idle reset");
     require(!c_retire.read(), "c_retire recovered high after idle reset");
-    last_retire_ = false;
 
     run_mac_check(B_SETS - 1, 8, false);
   }

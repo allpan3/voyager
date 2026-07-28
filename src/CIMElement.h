@@ -4,7 +4,7 @@
 // and matrix interface. The synthesized implementation blackboxes the existing
 // SystemVerilog CIMIntElement, while the C++ body provides event-level
 // simulation of the issue/retire protocol: mac_issue accepted while mac_ready,
-// results retiring into c with a c_retire toggle after a fixed latency
+// results retiring into c with a one-cycle c_retire pulse after a fixed latency
 //
 // tensor geometry:
 //
@@ -165,13 +165,12 @@ SC_MODULE(CIMElementPacked) {
   PendingResult pending_results[MAX_PENDING_RESULTS];
   int pending_results_size;
   int window_remaining;
-  bool retire_state;
   sc_signal<bool> window_idle_state;
 
  public:
   // Construct the packed CIMElement behavioral model and blackbox metadata
   SC_CTOR(CIMElementPacked)
-      : pending_results_size(0), window_remaining(0), retire_state(false) {
+      : pending_results_size(0), window_remaining(0) {
     initialize_model_state();
 
     SC_METHOD(write_b);
@@ -218,7 +217,6 @@ SC_MODULE(CIMElementPacked) {
   void initialize_model_state() {
     pending_results_size = 0;
     window_remaining = 0;
-    retire_state = false;
     window_idle_state.write(true);
   }
 
@@ -287,7 +285,6 @@ SC_MODULE(CIMElementPacked) {
   void reset_element_state() {
     pending_results_size = 0;
     window_remaining = 0;
-    retire_state = false;
     window_idle_state.write(true);
     c_bus.write(0);
     c_retire.write(false);
@@ -299,6 +296,10 @@ SC_MODULE(CIMElementPacked) {
       reset_element_state();
       return;
     }
+
+    // c_retire is a one-cycle pulse: default it low every edge and raise it
+    // only on the edge a result retires
+    c_retire.write(false);
 
     // Sample readiness before this edge's updates, mirroring the RTL comb ready
     const bool ready_now = (window_remaining == 0);
@@ -318,8 +319,7 @@ SC_MODULE(CIMElementPacked) {
           packed_result.set_slc(n * C_WIDTH, pending_results[0].value[n]);
         }
         c_bus.write(packed_result);
-        retire_state = !retire_state;
-        c_retire.write(retire_state);
+        c_retire.write(true);
         for (int pending_idx = 1; pending_idx < MAX_PENDING_RESULTS;
              pending_idx++) {
           if (pending_idx < pending_results_size) {

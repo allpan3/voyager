@@ -34,7 +34,6 @@ logic                       mac_ready;
 
 logic [B_WIDTH-1:0] model_b [B_SETS][K][N];
 logic [C_WIDTH-1:0] expected [NUM_ITERS][N];
-logic last_retire_toggle;
 int unsigned dropped_issue_attempts;
 int unsigned rng_state;
 string waveform_path;
@@ -169,7 +168,6 @@ task automatic drive_defaults;
     wset = '0;
     mac_issue = 1'b0;
     mset = '0;
-    last_retire_toggle = 1'b0;
     dropped_issue_attempts = 0;
 
     init_rng_from_plusarg();
@@ -240,7 +238,6 @@ task automatic apply_reset;
     if (c_retire !== 1'b0) begin
       $fatal(1, "%s: c_retire must stay low after reset release", CASE_NAME);
     end
-    last_retire_toggle = 1'b0;
   end
 endtask
 
@@ -337,7 +334,7 @@ task automatic wait_for_retire_and_check(input int slot);
   int unsigned wait_cycles;
   begin
     wait_cycles = 0;
-    while (c_retire === last_retire_toggle) begin
+    while (c_retire !== 1'b1) begin
       if (wait_cycles >= MAX_WAIT_CYCLES) begin
         $fatal(1, "%s: timed out waiting for c_retire on op %0d", CASE_NAME, slot);
       end
@@ -346,8 +343,6 @@ task automatic wait_for_retire_and_check(input int slot);
       mac_issue = 1'b0;
       wait_cycles++;
     end
-    last_retire_toggle = c_retire;
-
     for (int n = 0; n < N; n++) begin
       if (c[n] !== expected[slot][n]) begin
         $fatal(1,
@@ -370,8 +365,8 @@ task automatic check_result_hold(input int slot);
     end
     mac_issue = 1'b0;
     tick_mclk();
-    if (c_retire !== last_retire_toggle) begin
-      $fatal(1, "%s: c_retire flipped without a new op after slot %0d", CASE_NAME, slot);
+    if (c_retire !== 1'b0) begin
+      $fatal(1, "%s: c_retire pulsed without a new op after slot %0d", CASE_NAME, slot);
     end
     for (int n = 0; n < N; n++) begin
       if (c[n] !== held_c[n]) begin
@@ -426,8 +421,7 @@ task automatic run_pipelined_ops;
       tick_mclk();
       mac_issue = 1'b0;
 
-      if (c_retire !== last_retire_toggle) begin
-        last_retire_toggle = c_retire;
+      if (c_retire === 1'b1) begin
         for (int n = 0; n < N; n++) begin
           if (c[n] !== expected[retired][n]) begin
             $fatal(1,
@@ -491,7 +485,6 @@ task automatic reset_during_active_op;
     if (c_retire !== 1'b0) begin
       $fatal(1, "%s: stale c_retire appeared after reset-mid-op", CASE_NAME);
     end
-    last_retire_toggle = 1'b0;
 
     tick_mclk();
     if (c_retire !== 1'b0) begin

@@ -700,8 +700,7 @@ SC_MODULE(CIMArray) {
   }
 
   // Return whether every tile selected by one operation has retired
-  bool request_retired(bool multicast, int target_output_axis_idx,
-                       const bool seen_retire[OUTPUT_AXIS_TILES]) const {
+  bool request_retired(bool multicast, int target_output_axis_idx) const {
     bool retired = true;
 #pragma hls_unroll yes
     for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES;
@@ -710,9 +709,8 @@ SC_MODULE(CIMArray) {
 #pragma hls_unroll yes
         for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES;
              input_axis_idx++) {
-          retired = retired &&
-                    tile_c_retire[input_axis_idx][output_axis_idx].read() !=
-                        seen_retire[output_axis_idx];
+          retired =
+              retired && tile_c_retire[input_axis_idx][output_axis_idx].read();
         }
       }
     }
@@ -810,13 +808,6 @@ SC_MODULE(CIMArray) {
   // Capture every fixed-latency retirement without waiting for result-channel
   // readiness
   void capture_mac() {
-    bool seen_retire[OUTPUT_AXIS_TILES];
-#pragma hls_unroll yes
-    for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES;
-         output_axis_idx++) {
-      seen_retire[output_axis_idx] = false;
-    }
-
     ResultQueuePointer capture_pointer = 0;
     completion_capture_pointer.write(capture_pointer);
 #pragma hls_unroll yes
@@ -842,7 +833,7 @@ SC_MODULE(CIMArray) {
             token.template slc<OUTPUT_AXIS_INDEX_WIDTH>(0);
         const int target_output_axis_idx = token_output_axis_idx.to_int();
 
-        if (request_retired(multicast, target_output_axis_idx, seen_retire)) {
+        if (request_retired(multicast, target_output_axis_idx)) {
           CompletionResult completion_result = 0;
 #pragma hls_unroll yes
           for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES;
@@ -866,14 +857,6 @@ SC_MODULE(CIMArray) {
             }
           }
           completion_results[queue_idx].write(completion_result);
-
-#pragma hls_unroll yes
-          for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES;
-               output_axis_idx++) {
-            if (multicast || output_axis_idx == target_output_axis_idx) {
-              seen_retire[output_axis_idx] = !seen_retire[output_axis_idx];
-            }
-          }
 
           capture_pointer = next_result_queue_pointer(capture_pointer);
           completion_capture_pointer.write(capture_pointer);

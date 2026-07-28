@@ -79,7 +79,7 @@ module CIMIntElement #(
     input  logic [BITS_SET-1:0]        mset,
 
     output logic [C_WIDTH-1:0]         c [N],  // registered result, stable until the next retire
-    output logic                       c_retire,   // toggles once per retired result
+    output logic                       c_retire,   // one-cycle pulse per retired result, aligned with c
     output logic                       mac_ready   // high when an issue presented this cycle is accepted
 );
 
@@ -436,14 +436,18 @@ module CIMIntElement #(
         acc[n] <= '0;
         c_out[n] <= '0;
       end
-    end else if (slice_result_ready) begin
-      for (int n = 0; n < N; n++) begin
-        acc[n] <= acc_next[n];
-      end
-      if (retire_op) begin
-        c_retire <= !c_retire;
+    end else begin
+      // Assigned every cycle so the retire indication is a one-cycle pulse
+      // rather than a level a consumer would have to remember the phase of
+      c_retire <= slice_result_ready && retire_op;
+      if (slice_result_ready) begin
         for (int n = 0; n < N; n++) begin
-          c_out[n] <= acc_next[n];
+          acc[n] <= acc_next[n];
+        end
+        if (retire_op) begin
+          for (int n = 0; n < N; n++) begin
+            c_out[n] <= acc_next[n];
+          end
         end
       end
     end
