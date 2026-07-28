@@ -74,7 +74,8 @@ struct CIMTileTb : sc_module {
         cycle(0),
         last_retire_cycle(-1),
         retirements(0) {
-    dut.clk(clk);
+    dut.wclk(clk);
+    dut.mclk(clk);
     dut.rstn(rstn);
     dut.write(write);
     dut.wset(wset);

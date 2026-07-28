@@ -241,7 +241,6 @@ VU_RTL_DEPENDENCIES += $(CATAPULT_BUILD_DIR)/OutlierFilter/OutlierFilter.v1/conc
 endif
 
 ifeq ($(MATRIX_BACKEND),1)
-CIM_TILE_RTL := $(CATAPULT_BUILD_DIR)/CIMTile/CIMTile.v1/concat_rtl.sv
 CIM_ARRAY_RTL := $(CATAPULT_BUILD_DIR)/CIMArray/CIMArray.v1/concat_rtl.sv
 MATRIX_BACKEND_RTL := $(CATAPULT_BUILD_DIR)/CIMProcessor/CIMProcessor.v1/concat_rtl.sv
 # The CIM netlist is SystemVerilog, so Catapult emits no Verilog concat flow, and
@@ -263,13 +262,10 @@ InputController: $(CATAPULT_BUILD_DIR)/InputController/InputController.v1/concat
 WeightController: $(CATAPULT_BUILD_DIR)/WeightController/WeightController.v1/concat_rtl.v
 SystolicArray: $(CATAPULT_BUILD_DIR)/SystolicArray/SystolicArray.v1/concat_rtl.v
 MatrixProcessor: $(CATAPULT_BUILD_DIR)/MatrixProcessor/MatrixProcessor.v1/concat_rtl.v
-CIMTile:
-	env -u CATAPULT_BUILD_DIR $(MAKE) cim-tile-rtl MATRIX_BACKEND=1 CIM_C_BEAT_LAYOUT=1
 CIMArray:
 	env -u CATAPULT_BUILD_DIR $(MAKE) cim-array-rtl MATRIX_BACKEND=1 CIM_C_BEAT_LAYOUT=1
 CIMProcessor:
 	env -u CATAPULT_BUILD_DIR $(MAKE) cim-processor-rtl MATRIX_BACKEND=1 CIM_C_BEAT_LAYOUT=1
-cim-tile-rtl: $(CIM_TILE_RTL)
 cim-array-rtl: $(CIM_ARRAY_RTL)
 cim-processor-rtl: $(MATRIX_BACKEND_RTL)
 ProcessingElement: $(CATAPULT_BUILD_DIR)/ProcessingElement/ProcessingElement.v1/concat_rtl.v
@@ -317,11 +313,7 @@ $(CATAPULT_BUILD_DIR)/MatrixProcessor/MatrixProcessor.v1/concat_rtl.v: src/Matri
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=MatrixProcessor catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/MatrixProcessor.log
 
-$(CATAPULT_BUILD_DIR)/CIMTile/CIMTile.v1/concat_rtl.sv: src/CIMTile.h src/CIMElement.h scripts/blocks/CIMTile.tcl scripts/architecture.tcl scripts/utils/setup_project.tcl $(PROTOS_DEPENDENCY)
-	mkdir -p $(CATAPULT_BUILD_DIR)
-	BLOCK=CIMTile catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/CIMTile.log
-
-$(CATAPULT_BUILD_DIR)/CIMArray/CIMArray.v1/concat_rtl.sv: src/CIMArray.h src/CIMTile.h scripts/blocks/CIMArray.tcl scripts/architecture.tcl scripts/utils/setup_project.tcl $(CIM_TILE_RTL) $(PROTOS_DEPENDENCY)
+$(CATAPULT_BUILD_DIR)/CIMArray/CIMArray.v1/concat_rtl.sv: src/CIMArray.h src/CIMTile.h src/CIMElement.h src/CIM/cim_macro_wrapper.sv src/CIM/cim_macro_model.sv src/CIM/cim_macro_1.sv src/CIM/cim_element.sv scripts/blocks/CIMArray.tcl scripts/architecture.tcl scripts/utils/setup_project.tcl $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=CIMArray catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/CIMArray.log
 
@@ -420,7 +412,7 @@ $(ACCELERATOR_RTL): \
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=Accelerator catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/Accelerator.log
 
-.PHONY: rtl Accelerator InputController WeightController MatrixProcessor CIMTile CIMArray CIMProcessor cim-tile-rtl cim-array-rtl cim-processor-rtl ProcessingElement CIMElement CIMUnit VectorUnit VectorParamsDeserializer VectorFetchUnit VectorPipeline VectorReducer VectorAccumulator OutputController MatrixVectorUnit MulAddTree DwCUnit
+.PHONY: rtl Accelerator InputController WeightController MatrixProcessor CIMArray CIMProcessor cim-array-rtl cim-processor-rtl ProcessingElement CIMElement CIMUnit VectorUnit VectorParamsDeserializer VectorFetchUnit VectorPipeline VectorReducer VectorAccumulator OutputController MatrixVectorUnit MulAddTree DwCUnit
 
 # Run RTL simulation
 .PHONY: rtl-sim
