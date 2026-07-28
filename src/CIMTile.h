@@ -75,16 +75,16 @@ SC_MODULE(CIMTile) {
   using BData = Pack1D<Pack1D<BValue, N>, BK>;
   using CData = Pack1D<CValue, N>;
 
-  // Return the number of mclk cycles an accepted issue keeps the tile not ready
+  // Return the number of clock cycles an accepted issue keeps the tile not
+  // ready
   static constexpr int issue_window() { return Element::issue_window(); }
 
-  // Return the number of mclk cycles from an accepted tile issue to retirement
+  // Return the number of clock cycles from an accepted tile issue to retirement
   static constexpr int operation_latency() {
     return Element::operation_latency() + 2;
   }
 
-  sc_in<bool> CCS_INIT_S1(wclk);
-  sc_in<bool> CCS_INIT_S1(mclk);
+  sc_in<bool> CCS_INIT_S1(clk);
   sc_in<bool> CCS_INIT_S1(rstn);
 
   // Tile write interface
@@ -136,8 +136,9 @@ SC_MODULE(CIMTile) {
         elements[input_axis_idx][output_axis_idx] =
             new Element(sc_gen_unique_name("element"));
 
-        elements[input_axis_idx][output_axis_idx]->wclk(wclk);
-        elements[input_axis_idx][output_axis_idx]->mclk(mclk);
+        // Keep the element clock domains explicit while the tile uses one clock
+        elements[input_axis_idx][output_axis_idx]->wclk(clk);
+        elements[input_axis_idx][output_axis_idx]->mclk(clk);
         elements[input_axis_idx][output_axis_idx]->rstn(rstn);
         elements[input_axis_idx][output_axis_idx]->wen(
             element_write[input_axis_idx]);
@@ -166,11 +167,11 @@ SC_MODULE(CIMTile) {
     sensitive << rstn << a;
 
     SC_THREAD(run_issue);
-    sensitive << mclk.pos();
+    sensitive << clk.pos();
     async_reset_signal_is(rstn, false);
 
     SC_THREAD(run_collect);
-    sensitive << mclk.pos();
+    sensitive << clk.pos();
     async_reset_signal_is(rstn, false);
 
     SC_METHOD(drive_mac_ready);

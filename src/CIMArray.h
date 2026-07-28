@@ -314,8 +314,7 @@ SC_MODULE(CIMArray) {
         tiles[input_axis_idx][output_axis_idx] =
             new Tile(sc_gen_unique_name("tile"));
 
-        tiles[input_axis_idx][output_axis_idx]->wclk(clk);
-        tiles[input_axis_idx][output_axis_idx]->mclk(clk);
+        tiles[input_axis_idx][output_axis_idx]->clk(clk);
         tiles[input_axis_idx][output_axis_idx]->rstn(rstn);
         tiles[input_axis_idx][output_axis_idx]->write(
             tile_write[input_axis_idx][output_axis_idx]);
