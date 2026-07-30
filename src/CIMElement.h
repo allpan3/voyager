@@ -3,8 +3,9 @@
 // CIMElement is a PE-level Catapult block boundary for the native CIM vector
 // and matrix interface. The synthesized implementation blackboxes the existing
 // SystemVerilog CIMIntElement, while the C++ body provides event-level
-// simulation of the issue/retire protocol: mac_issue accepted while mac_ready,
-// results retiring into c with a one-cycle c_retire pulse after a fixed latency
+// simulation of the issue/retire protocol: mac_ready lets upstream commit a
+// request one cycle before mac_issue, mac_busy covers current operand use, and
+// results retire into c with a one-cycle c_retire pulse after a fixed latency
 //
 // tensor geometry:
 //
@@ -103,8 +104,7 @@ SC_MODULE(CIMElementPacked) {
                 "bit-serial requires BASE_C_WIDTH > BASE_B_WIDTH + "
                 "SUM_GUARD_WIDTH so one A slice is at least 1 bit");
 
-  // Return the number of mclk cycles an accepted issue keeps the element not
-  // ready
+  // Return the minimum mclk edge spacing between accepted element issues
   static constexpr int issue_window() {
     constexpr int serial_max_slice_width =
         BASE_C_WIDTH - BASE_B_WIDTH - SUM_GUARD_WIDTH;
@@ -139,14 +139,15 @@ SC_MODULE(CIMElementPacked) {
   sc_in<ac_int<BITS_K, false>> CCS_INIT_S1(wchi);
   sc_in<WSet> CCS_INIT_S1(wset);
 
-  // CIMElement MAC issue control
+  // A committed upstream request arrives as mac_issue one cycle later
   sc_in<bool> CCS_INIT_S1(mac_issue);
   sc_in<WSet> CCS_INIT_S1(mset);
 
-  // CIMElement packed result interface; c_bus holds the last retired result
+  // mac_ready advertises upstream commit timing while mac_busy covers operand use
   sc_out<ac_int<C_BUS_WIDTH, false>> CCS_INIT_S1(c_bus);
   sc_out<bool> CCS_INIT_S1(c_retire);
   sc_out<bool> CCS_INIT_S1(mac_ready);
+  sc_out<bool> CCS_INIT_S1(mac_busy);
 
  private:
   // Resetless row-major B storage; each write fills BK rows along K
@@ -164,13 +165,11 @@ SC_MODULE(CIMElementPacked) {
   static constexpr int MAX_PENDING_RESULTS = operation_latency() + 1;
   PendingResult pending_results[MAX_PENDING_RESULTS];
   int pending_results_size;
-  int window_remaining;
-  sc_signal<bool> window_idle_state;
+  sc_signal<int> window_remaining;
 
  public:
   // Construct the packed CIMElement behavioral model and blackbox metadata
-  SC_CTOR(CIMElementPacked)
-      : pending_results_size(0), window_remaining(0) {
+  SC_CTOR(CIMElementPacked) : pending_results_size(0) {
     initialize_model_state();
 
     SC_METHOD(write_b);
@@ -181,8 +180,8 @@ SC_MODULE(CIMElementPacked) {
     sensitive << mclk.pos() << rstn.neg();
     dont_initialize();
 
-    SC_METHOD(drive_mac_ready);
-    sensitive << rstn << window_idle_state;
+    SC_METHOD(drive_mac_status);
+    sensitive << rstn << mac_issue << window_remaining;
 
 #ifndef __SYNTHESIS__
     SC_METHOD(check_write_mac_collision);
@@ -216,8 +215,18 @@ SC_MODULE(CIMElementPacked) {
   // untouched
   void initialize_model_state() {
     pending_results_size = 0;
-    window_remaining = 0;
-    window_idle_state.write(true);
+    window_remaining.write(0);
+  }
+
+  // Return the issue-window count after the upcoming edge
+  static int next_window_remaining(int current_remaining, bool issue) {
+    const bool issue_ready_now = current_remaining == 0;
+    int next_remaining =
+        current_remaining > 0 ? current_remaining - 1 : 0;
+    if (issue && issue_ready_now) {
+      next_remaining = issue_window() - 1;
+    }
+    return next_remaining;
   }
 
   // Decode a CIM operand with the configured signedness
@@ -284,8 +293,7 @@ SC_MODULE(CIMElementPacked) {
   // Clear resettable CIM element state while preserving resetless B storage
   void reset_element_state() {
     pending_results_size = 0;
-    window_remaining = 0;
-    window_idle_state.write(true);
+    window_remaining.write(0);
     c_bus.write(0);
     c_retire.write(false);
   }
@@ -301,8 +309,9 @@ SC_MODULE(CIMElementPacked) {
     // only on the edge a result retires
     c_retire.write(false);
 
-    // Sample readiness before this edge's updates, mirroring the RTL comb ready
-    const bool ready_now = (window_remaining == 0);
+    // Determine current-edge acceptance before advancing the window
+    const int current_remaining = window_remaining.read();
+    const bool issue_ready_now = current_remaining == 0;
 
     // Advance the retire pipeline; ops are spaced by at least the issue window,
     // so at most one result retires per edge
@@ -330,30 +339,33 @@ SC_MODULE(CIMElementPacked) {
       }
     }
 
-    if (window_remaining > 0) {
-      window_remaining--;
-    }
-
-    if (mac_issue.read() && ready_now) {
+    if (mac_issue.read() && issue_ready_now) {
       if (pending_results_size < MAX_PENDING_RESULTS) {
         pending_results[pending_results_size] = compute_result();
         pending_results_size++;
       }
-      window_remaining = issue_window() - 1;
     }
 
-    window_idle_state.write(window_remaining == 0);
+    window_remaining.write(
+        next_window_remaining(current_remaining, mac_issue.read()));
   }
 
-  // Drive combinational ready state from reset and the issue-window state
-  void drive_mac_ready() {
-    mac_ready.write(rstn.read() && window_idle_state.read());
+  // Drive next-cycle readiness and current-cycle operand occupancy
+  void drive_mac_status() {
+    const int current_remaining = window_remaining.read();
+    const bool issue_ready_now = current_remaining == 0;
+    const bool issue_accepts = mac_issue.read() && issue_ready_now;
+    const int next_remaining =
+        next_window_remaining(current_remaining, mac_issue.read());
+    mac_ready.write(rstn.read() && next_remaining == 0);
+    mac_busy.write(rstn.read() &&
+                   (current_remaining > 0 || issue_accepts));
   }
 
 #ifndef __SYNTHESIS__
   // Report an illegal write to the B set consumed by the active issue window
   void check_write_mac_collision() {
-    const bool window_active = !window_idle_state.read();
+    const bool window_active = window_remaining.read() > 0;
     const bool issue_start = mac_issue.read() && !window_active;
     if (rstn.read() && wen.read() && (issue_start || window_active) &&
         wset.read() == mset.read()) {
@@ -401,8 +413,7 @@ SC_MODULE(CIMElement) {
   using BData = Pack1D<Pack1D<ac_int<B_WIDTH, false>, N>, BK>;
   using CData = Pack1D<ac_int<C_WIDTH, false>, N>;
 
-  // Return the number of mclk cycles an accepted issue keeps the element not
-  // ready
+  // Return the minimum mclk edge spacing between accepted element issues
   static constexpr int issue_window() { return PackedElement::issue_window(); }
 
   // Return the number of mclk cycles from an accepted issue to its retirement
@@ -425,14 +436,15 @@ SC_MODULE(CIMElement) {
   sc_in<ac_int<BITS_K, false>> CCS_INIT_S1(wchi);
   sc_in<WSet> CCS_INIT_S1(wset);
 
-  // CIMElement MAC issue interface
+  // A committed upstream request arrives as mac_issue one cycle later
   sc_in<bool> CCS_INIT_S1(mac_issue);
   sc_in<WSet> CCS_INIT_S1(mset);
 
-  // CIMElement result interface
+  // mac_ready advertises upstream commit timing while mac_busy covers operand use
   sc_out<CData> CCS_INIT_S1(c);
   sc_out<bool> CCS_INIT_S1(c_retire);
   sc_out<bool> CCS_INIT_S1(mac_ready);
+  sc_out<bool> CCS_INIT_S1(mac_busy);
 
  private:
   PackedElement packed;
@@ -456,6 +468,7 @@ SC_MODULE(CIMElement) {
     packed.c_bus(c_bus);
     packed.c_retire(c_retire);
     packed.mac_ready(mac_ready);
+    packed.mac_busy(mac_busy);
 
     SC_METHOD(pack_inputs);
     sensitive << a << b;

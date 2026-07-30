@@ -62,7 +62,7 @@ struct CIMElementTbCase : sc_module {
   sc_signal<typename Dut::CData> c;
   sc_signal<bool> c_retire;
   sc_signal<bool> mac_ready;
-
+  sc_signal<bool> mac_busy;
 
   SC_HAS_PROCESS(CIMElementTbCase);
 
@@ -80,6 +80,7 @@ struct CIMElementTbCase : sc_module {
     dut.mset(mset);
     dut.c_retire(c_retire);
     dut.mac_ready(mac_ready);
+    dut.mac_busy(mac_busy);
     dut.a(a);
     dut.b(b);
     dut.c(c);
@@ -185,12 +186,19 @@ struct CIMElementTbCase : sc_module {
     compare_outputs(label);
   }
 
-  // Compare issue/ready, retire toggles, and the registered result every cycle
+  // Compare issue status, retirement, and the registered result every cycle
   void compare_outputs(const char* label) {
     if (mac_ready.read() != static_cast<bool>(rtl.mac_ready)) {
       std::ostringstream text;
       text << label << ": mac_ready mismatch, SystemC=" << mac_ready.read()
            << " RTL=" << static_cast<int>(rtl.mac_ready);
+      require(false, text.str());
+    }
+
+    if (mac_busy.read() != static_cast<bool>(rtl.mac_busy)) {
+      std::ostringstream text;
+      text << label << ": mac_busy mismatch, SystemC=" << mac_busy.read()
+           << " RTL=" << static_cast<int>(rtl.mac_busy);
       require(false, text.str());
     }
 
@@ -261,6 +269,7 @@ struct CIMElementTbCase : sc_module {
     rstn.write(true);
     settle_and_compare("reset release");
     require(mac_ready.read(), "mac_ready stayed low after reset release");
+    require(!mac_busy.read(), "mac_busy stayed high after reset release");
     require(!c_retire.read(), "c_retire recovered high after reset release");
   }
 
@@ -313,25 +322,53 @@ struct CIMElementTbCase : sc_module {
     require(false, "timed out waiting for c_retire");
   }
 
-  // Launch a MAC and optionally pulse an ignored issue while not ready
+  // Launch a MAC and check next-cycle readiness against current-cycle occupancy
   void run_mac_check(int set_idx, int phase, bool pulse_while_pending) {
     drive_a(phase);
     mset.write(set_idx);
     mac_issue.write(true);
+    settle_and_compare("arm mac");
+    require(mac_busy.read(), "mac_busy stayed low on the issue edge");
+    require(mac_ready.read() == (Dut::issue_window() == 1),
+            "mac_ready did not predict the post-issue window");
     tick("launch mac");
-    if (Dut::issue_window() > 1) {
-      require(!mac_ready.read(), "mac_ready did not drop inside the issue window");
-    } else {
-      require(mac_ready.read(), "mac_ready must stay high for a one-cycle issue window");
-    }
+    mac_issue.write(false);
+    settle_and_compare("mac launched");
+    bool saw_ready_busy_overlap = mac_ready.read() && mac_busy.read();
 
     if (pulse_while_pending && Dut::issue_window() > 1) {
       mac_issue.write(true);
-      tick("dropped issue pulse");
+      settle_and_compare("arm ignored issue");
+      require(mac_busy.read(), "mac_busy dropped before the issue window ended");
+      tick("ignored issue pulse");
+      mac_issue.write(false);
+      settle_and_compare("ignored issue cleared");
+      saw_ready_busy_overlap =
+          saw_ready_busy_overlap || (mac_ready.read() && mac_busy.read());
     }
 
-    mac_issue.write(false);
-    settle_and_compare("mac idle");
+    if (Dut::issue_window() > 1) {
+      for (int cycle = 0; cycle < Dut::issue_window(); cycle++) {
+        if (!mac_busy.read() || saw_ready_busy_overlap) {
+          break;
+        }
+        tick("advance issue window");
+        saw_ready_busy_overlap =
+            saw_ready_busy_overlap || (mac_ready.read() && mac_busy.read());
+      }
+      require(saw_ready_busy_overlap,
+              "mac_ready did not overlap the final busy cycle");
+      if (mac_busy.read()) {
+        tick("finish issue window");
+      }
+      require(mac_ready.read(), "mac_ready dropped after the issue window");
+      require(!mac_busy.read(), "mac_busy stayed high after operand use");
+    } else {
+      require(mac_ready.read(),
+              "mac_ready dropped for a one-cycle issue window");
+      require(!mac_busy.read(), "mac_busy stayed high after a one-cycle issue");
+    }
+
     wait_for_retire();
     compare_outputs("completed mac");
     tick("hold result");
@@ -341,25 +378,31 @@ struct CIMElementTbCase : sc_module {
   // Issue ops back to back at the ready cadence while comparing both models
   void run_pipelined_check(int set_idx, int base_phase) {
     constexpr int kOps = 3;
-    int issued = 0;
+    int captured = 0;
     int retired = 0;
     int guard = 0;
+    bool issue_pending = false;
 
     while (retired < kOps) {
-      if (issued < kOps && mac_ready.read()) {
-        drive_a(base_phase + issued);
-        mset.write(set_idx);
-        mac_issue.write(true);
-        issued++;
-      } else {
-        mac_issue.write(false);
-      }
+      mac_issue.write(issue_pending);
+      settle_and_compare("pipelined setup");
+      const bool capture_next = captured < kOps && mac_ready.read();
       tick("pipelined");
       mac_issue.write(false);
 
       if (c_retire.read()) {
         retired++;
       }
+
+      if (capture_next) {
+        drive_a(base_phase + captured);
+        mset.write(set_idx);
+        captured++;
+        issue_pending = true;
+      } else {
+        issue_pending = false;
+      }
+      settle_and_compare("pipelined capture");
 
       require(++guard < 512, "pipelined check stalled");
     }
@@ -371,9 +414,7 @@ struct CIMElementTbCase : sc_module {
     mset.write(0);
     mac_issue.write(true);
     tick("launch reset test");
-    if (Dut::issue_window() > 1) {
-      require(!mac_ready.read(), "mac_ready did not drop before mid-operation reset");
-    }
+    require(mac_busy.read(), "mac_busy did not cover the reset test operation");
 
     mac_issue.write(false);
     rstn.write(false);
@@ -382,6 +423,7 @@ struct CIMElementTbCase : sc_module {
     rstn.write(true);
     settle_and_compare("mid-operation reset release");
     require(mac_ready.read(), "mac_ready stayed low after mid-operation reset");
+    require(!mac_busy.read(), "mac_busy stayed high after mid-operation reset");
     require(!c_retire.read(), "c_retire recovered high after mid-operation reset");
 
     run_mac_check(B_SETS - 1, 8, false);
@@ -395,6 +437,7 @@ struct CIMElementTbCase : sc_module {
     rstn.write(true);
     settle_and_compare("idle reset release");
     require(mac_ready.read(), "mac_ready stayed low after idle reset");
+    require(!mac_busy.read(), "mac_busy stayed high after idle reset");
     require(!c_retire.read(), "c_retire recovered high after idle reset");
 
     run_mac_check(B_SETS - 1, 8, false);

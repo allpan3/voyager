@@ -98,11 +98,7 @@ SC_MODULE(CIMTile) {
   sc_in<WSet> CCS_INIT_S1(mset);
   sc_in<bool> CCS_INIT_S1(mac_issue);
   sc_out<bool> CCS_INIT_S1(mac_ready);
-  // High while the elements still hold mset's B set for an in-flight MAC.
-  // mac_ready reports the TILE's window, which opens a cycle before the
-  // elements see the issue, so it runs a cycle ahead of the set actually being
-  // busy. A B write reaches an element combinationally, with no such cycle, so
-  // it must consult the elements themselves and not the tile's window
+  // High while the elements consume A and the selected B set
   sc_out<bool> CCS_INIT_S1(mac_busy);
 
   // Tile C interface
@@ -125,17 +121,15 @@ SC_MODULE(CIMTile) {
   sc_signal<ElementAData> station_a[INPUT_AXIS_ELEMENTS];
   sc_signal<WSet> station_mset;
   sc_signal<bool> element_mac_issue;
-  sc_signal<bool> window_idle_state;
 
   sc_signal<ElementCData> element_c[INPUT_AXIS_ELEMENTS][OUTPUT_AXIS_ELEMENTS];
   sc_signal<bool> element_c_retire[INPUT_AXIS_ELEMENTS][OUTPUT_AXIS_ELEMENTS];
   sc_signal<bool> element_mac_ready[INPUT_AXIS_ELEMENTS][OUTPUT_AXIS_ELEMENTS];
+  sc_signal<bool> element_mac_busy[INPUT_AXIS_ELEMENTS][OUTPUT_AXIS_ELEMENTS];
 
  public:
   // Construct the element grid and bind tile-local signals to its ports
   SC_CTOR(CIMTile) {
-    window_idle_state.write(true);
-
     for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_ELEMENTS;
          input_axis_idx++) {
       for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_ELEMENTS;
@@ -159,6 +153,8 @@ SC_MODULE(CIMTile) {
         elements[input_axis_idx][output_axis_idx]->mac_issue(element_mac_issue);
         elements[input_axis_idx][output_axis_idx]->mac_ready(
             element_mac_ready[input_axis_idx][output_axis_idx]);
+        elements[input_axis_idx][output_axis_idx]->mac_busy(
+            element_mac_busy[input_axis_idx][output_axis_idx]);
         elements[input_axis_idx][output_axis_idx]->c(
             element_c[input_axis_idx][output_axis_idx]);
         elements[input_axis_idx][output_axis_idx]->c_retire(
@@ -181,17 +177,10 @@ SC_MODULE(CIMTile) {
     async_reset_signal_is(rstn, false);
 
     SC_METHOD(drive_mac_ready);
-    sensitive << rstn << window_idle_state;
+    sensitive << rstn << element_mac_ready[0][0];
 
     SC_METHOD(drive_mac_busy);
-    sensitive << rstn << element_mac_issue;
-    for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_ELEMENTS;
-         input_axis_idx++) {
-      for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_ELEMENTS;
-           output_axis_idx++) {
-        sensitive << element_mac_ready[input_axis_idx][output_axis_idx];
-      }
-    }
+    sensitive << rstn << element_mac_busy[0][0];
   }
 
  private:
@@ -283,7 +272,6 @@ SC_MODULE(CIMTile) {
   // Clocked sc_signal writes become visible after the edge, so this station is
   // a pipeline register
   void run_issue() {
-    int window_remaining = 0;
     ElementAData zero_a;
     clear_pack(zero_a);
 
@@ -294,17 +282,11 @@ SC_MODULE(CIMTile) {
          input_axis_idx++) {
       station_a[input_axis_idx].write(zero_a);
     }
-    window_idle_state.write(true);
 
     wait();
 
     while (true) {
-      const bool ready_now = window_remaining == 0;
-      if (window_remaining > 0) {
-        window_remaining--;
-      }
-
-      if (mac_issue.read() && ready_now) {
+      if (mac_issue.read() && element_mac_ready[0][0].read()) {
 #pragma hls_unroll yes
         for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_ELEMENTS;
              input_axis_idx++) {
@@ -312,12 +294,10 @@ SC_MODULE(CIMTile) {
         }
         station_mset.write(mset.read());
         element_mac_issue.write(true);
-        window_remaining = issue_window() - 1;
       } else {
         element_mac_issue.write(false);
       }
 
-      window_idle_state.write(window_remaining == 0);
       wait();
     }
   }
@@ -342,6 +322,7 @@ SC_MODULE(CIMTile) {
   // [0][0]
   void check_element_lockstep(bool representative_retire) const {
     const bool reference_ready = element_mac_ready[0][0].read();
+    const bool reference_busy = element_mac_busy[0][0].read();
     for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_ELEMENTS;
          input_axis_idx++) {
       for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_ELEMENTS;
@@ -352,6 +333,14 @@ SC_MODULE(CIMTile) {
           message << "element [" << input_axis_idx << "][" << output_axis_idx
                   << "] mac_ready diverged from [0][0]";
           SC_REPORT_ERROR("CIMTile element-ready lockstep violation",
+                          message.str().c_str());
+        }
+        if (element_mac_busy[input_axis_idx][output_axis_idx].read() !=
+            reference_busy) {
+          std::ostringstream message;
+          message << "element [" << input_axis_idx << "][" << output_axis_idx
+                  << "] mac_busy diverged from [0][0]";
+          SC_REPORT_ERROR("CIMTile element-busy lockstep violation",
                           message.str().c_str());
         }
         if (element_c_retire[input_axis_idx][output_axis_idx].read() !=
@@ -412,27 +401,12 @@ SC_MODULE(CIMTile) {
     }
   }
 
-  // Drive ready when the tile A station can accept an operation
-  // Report the B set as busy from the cycle the issue is handed to the elements
-  // until the last element retires it. element_mac_issue covers the handoff
-  // cycle, on which an element is already committed but its own mac_ready has
-  // not fallen yet
+  // Forward representative element status for the lockstep grid
   void drive_mac_busy() {
-    bool busy = element_mac_issue.read();
-#pragma hls_unroll yes
-    for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_ELEMENTS;
-         input_axis_idx++) {
-#pragma hls_unroll yes
-      for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_ELEMENTS;
-           output_axis_idx++) {
-        busy =
-            busy || !element_mac_ready[input_axis_idx][output_axis_idx].read();
-      }
-    }
-    mac_busy.write(rstn.read() && busy);
+    mac_busy.write(rstn.read() && element_mac_busy[0][0].read());
   }
 
   void drive_mac_ready() {
-    mac_ready.write(rstn.read() && window_idle_state.read());
+    mac_ready.write(rstn.read() && element_mac_ready[0][0].read());
   }
 };

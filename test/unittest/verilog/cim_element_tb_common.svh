@@ -31,6 +31,7 @@ logic [BITS_SET-1:0]        mset;
 logic [C_WIDTH-1:0]         c [N];
 logic                       c_retire;
 logic                       mac_ready;
+logic                       mac_busy;
 
 logic [B_WIDTH-1:0] model_b [B_SETS][K][N];
 logic [C_WIDTH-1:0] expected [NUM_ITERS][N];
@@ -65,7 +66,8 @@ CIMIntElement #(
     .mset(mset),
     .c(c),
     .c_retire(c_retire),
-    .mac_ready(mac_ready)
+    .mac_ready(mac_ready),
+    .mac_busy(mac_busy)
 );
 
 // Start VCD dumping when the runner supplies a waveform path
@@ -226,6 +228,9 @@ task automatic apply_reset;
     if (mac_ready !== 1'b0) begin
       $fatal(1, "%s: mac_ready must be low during reset", CASE_NAME);
     end
+    if (mac_busy !== 1'b0) begin
+      $fatal(1, "%s: mac_busy must be low during reset", CASE_NAME);
+    end
     if (c_retire !== 1'b0) begin
       $fatal(1, "%s: c_retire must be low during reset", CASE_NAME);
     end
@@ -234,6 +239,9 @@ task automatic apply_reset;
     #1;
     if (mac_ready !== 1'b1) begin
       $fatal(1, "%s: mac_ready must be high after reset release", CASE_NAME);
+    end
+    if (mac_busy !== 1'b0) begin
+      $fatal(1, "%s: mac_busy must be low after reset release", CASE_NAME);
     end
     if (c_retire !== 1'b0) begin
       $fatal(1, "%s: c_retire must stay low after reset release", CASE_NAME);
@@ -312,15 +320,20 @@ task automatic start_element_op(input int slot, input int set_idx);
     record_expected(slot, set_idx);
 
     mac_issue = 1'b1;
+    #1;
+    if (mac_busy !== 1'b1) begin
+      $fatal(1, "%s: mac_busy must cover the issue edge for op %0d", CASE_NAME, slot);
+    end
     tick_mclk();
     mac_issue = 1'b0;
+    #1;
   end
 endtask
 
-// Optionally assert ignored mac_issue noise while the element is not ready
+// Optionally assert ignored mac_issue noise during current operand use
 task automatic drive_dropped_issue_noise;
   begin
-    if (EXPECT_DROPPED_ISSUE && (mac_ready === 1'b0)) begin
+    if (EXPECT_DROPPED_ISSUE && (mac_busy === 1'b1)) begin
       mac_issue = 1'b1;
       dropped_issue_attempts++;
     end else begin
@@ -341,6 +354,7 @@ task automatic wait_for_retire_and_check(input int slot);
       drive_dropped_issue_noise();
       tick_mclk();
       mac_issue = 1'b0;
+      #1;
       wait_cycles++;
     end
     for (int n = 0; n < N; n++) begin
@@ -352,6 +366,9 @@ task automatic wait_for_retire_and_check(input int slot);
     end
     if (mac_ready !== 1'b1) begin
       $fatal(1, "%s: mac_ready must be high once op %0d has retired", CASE_NAME, slot);
+    end
+    if (mac_busy !== 1'b0) begin
+      $fatal(1, "%s: mac_busy must be low once op %0d has retired", CASE_NAME, slot);
     end
   end
 endtask
@@ -404,20 +421,17 @@ task automatic run_pipelined_ops;
   int unsigned issued;
   int unsigned retired;
   int unsigned wait_cycles;
+  bit issue_pending;
+  bit capture_next;
   begin
     issued = 0;
     retired = 0;
     wait_cycles = 0;
+    issue_pending = 1'b0;
     while (retired < NUM_ITERS) begin
-      if ((issued < NUM_ITERS) && (mac_ready === 1'b1)) begin
-        randomize_a();
-        mset = BITS_SET'(issued % B_SETS);
-        record_expected(issued, issued % B_SETS);
-        mac_issue = 1'b1;
-        issued++;
-      end else begin
-        mac_issue = 1'b0;
-      end
+      mac_issue = issue_pending;
+      #1;
+      capture_next = (issued < NUM_ITERS) && (mac_ready === 1'b1);
       tick_mclk();
       mac_issue = 1'b0;
 
@@ -431,6 +445,16 @@ task automatic run_pipelined_ops;
         end
         retired++;
         wait_cycles = 0;
+      end
+
+      if (capture_next) begin
+        randomize_a();
+        mset = BITS_SET'(issued % B_SETS);
+        record_expected(issued, issued % B_SETS);
+        issued++;
+        issue_pending = 1'b1;
+      end else begin
+        issue_pending = 1'b0;
       end
 
       wait_cycles++;
@@ -473,6 +497,9 @@ task automatic reset_during_active_op;
     if (mac_ready !== 1'b0) begin
       $fatal(1, "%s: mac_ready must be low while reset interrupts an op", CASE_NAME);
     end
+    if (mac_busy !== 1'b0) begin
+      $fatal(1, "%s: mac_busy must be low while reset interrupts an op", CASE_NAME);
+    end
     if (c_retire !== 1'b0) begin
       $fatal(1, "%s: c_retire must clear when reset interrupts an op", CASE_NAME);
     end
@@ -481,6 +508,9 @@ task automatic reset_during_active_op;
     #1;
     if (mac_ready !== 1'b1) begin
       $fatal(1, "%s: mac_ready did not recover after reset-mid-op", CASE_NAME);
+    end
+    if (mac_busy !== 1'b0) begin
+      $fatal(1, "%s: mac_busy did not clear after reset-mid-op", CASE_NAME);
     end
     if (c_retire !== 1'b0) begin
       $fatal(1, "%s: stale c_retire appeared after reset-mid-op", CASE_NAME);

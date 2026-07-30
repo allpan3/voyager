@@ -64,7 +64,7 @@ module CIMIntElement #(
     input  logic                       rstn,
 
     // Logical A operand is one temporal row with K values. a and mset must remain
-    // stable from an accepted issue until mac_ready returns high (the issue window)
+    // stable while mac_busy is high
     input  logic [A_WIDTH-1:0]         a [K],
 
     // One B write provides BK consecutive rows for all N columns
@@ -73,14 +73,15 @@ module CIMIntElement #(
     input  logic [BITS_K-1:0]          wchi,
     input  logic [BITS_SET-1:0]        wset,
 
-    // mac_issue pulses to begin a MAC when mac_ready is high; issues while not
-    // ready are ignored so the reservation must be made by the producer
+    // mac_issue high on an eligible edge starts one MAC. A request committed
+    // when mac_ready is high reaches this port on the following edge
     input  logic                       mac_issue,
     input  logic [BITS_SET-1:0]        mset,
 
     output logic [C_WIDTH-1:0]         c [N],  // registered result, stable until the next retire
     output logic                       c_retire,   // one-cycle pulse per retired result, aligned with c
-    output logic                       mac_ready   // high when an issue presented this cycle is accepted
+    output logic                       mac_ready,  // high when upstream may commit a request on the next edge
+    output logic                       mac_busy    // high while the current MAC consumes A and B
 );
 
   // CIM element walks operand A slice by slice. The width of a slice depends on the selected macro wrapper mode:
@@ -94,6 +95,7 @@ module CIMIntElement #(
   // Slice Walking
   // ---------------------------------------------------------------------------
 
+  logic issue_ready_now;
   logic start_mac;
   // The final A slice result reaches the accumulator on the retire edge
   logic retire_op;
@@ -134,8 +136,8 @@ module CIMIntElement #(
   logic issue_window_open;
   assign issue_window_open = slice_walk_active &&
     !(issued_all_slices && (slice_cycle == BITS_SLICE_LAUNCH_INTERVAL'(SLICE_LAUNCH_INTERVAL)));
-  assign mac_ready = rstn && !issue_window_open;
-  assign start_mac = mac_issue && mac_ready;
+  assign issue_ready_now = rstn && !issue_window_open;
+  assign start_mac = mac_issue && issue_ready_now;
 
   // issue_slice marks the first cycle of a slice
   logic issue_slice;
@@ -152,12 +154,26 @@ module CIMIntElement #(
     end
   end
 
+  // The final use cycle lets upstream commit the next request one edge early
+  logic final_operand_use;
+  assign final_operand_use =
+    ((SLICE_LAUNCH_INTERVAL == 1) && issue_slice &&
+     (issue_a_slice_idx == BITS_SLICE'(NUM_SLICES - 1))) ||
+    (slice_walk_active && issued_all_slices &&
+     (slice_cycle ==
+      BITS_SLICE_LAUNCH_INTERVAL'(SLICE_LAUNCH_INTERVAL - 1)));
+  assign mac_ready = rstn &&
+    (final_operand_use || (issue_ready_now && !start_mac));
+  assign mac_busy = rstn && (issue_window_open || start_mac);
+
   always_ff @(posedge mclk or negedge rstn) begin
     if (!rstn) begin
       slice_cycle <= '0;
     end else if (issue_slice) begin
       slice_cycle <= BITS_SLICE_LAUNCH_INTERVAL'(1);
-    end else if (slice_walk_active && (slice_cycle < BITS_SLICE_LAUNCH_INTERVAL'(SLICE_LAUNCH_INTERVAL))) begin
+    end else if (slice_walk_active &&
+                 (slice_cycle <
+                  BITS_SLICE_LAUNCH_INTERVAL'(SLICE_LAUNCH_INTERVAL))) begin
       slice_cycle <= slice_cycle + BITS_SLICE_LAUNCH_INTERVAL'(1);
     end
   end
@@ -531,7 +547,8 @@ module CIMIntElementPacked #(
 
     output logic [C_BUS_WIDTH-1:0]       c_bus,
     output logic                         c_retire,
-    output logic                         mac_ready
+    output logic                         mac_ready,
+    output logic                         mac_busy
 );
 
   logic [A_WIDTH-1:0] a [K];
@@ -581,7 +598,8 @@ module CIMIntElementPacked #(
       .mset(mset),
       .c(c),
       .c_retire(c_retire),
-      .mac_ready(mac_ready)
+      .mac_ready(mac_ready),
+      .mac_busy(mac_busy)
   );
 
 endmodule

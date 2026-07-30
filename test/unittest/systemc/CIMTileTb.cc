@@ -22,7 +22,7 @@ struct CIMTileTb : sc_module {
   static constexpr int WRITE_CH_IN = 2;
   static constexpr int MAC_LATENCY = 2;
   static constexpr int MODE = 0;
-  static constexpr int A_WIDTH = 4;
+  static constexpr int A_WIDTH = 8;
   static constexpr int B_WIDTH = 4;
   static constexpr bool IS_SIGNED = false;
   static constexpr int INPUT_AXIS_ELEMENTS = 2;
@@ -63,6 +63,7 @@ struct CIMTileTb : sc_module {
 
   std::deque<ExpectedResult> expected_results;
   int cycle;
+  int last_issue_cycle;
   int last_retire_cycle;
   int retirements;
 
@@ -74,6 +75,7 @@ struct CIMTileTb : sc_module {
         dut("dut"),
         clk("clk", 10, SC_NS),
         cycle(0),
+        last_issue_cycle(-1),
         last_retire_cycle(-1),
         retirements(0) {
     dut.wclk(clk);
@@ -155,13 +157,15 @@ struct CIMTileTb : sc_module {
     const CData c_data = c.read();
     for (int n = 0; n < Dut::N; n++) {
       std::ostringstream context;
-      context << "result " << retirements << " C channel " << n;
+      context << "result " << retirements << " C channel " << n
+              << " got " << c_data[n].to_int64() << " expected "
+              << expected.value[n];
       require(c_data[n].to_int64() == expected.value[n], context.str());
     }
 
     if (last_retire_cycle >= 0) {
-      require(cycle == last_retire_cycle + 1,
-              "back-to-back issues did not retire on consecutive cycles");
+      require(cycle == last_retire_cycle + Dut::issue_window(),
+              "retirement spacing did not match the element issue window");
     }
     last_retire_cycle = cycle;
     retirements++;
@@ -196,8 +200,14 @@ struct CIMTileTb : sc_module {
   // Reset the tile while preserving its resetless B storage
   void apply_reset() {
     rstn.write(false);
+    settle();
+    require(!mac_ready.read(), "mac_ready stayed high during reset");
+    require(!mac_busy.read(), "mac_busy stayed high during reset");
     tick();
     rstn.write(true);
+    settle();
+    require(mac_ready.read(), "mac_ready stayed low after reset release");
+    require(!mac_busy.read(), "mac_busy stayed high after reset release");
     tick();
   }
 
@@ -222,10 +232,23 @@ struct CIMTileTb : sc_module {
     tick();
   }
 
-  // Issue distinct A vectors on consecutive clock edges
-  void issue_back_to_back() {
+  // Issue distinct A vectors at the element-advertised cadence
+  void issue_at_ready_cadence() {
     for (int operation = 0; operation < OPERATIONS; operation++) {
+      while (!mac_ready.read()) {
+        mac_issue.write(false);
+        tick();
+      }
+
       require(mac_ready.read(), "tile was not ready for a consecutive issue");
+      if (operation > 0) {
+        require(mac_busy.read(),
+                "mac_ready did not overlap the final busy cycle");
+        require(cycle + 1 ==
+                    last_issue_cycle + Dut::issue_window(),
+                "tile issue spacing did not match the element window");
+      }
+
       AData a_data;
       for (int k = 0; k < Dut::K; k++) {
         a_data[k] = a_value(operation, k);
@@ -235,8 +258,10 @@ struct CIMTileTb : sc_module {
       mac_issue.write(true);
       expected_results.push_back(expected_result(operation));
       tick();
+      last_issue_cycle = cycle;
+      mac_issue.write(false);
+      settle();
     }
-    mac_issue.write(false);
   }
 
   // Run the tile timing and data test
@@ -244,9 +269,9 @@ struct CIMTileTb : sc_module {
     initialize_ports();
     apply_reset();
     load_b_sets();
-    issue_back_to_back();
+    issue_at_ready_cadence();
 
-    for (int drain_cycle = 0; drain_cycle < 20 && !expected_results.empty();
+    for (int drain_cycle = 0; drain_cycle < 64 && !expected_results.empty();
          drain_cycle++) {
       tick();
     }
@@ -258,12 +283,12 @@ struct CIMTileTb : sc_module {
   }
 };
 
-// Elaborate the aggregate tile case
+// Elaborate a multi-cycle tile case
 int sc_main(int argc, char** argv) {
   (void)argc;
   (void)argv;
 
-  CIMTileTb tile_ii1("tile_ii1");
+  CIMTileTb tile_multicycle("tile_multicycle");
   sc_start();
   return 0;
 }
