@@ -10,10 +10,22 @@ never contribute cycles, utilization, comparisons, or stall measurements.
 """
 
 import csv
+import os
 import sys
 from collections import OrderedDict
+from pathlib import Path
+
+# Recover the declared Conda Python when vendor tools shadow python3 in PATH
+try:
+    import openpyxl
+except ModuleNotFoundError:
+    conda_python = Path(os.environ.get("CONDA_PREFIX", "")) / "bin" / "python"
+    if conda_python.is_file() and conda_python.resolve() != Path(sys.executable).resolve():
+        os.execv(str(conda_python), [str(conda_python), str(Path(__file__).resolve()), *sys.argv[1:]])
+    raise
 
 from openpyxl import Workbook
+from openpyxl.formatting.rule import ColorScaleRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table, TableStyleInfo
@@ -36,7 +48,6 @@ WHITE = "FFFFFF"
 GRID = "D0D5DD"
 
 TITLE = Font(name=FONT, bold=True, size=15, color=WHITE)
-SECTION = Font(name=FONT, bold=True, size=11, color=WHITE)
 HEADER = Font(name=FONT, bold=True, size=10, color=WHITE)
 BODY = Font(name=FONT, size=10)
 BODY_BOLD = Font(name=FONT, bold=True, size=10)
@@ -173,13 +184,19 @@ def port_label(row):
     return f"{ic}-bit" if ic == oc else f"{ic}/{oc}-bit"
 
 
-# Return a complete instance label with CIM latency only where applicable
+# Return a complete instance label with explicit CIM macro geometry
 def instance_label(row):
     base = f"{'CIM' if row['backend'] == 'cim' else 'SA'} {row['geometry']} | {port_label(row)} ports"
     if row["backend"] == "cim":
         mode = row.get("cim_mode") or "bit-parallel"
         sets = row.get("cim_b_sets") or "2"
-        base += f" | {mode} | {sets} sets | MAC latency {row.get('cim_mac_latency') or '1'}"
+        native_width = row.get("cim_macro_native_width") or "unknown"
+        ch_in = row.get("cim_ch_in") or "?"
+        ch_out = row.get("cim_ch_out") or "?"
+        base += (
+            f" | native {native_width} | ci{ch_in}/co{ch_out} | {mode} | {sets} sets"
+            f" | MAC latency {row.get('cim_mac_latency') or '1'}"
+        )
     return base
 
 
@@ -289,20 +306,13 @@ points.sort(
         integer(point["row"].get("cim_mac_latency")) or 0,
     )
 )
-point_by_key = {point["key"]: point for point in points}
 reportable_points = [point for point in points if point["reportable"]]
 sa_points = [point for point in points if point["row"]["backend"] == "systolic"]
-cim_points = [point for point in points if point["row"]["backend"] == "cim"]
 
 if not sa_points:
     sys.exit("no systolic design point found")
 
 baseline_sa = min(sa_points, key=lambda point: macs(point["row"]))
-baseline_geometry = baseline_sa["row"]["geometry"]
-baseline_ports = (
-    baseline_sa["row"]["ic_port_width_bits"],
-    baseline_sa["row"]["oc_port_width_bits"],
-)
 
 
 # Locate one point by backend, geometry, ports, and optional CIM latency
@@ -319,135 +329,155 @@ def find_point(backend, geometry, ports, latency=None):
     return None
 
 
-comparisons = []
-seen_comparisons = set()
-
-
-# Add one explicit comparison without duplicating it
-def add_comparison(kind, sa, cim):
-    if not sa or not cim:
-        return
-    key = (kind, sa["key"], cim["key"])
-    if key in seen_comparisons:
-        return
-    seen_comparisons.add(key)
-    comparisons.append({"kind": kind, "sa": sa, "cim": cim})
-
-
-for sa in sa_points:
-    row = sa["row"]
-    for cim in cim_points:
-        cim_row = cim["row"]
-        if cim_row["geometry"] != row["geometry"]:
-            continue
-        if (cim_row["ic_port_width_bits"], cim_row["oc_port_width_bits"]) != (
-            row["ic_port_width_bits"],
-            row["oc_port_width_bits"],
-        ):
-            continue
-        add_comparison("Same array size and port width", sa, cim)
-
-for cim in cim_points:
-    row = cim["row"]
-    if row["geometry"] == baseline_geometry:
-        continue
-    if (row["ic_port_width_bits"], row["oc_port_width_bits"]) == baseline_ports:
-        kind = "SA baseline vs larger CIM, baseline-matched ports"
-    else:
-        kind = "SA baseline vs larger CIM, CIM-dimension-matched ports"
-    add_comparison(kind, baseline_sa, cim)
+# Select the closest available SA reference without hiding unmatched CIM points
+def reference_sa(point):
+    row = point["row"]
+    if row["backend"] == "systolic":
+        return point
+    ports = (row["ic_port_width_bits"], row["oc_port_width_bits"])
+    return find_point("systolic", row["geometry"], ports) or baseline_sa
 
 wb = Workbook()
 wb.remove(wb.active)
 
-# -------------------------------------------------------------- Comparisons
+# -------------------------------------------------------- Comparison Matrix
 ws = wb.create_sheet("Comparisons")
-style_title(ws, "CIM vs systolic — per-layer RTL comparison", 11)
+config_headers = [
+    "Config",
+    "Backend",
+    "Array",
+    "Input port bits",
+    "Output port bits",
+    "Native width",
+    "CIM mode",
+    "Sets",
+    "CH_IN",
+    "CH_OUT",
+    "MAC latency",
+    "SA reference",
+]
+metric_headers = []
+for _ in layers:
+    metric_headers.extend(["RTL cycles", "Speedup vs SA", "Utilization"])
+comparison_headers = config_headers + metric_headers
+comparison_last_column = len(comparison_headers)
+
+style_title(
+    ws,
+    "Workload comparison matrix — one row per hardware point",
+    comparison_last_column,
+)
 ws["A2"] = (
-    "Every row is one layer. No cycles are added across layers. "
-    "Speedup is SA RTL cycles divided by CIM RTL cycles."
+    "Filter the configuration columns to compare SA and CIM implementations directly. "
+    "Each workload block shows RTL cycles, speedup against the closest available SA reference, and utilization; "
+    "lower cycles and speedup above 1.00x are better."
 )
 ws["A2"].font = Font(name=FONT, italic=True, color=GRAY)
-ws.merge_cells("A2:K2")
+ws.merge_cells(
+    start_row=2,
+    start_column=1,
+    end_row=2,
+    end_column=comparison_last_column,
+)
 
-comparison_headers = [
-    "Comparison",
-    "Comparison type",
-    "Layer",
-    "SA instance",
-    "CIM instance",
-    "SA RTL cycles",
-    "CIM RTL cycles",
-    "CIM speedup",
-    "SA MatrixUnit utilization",
-    "CIM MatrixUnit utilization",
-    "Utilization delta",
-]
+ws.merge_cells(
+    start_row=4,
+    start_column=1,
+    end_row=4,
+    end_column=len(config_headers),
+)
+ws.cell(4, 1, "Configuration")
+metric_column = len(config_headers) + 1
+for layer in layers:
+    ws.merge_cells(
+        start_row=4,
+        start_column=metric_column,
+        end_row=4,
+        end_column=metric_column + 2,
+    )
+    ws.cell(4, metric_column, LAYER_SHORT.get(layer, layer))
+    metric_column += 3
+style_header(ws, 4, 1, comparison_last_column)
+
 for column, heading in enumerate(comparison_headers, 1):
-    ws.cell(4, column, heading)
-style_header(ws, 4, 1, len(comparison_headers))
+    ws.cell(5, column, heading)
+style_header(ws, 5, 1, comparison_last_column)
 
-comparison_start = 5
+comparison_start = 6
 comparison_row = comparison_start
 result_row_map = {}
-pending_comparison_formulas = []
-unavailable = []
-for comparison in comparisons:
-    sa = comparison["sa"]
-    cim = comparison["cim"]
-    label = f"{instance_label(sa['row'])} vs {instance_label(cim['row'])}"
-    if not sa["reportable"] or not cim["reportable"]:
-        unavailable.append((label, "FAILED"))
-        continue
-    for layer in layers:
-        ws.cell(comparison_row, 1, label)
-        ws.cell(comparison_row, 2, comparison["kind"])
-        ws.cell(comparison_row, 3, LAYER_SHORT.get(layer, layer))
-        ws.cell(comparison_row, 4, instance_label(sa["row"]))
-        ws.cell(comparison_row, 5, instance_label(cim["row"]))
-        pending_comparison_formulas.append(
-            (comparison_row, sa["key"], cim["key"], layer)
+pending_matrix_formulas = []
+matrix_points = sorted(
+    reportable_points,
+    key=lambda point: (
+        point["row"]["backend"] != "systolic",
+        macs(point["row"]),
+        integer(point["row"]["ic_port_width_bits"]) or 0,
+        int((point["row"].get("cim_macro_native_width") or "0b").rstrip("b")),
+        point["row"].get("cim_mode") or "",
+        integer(point["row"].get("cim_b_sets")) or 0,
+        integer(point["row"].get("cim_ch_in")) or 0,
+        integer(point["row"].get("cim_ch_out")) or 0,
+    ),
+)
+for point in matrix_points:
+    row = point["row"]
+    reference = reference_sa(point)
+    values = [
+        row["config"],
+        "CIM" if row["backend"] == "cim" else "SA",
+        row["geometry"],
+        integer(row["ic_port_width_bits"]),
+        integer(row["oc_port_width_bits"]),
+        int((row.get("cim_macro_native_width") or "0b").rstrip("b"))
+        if row["backend"] == "cim"
+        else None,
+        row.get("cim_mode") if row["backend"] == "cim" else None,
+        integer(row.get("cim_b_sets")) if row["backend"] == "cim" else None,
+        integer(row.get("cim_ch_in")) if row["backend"] == "cim" else None,
+        integer(row.get("cim_ch_out")) if row["backend"] == "cim" else None,
+        integer(row.get("cim_mac_latency"))
+        if row["backend"] == "cim"
+        else None,
+        instance_label(reference["row"]),
+    ]
+    for column, value in enumerate(values, 1):
+        ws.cell(comparison_row, column, value)
+    fill = CIM_GREEN if row["backend"] == "cim" else SA_BLUE
+    style_body_row(ws, comparison_row, 1, comparison_last_column, fill)
+    for layer_index, layer in enumerate(layers):
+        first_metric_column = len(config_headers) + 1 + layer_index * 3
+        pending_matrix_formulas.append(
+            (
+                comparison_row,
+                point["key"],
+                reference["key"],
+                layer,
+                first_metric_column,
+            )
         )
-        style_body_row(ws, comparison_row, 1, len(comparison_headers), SA_BLUE)
-        comparison_row += 1
+    comparison_row += 1
 
 comparison_last = comparison_row - 1
-add_table(
-    ws,
-    "PerLayerComparisons",
-    4,
-    comparison_last,
-    1,
-    len(comparison_headers),
+ws.auto_filter.ref = (
+    f"A5:{get_column_letter(comparison_last_column)}{comparison_last}"
 )
-ws.freeze_panes = "F5"
-set_widths(ws, [46, 38, 29, 38, 43, 14, 15, 13, 18, 19, 16])
-
-if unavailable:
-    failed_title_row = comparison_row + 2
-    ws.cell(failed_title_row, 1, "Unavailable comparisons")
-    ws.cell(failed_title_row, 1).font = SECTION
-    ws.cell(failed_title_row, 1).fill = PatternFill("solid", fgColor=NAVY)
-    ws.merge_cells(
-        start_row=failed_title_row,
-        start_column=1,
-        end_row=failed_title_row,
-        end_column=2,
-    )
-    for index, (label, status) in enumerate(unavailable, failed_title_row + 1):
-        ws.cell(index, 1, label)
-        ws.cell(index, 2, status)
-        ws.cell(index, 2).fill = PatternFill("solid", fgColor=FAIL_RED)
+ws.freeze_panes = "M6"
+set_widths(
+    ws,
+    [31, 9, 10, 14, 15, 13, 13, 8, 9, 9, 12, 34]
+    + [14, 17, 14] * len(layers),
+)
 
 # --------------------------------------------------------- Per-Layer Results
 ws = wb.create_sheet("Per-Layer Results")
-style_title(ws, "Passing RTL results — one row per instance and layer", 12)
+style_title(ws, "Passing RTL results — one row per instance and layer", 15)
 ws["A2"] = (
-    "MatrixUnit utilization = ideal MAC cycles / MatrixUnit start-to-done cycles. "
+    "MatrixUnit utilization = ideal logical MAC cycles / MatrixUnit start-to-done cycles. "
     "Failed hardware points are excluded and appear only in Design Points."
 )
 ws["A2"].font = Font(name=FONT, italic=True, color=GRAY)
-ws.merge_cells("A2:L2")
+ws.merge_cells("A2:O2")
 result_headers = [
     "Instance",
     "Config",
@@ -459,7 +489,10 @@ result_headers = [
     "Layer",
     "RTL cycles",
     "MatrixUnit cycles",
-    "Ideal MAC cycles",
+    "Raw array-slot ideal cycles",
+    "Logical A width",
+    "Logical MAC issue cycles",
+    "Ideal logical MAC cycles",
     "MatrixUnit utilization",
 ]
 for column, heading in enumerate(result_headers, 1):
@@ -483,14 +516,18 @@ for point in reportable_points:
             LAYER_SHORT.get(layer, layer),
             integer(rtl["runtime_cycles"]),
             integer(rtl["matrix_unit_cycles"]),
+            integer(rtl["raw_ideal_cycles"]),
+            integer(rtl["logical_a_width_bits"]),
+            integer(rtl["logical_mac_issue_cycles"]),
             integer(rtl["ideal_cycles"]),
         ]
         for column, value in enumerate(values, 1):
             ws.cell(result_row, column, value)
-        ws.cell(result_row, 12, f"=IFERROR(K{result_row}/J{result_row},\"\")")
-        ws.cell(result_row, 12).number_format = "0.0%"
-        for column in range(5, 12):
+        ws.cell(result_row, 15, f"=IFERROR(N{result_row}/J{result_row},\"\")")
+        ws.cell(result_row, 15).number_format = "0.0%"
+        for column in range(5, 15):
             ws.cell(result_row, column).number_format = "#,##0"
+        ws.cell(result_row, 13).number_format = "0x"
         style_body_row(ws, result_row, 1, len(result_headers), fill)
         result_row_map[(point["key"], layer)] = result_row
         result_row += 1
@@ -503,22 +540,64 @@ add_table(
     len(result_headers),
 )
 ws.freeze_panes = "I5"
-set_widths(ws, [43, 31, 11, 11, 14, 15, 16, 29, 12, 19, 16, 18])
+set_widths(ws, [43, 31, 11, 11, 14, 15, 16, 29, 12, 19, 20, 15, 23, 23, 18])
 
-# Link comparison formulas to the auditable per-layer results
+# Link matrix formulas to the auditable per-layer results
 comparison_ws = wb["Comparisons"]
-for row, sa_key, cim_key, layer in pending_comparison_formulas:
-    sa_result_row = result_row_map[(sa_key, layer)]
-    cim_result_row = result_row_map[(cim_key, layer)]
-    comparison_ws.cell(row, 6, f"='Per-Layer Results'!I{sa_result_row}")
-    comparison_ws.cell(row, 7, f"='Per-Layer Results'!I{cim_result_row}")
-    comparison_ws.cell(row, 8, f'=IFERROR(F{row}/G{row},"")')
-    comparison_ws.cell(row, 9, f"='Per-Layer Results'!L{sa_result_row}")
-    comparison_ws.cell(row, 10, f"='Per-Layer Results'!L{cim_result_row}")
-    comparison_ws.cell(row, 11, f'=IFERROR(J{row}-I{row},"")')
-    comparison_ws.cell(row, 8).number_format = "0.00x"
-    for column in (9, 10, 11):
-        comparison_ws.cell(row, column).number_format = "0.0%"
+for row, point_key_value, reference_key, layer, first_column in pending_matrix_formulas:
+    point_result_row = result_row_map[(point_key_value, layer)]
+    reference_result_row = result_row_map[(reference_key, layer)]
+    cycle_column = get_column_letter(first_column)
+    comparison_ws.cell(
+        row,
+        first_column,
+        f"='Per-Layer Results'!I{point_result_row}",
+    )
+    comparison_ws.cell(
+        row,
+        first_column + 1,
+        f'=IFERROR(\'Per-Layer Results\'!I{reference_result_row}/{cycle_column}{row},"")',
+    )
+    comparison_ws.cell(
+        row,
+        first_column + 2,
+        f"='Per-Layer Results'!O{point_result_row}",
+    )
+    comparison_ws.cell(row, first_column).number_format = "#,##0"
+    comparison_ws.cell(row, first_column + 1).number_format = "0.00x"
+    comparison_ws.cell(row, first_column + 2).number_format = "0.0%"
+
+for layer_index, _ in enumerate(layers):
+    first_column = len(config_headers) + 1 + layer_index * 3
+    cycle_letter = get_column_letter(first_column)
+    speedup_letter = get_column_letter(first_column + 1)
+    cycle_range = (
+        f"{cycle_letter}{comparison_start}:{cycle_letter}{comparison_last}"
+    )
+    speedup_range = (
+        f"{speedup_letter}{comparison_start}:{speedup_letter}{comparison_last}"
+    )
+    comparison_ws.conditional_formatting.add(
+        cycle_range,
+        ColorScaleRule(
+            start_type="min",
+            start_color=PASS_GREEN,
+            end_type="max",
+            end_color=FAIL_RED,
+        ),
+    )
+    comparison_ws.conditional_formatting.add(
+        speedup_range,
+        ColorScaleRule(
+            start_type="min",
+            start_color=FAIL_RED,
+            mid_type="num",
+            mid_value=1,
+            mid_color="FFF2CC",
+            end_type="max",
+            end_color=PASS_GREEN,
+        ),
+    )
 
 # ------------------------------------------------------------- Stall Analysis
 ws = wb.create_sheet("Stall Analysis")
@@ -579,6 +658,7 @@ design_headers = [
     "Instance",
     "Config",
     "Backend",
+    "Datatype",
     "Array",
     "Input port bits",
     "Output port bits",
@@ -610,6 +690,7 @@ for point in points:
         instance_label(row),
         row["config"],
         row["backend"],
+        row.get("datatype") or None,
         row["geometry"],
         integer(row["ic_port_width_bits"]),
         integer(row["oc_port_width_bits"]),
@@ -628,10 +709,10 @@ for point in points:
         ws.cell(design_row, column, value)
     fill = SA_BLUE if row["backend"] == "systolic" else CIM_GREEN
     style_body_row(ws, design_row, 1, len(design_headers), fill)
-    ws.cell(design_row, 14).fill = PatternFill(
+    ws.cell(design_row, 15).fill = PatternFill(
         "solid", fgColor=PASS_GREEN if point["reportable"] else FAIL_RED
     )
-    ws.cell(design_row, 14).font = BODY_BOLD
+    ws.cell(design_row, 15).font = BODY_BOLD
     design_row += 1
 add_table(
     ws,
@@ -641,8 +722,8 @@ add_table(
     1,
     len(design_headers),
 )
-ws.freeze_panes = "E5"
-set_widths(ws, [43, 31, 11, 11, 14, 15, 16, 16, 16, 12, 18, 10, 10, 12, 17, 54])
+ws.freeze_panes = "F5"
+set_widths(ws, [43, 31, 11, 12, 11, 14, 15, 16, 16, 16, 12, 18, 10, 10, 12, 17, 54])
 
 # ---------------------------------------------------------------- Definition
 ws = wb.create_sheet("Definition")
@@ -656,14 +737,33 @@ method_rows = [
         "manifest.",
     ),
     (
-        "Ideal MAC cycles",
-        "Total MAC work / array MACs per cycle",
-        "Minimum full-array cycles implied by the layer's MAC count and configured compute resources.",
+        "Raw array-slot ideal cycles",
+        "Logged MAC work / physical array slots",
+        "The simulator's raw total-MACs / array-slots value. It assumes one operation per physical slot per cycle. "
+        "Multiply it by the configured logical-MAC issue interval for narrow or bit-serial CIM macros.",
+    ),
+    (
+        "Logical A width",
+        "Matched input port bits / array K",
+        "The activation operand width is derived from the configured matched port and array geometry, independent of "
+        "the datatype name.",
+    ),
+    (
+        "Logical MAC issue cycles",
+        "Derived from logical A width and CIM base A/B/C widths, CH_IN, and mode",
+        "Bit-parallel uses ceil(logical A width / base A width). Bit-serial uses the exact padded slice-walking "
+        "interval implemented by CIMElement. SA uses one cycle. No datatype names are enumerated.",
+    ),
+    (
+        "Ideal logical MAC cycles",
+        "Raw array-slot ideal cycles * logical MAC issue cycles",
+        "Minimum full-array cycles for the layer's logical MAC work after accounting for the configured CIM issue "
+        "window.",
     ),
     (
         "MatrixUnit utilization",
-        "Ideal MAC cycles / MatrixUnit cycles",
-        "The workbook's utilization metric for matrix operations.",
+        "Ideal logical MAC cycles / MatrixUnit cycles",
+        "The workbook's logical-MAC utilization metric for matrix operations.",
     ),
     (
         "Processor active cycles",
@@ -717,5 +817,5 @@ wb.save(OUT)
 print(
     f"saved {OUT}: {len(wb.sheetnames)} sheets, "
     f"{len(points)} hardware points, {len(reportable_points)} RTL-pass points, "
-    f"{len(comparisons)} comparison views, {len(layers)} layers"
+    f"{len(matrix_points)} comparison rows, {len(layers)} workloads"
 )

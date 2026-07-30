@@ -14,7 +14,6 @@ import csv, os, re, sys
 
 SWEEP_DIR = sys.argv[1]
 OUT = sys.argv[2]
-INT8_BITS = 8
 
 # MatrixPerfHardware counters carried through to the CSV (present in RTL logs)
 PERF_COUNTERS = [
@@ -29,6 +28,30 @@ CIM_STALL_COUNTERS = [
     "cim_set_wait_cycles",
     "cim_completion_queue_stall_cycles",
 ]
+
+
+# Return ceiling division for positive hardware geometry values
+def ceil_div(dividend, divisor):
+    return (dividend + divisor - 1) // divisor
+
+
+# Derive the exact cycles between logical MAC issues from CIM parameters
+def cim_mac_issue_cycles(meta):
+    if meta["backend"] != "cim":
+        return 1
+    logical_a_width = meta["logical_a_width_bits"]
+    base_a_width = meta["base_a_width_bits"]
+    if meta["mode"] == "0":
+        return ceil_div(logical_a_width, base_a_width)
+    guard_width = max(1, (meta["ch_in_value"] - 1).bit_length())
+    serial_max_slice_width = meta["base_c_width_bits"] - meta["base_b_width_bits"] - guard_width
+    if serial_max_slice_width <= 0:
+        raise ValueError(f"{meta['config']} has no legal bit-serial A slice")
+    serial_slice_width = min(logical_a_width, serial_max_slice_width)
+    num_slices = ceil_div(logical_a_width, serial_slice_width)
+    slice_interval = ceil_div(serial_slice_width, base_a_width) * base_a_width
+    return num_slices * slice_interval
+
 
 manifest_path = os.path.join(SWEEP_DIR, "manifest.csv")
 if not os.path.exists(manifest_path):
@@ -46,22 +69,41 @@ for m in csv.DictReader(open(manifest_path)):
     # macro_native_width_bits was called cell_bits before the terminology was
     # settled; read either so older sweep directories still parse.
     native = m.get("macro_native_width_bits") or m.get("cell_bits") or ""
+    ic_matched = m.get("ic_matched_port_bits")
+    oc_matched = m.get("oc_matched_port_bits")
+    if not ic_matched or not oc_matched:
+        sys.exit(f"{m['config']} lacks matched port widths")
+    logical_a_width = int(m.get("logical_a_width_bits") or int(ic_matched) // int(m["K"]))
+    base_a_width = m.get("macro_base_a_width_bits") or native
+    base_b_width = m.get("macro_base_b_width_bits") or native
+    base_c_width = m.get("macro_base_c_width_bits")
+    if is_cim and (not base_a_width or not base_b_width):
+        sys.exit(f"{m['config']} lacks CIM base A/B widths")
+    if is_cim and (m.get("cim_mode") or "0") == "1" and not base_c_width:
+        sys.exit(f"{m['config']} lacks CIM base C width required for bit-serial normalization")
     CFG[m["config"]] = dict(
+        config=m["config"],
         backend="cim" if is_cim else "systolic",
         K=int(m["K"]), N=int(m["N"]),
-        # Width the ports take when left unpinned: one array row/column per
-        # cycle. Older manifests predate the columns, so fall back to INT8.
-        ic_matched=int(m.get("ic_matched_port_bits") or int(m["K"]) * INT8_BITS),
-        oc_matched=int(m.get("oc_matched_port_bits") or int(m["N"]) * INT8_BITS),
+        # One matched port beat carries one logical array row or column
+        ic_matched=int(ic_matched),
+        oc_matched=int(oc_matched),
+        logical_a_width_bits=logical_a_width,
+        base_a_width_bits=int(base_a_width) if is_cim else None,
+        base_b_width_bits=int(base_b_width) if is_cim else None,
+        base_c_width_bits=int(base_c_width) if (is_cim and base_c_width) else None,
         # The array every point is judged against. Absent in older manifests;
         # the workbook falls back to inferring it from the systolic rows.
         baseline_geometry=m.get("baseline_geometry") or "",
+        datatype=m.get("datatype") or "",
         clock_period_ns=float(clock_period),
         native_width=(native + "b") if (is_cim and native) else "",
+        native_width_bits=int(native) if (is_cim and native) else None,
         mac_latency=(m.get("cim_mac_latency") or "1") if is_cim else "",
         mode=(m.get("cim_mode") or "0") if is_cim else "",
         b_sets=(m.get("cim_b_sets") or "2") if is_cim else "",
         ch_in=m["ch_in"], ch_out=m["ch_out"],
+        ch_in_value=int(m["ch_in"]) if is_cim else None,
         input_axis_tiles=m["input_axis_tiles"] or "",
         output_axis_tiles=m["output_axis_tiles"] or "",
         # CIMTile organization: elements per tile along each axis. Manifests
@@ -103,18 +145,28 @@ for fn in sorted(os.listdir(SWEEP_DIR)):
         g = re.search(pat, txt, re.M | re.I)
         return float(g.group(1)) if g else None
 
-    def grab_sum_number(pat):
-        values = re.findall(pat, txt, re.M | re.I)
-        return sum(float(value) for value in values) if values else None
+    def grab_numbers(pat):
+        return [float(value) for value in re.findall(pat, txt, re.M | re.I)]
 
     ok = bool(re.search(r"Error\s+count:\s+0\b", txt))
     number = r"(\d+(?:\.\d+)?)"
     total_ns = grab_number(rf"^Total Runtime:\s+{number}\s*ns")
-    matrix_unit_ns = grab_sum_number(rf"^Matrix Unit Runtime:\s+{number}\s*ns")
-    ideal_cycles_logged = grab_sum_number(
+    matrix_unit_values = grab_numbers(rf"^Matrix Unit Runtime:\s+{number}\s*ns")
+    matrix_unit_ns = sum(matrix_unit_values) if matrix_unit_values else None
+    ideal_cycle_values = grab_numbers(
         r"matrix unit ideal cycles:\s+(\d+)"
     )
-    ideal_ns = grab_sum_number(rf"matrix unit ideal runtime:\s+{number}\s*ns")
+    ideal_runtime_values = grab_numbers(rf"matrix unit ideal runtime:\s+{number}\s*ns")
+    # SCVerify setup may repeat ideal metrics before the measured RTL intervals
+    interval_count = len(matrix_unit_values)
+    ideal_cycles_logged = (
+        sum(ideal_cycle_values[-interval_count:])
+        if interval_count and ideal_cycle_values else None
+    )
+    ideal_ns = (
+        sum(ideal_runtime_values[-interval_count:])
+        if interval_count and ideal_runtime_values else None
+    )
     rd = grab(r"^harness:\s+(\d+)") or 0
     wr = grab(r"^harness_outputs:\s+(\d+)") or 0
     perf = {}
@@ -147,13 +199,15 @@ for fn in sorted(os.listdir(SWEEP_DIR)):
         else None
     )
     if sim == "rtl" and ok:
-        ideal_cyc = (
+        raw_ideal_cyc = (
             ideal_cycles_logged
             if ideal_cycles_logged is not None
             else ideal_ns / clock_ns if ideal_ns is not None else None
         )
     else:
-        ideal_cyc = None
+        raw_ideal_cyc = None
+    mac_issue_cycles = cim_mac_issue_cycles(meta)
+    ideal_cyc = raw_ideal_cyc * mac_issue_cycles if raw_ideal_cyc is not None else None
     # Idealised L2 model: one word/cycle/port. Unpinned runs sit at the matched
     # width (one array row/column per cycle); pinned widths override both.
     ic_pw = pw_ic if pinned else meta["ic_matched"]
@@ -169,6 +223,7 @@ for fn in sorted(os.listdir(SWEEP_DIR)):
         clock_period_ns=clock_ns,
         backend=meta["backend"], geometry=f"{ic}x{oc}", IC=ic, OC=oc, macs=ic * oc,
         baseline_geometry=meta["baseline_geometry"],
+        datatype=meta["datatype"],
         cim_macro_native_width=meta["native_width"],
         cim_mac_latency=meta["mac_latency"],
         cim_mode="bit-serial" if meta["mode"] == "1" else ("bit-parallel" if meta["mode"] == "0" else ""),
@@ -182,6 +237,9 @@ for fn in sorted(os.listdir(SWEEP_DIR)):
         runtime_cycles=round(cyc) if cyc else "",
         runtime_us=round(total_ns / 1000.0, 3) if cyc else "",
         matrix_unit_cycles=round(matrix_unit_cyc) if matrix_unit_cyc else "",
+        raw_ideal_cycles=round(raw_ideal_cyc) if raw_ideal_cyc else "",
+        logical_a_width_bits=meta["logical_a_width_bits"],
+        logical_mac_issue_cycles=mac_issue_cycles if raw_ideal_cyc else "",
         ideal_cycles=round(ideal_cyc) if ideal_cyc else "",
         matrix_utilization=round(ideal_cyc / matrix_unit_cyc, 4)
         if (ideal_cyc and matrix_unit_cyc) else "",
