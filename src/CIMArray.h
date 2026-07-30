@@ -263,7 +263,6 @@ SC_MODULE(CIMArray) {
 
   sc_signal<TileAData> bus_a[INPUT_AXIS_TILES];
   sc_signal<Set> bus_mset;
-  sc_signal<TileAData> held_a[INPUT_AXIS_TILES];
   sc_signal<Set> held_mset;
   sc_signal<bool> mac_issue[OUTPUT_AXIS_TILES];
 
@@ -362,10 +361,6 @@ SC_MODULE(CIMArray) {
     SC_METHOD(drive_mac_issue);
     sensitive << rstn << mac_request_channel.vld << mac_request_channel.dat;
     sensitive << held_mset;
-    for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES;
-         input_axis_idx++) {
-      sensitive << held_a[input_axis_idx];
-    }
     sensitive << completion_allocate_pointer << completion_release_pointer;
     sensitive << completion_release_pending << result_channel.vld
               << result_channel.rdy;
@@ -605,8 +600,8 @@ SC_MODULE(CIMArray) {
     return ready;
   }
 
-  // Drive a newly accepted request, then hold its shared operands until every
-  // tile closes the issue window
+  // Drive a newly accepted request and hold its shared set until every tile
+  // closes the issue window
   void drive_mac_issue() {
     MACRequest request;
     request.mset = 0;
@@ -634,8 +629,7 @@ SC_MODULE(CIMArray) {
 #pragma hls_unroll yes
     for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES;
          input_axis_idx++) {
-      bus_a[input_axis_idx].write(fire ? request.a[input_axis_idx]
-                                       : held_a[input_axis_idx].read());
+      bus_a[input_axis_idx].write(request.a[input_axis_idx]);
     }
 #pragma hls_unroll yes
     for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES;
@@ -651,13 +645,6 @@ SC_MODULE(CIMArray) {
     ResultQueuePointer allocate_pointer = 0;
     completion_allocate_pointer.write(allocate_pointer);
     held_mset.write(0);
-    TileAData zero_a;
-    clear_pack(zero_a);
-#pragma hls_unroll yes
-    for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES;
-         input_axis_idx++) {
-      held_a[input_axis_idx].write(zero_a);
-    }
 #pragma hls_unroll yes
     for (int queue_idx = 0; queue_idx < RESULT_QUEUE_DEPTH; queue_idx++) {
       completion_tokens[queue_idx].write(CompletionToken(0));
@@ -671,11 +658,6 @@ SC_MODULE(CIMArray) {
       if (ConnectionsSignal::fired(mac_request_channel)) {
         const MACRequest request = ConnectionsSignal::peek(mac_request_channel);
         held_mset.write(request.mset);
-#pragma hls_unroll yes
-        for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES;
-             input_axis_idx++) {
-          held_a[input_axis_idx].write(request.a[input_axis_idx]);
-        }
 
 #ifndef __SYNTHESIS__
         if (result_queue_full(allocate_pointer,
