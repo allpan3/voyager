@@ -33,6 +33,10 @@ static constexpr int CIM_MODE_BIT_SERIAL_VALUE = 1;
 #define CIM_TEST_C_WIDTH 20
 #endif
 
+#ifndef CIM_ARRAY_TEST_RESULT_SLOTS_PER_OUTPUT_LANE
+#define CIM_ARRAY_TEST_RESULT_SLOTS_PER_OUTPUT_LANE 2
+#endif
+
 static int g_cases_remaining = 0;
 
 // Return a mask covering the requested bit width
@@ -53,12 +57,13 @@ template <
     // standalone testbench over-provisions from the base width. The array's own
     // static_assert enforces that it holds one reduced result
     int C_WIDTH = BASE_C_WIDTH + 8,
-    typename DutType =
-        CIMArray<CH_IN, CH_OUT, B_SETS, BASE_A_WIDTH, BASE_B_WIDTH,
-                 BASE_C_WIDTH, WRITE_CH_IN, MAC_LATENCY, MODE, A_WIDTH, B_WIDTH,
-                 C_WIDTH, IS_SIGNED, TILE_INPUT_AXIS_ELEMENTS,
-                 TILE_OUTPUT_AXIS_ELEMENTS, INPUT_AXIS_TILES, OUTPUT_AXIS_TILES,
-                 A_PORT_TILES, B_PORT_TILES, C_PORT_TILES, C_BEAT_LAYOUT>>
+    int RESULT_SLOTS_PER_OUTPUT_LANE = INPUT_AXIS_TILES,
+    typename DutType = CIMArray<
+        CH_IN, CH_OUT, B_SETS, BASE_A_WIDTH, BASE_B_WIDTH, BASE_C_WIDTH,
+        WRITE_CH_IN, MAC_LATENCY, MODE, A_WIDTH, B_WIDTH, C_WIDTH, IS_SIGNED,
+        TILE_INPUT_AXIS_ELEMENTS, TILE_OUTPUT_AXIS_ELEMENTS, INPUT_AXIS_TILES,
+        OUTPUT_AXIS_TILES, A_PORT_TILES, B_PORT_TILES, C_PORT_TILES,
+        C_BEAT_LAYOUT, RESULT_SLOTS_PER_OUTPUT_LANE>>
 struct CIMArrayTbCase : sc_module {
   using Dut = DutType;
   using ABeat = typename Dut::ABeat;
@@ -77,7 +82,19 @@ struct CIMArrayTbCase : sc_module {
   Connections::Combinational<MACRequest> mac_request_channel;
   Connections::Combinational<WriteRequest> write_request_channel;
   Connections::Combinational<CBeat> result_channel;
+#if ENABLE_PERF_COUNTERS
+  sc_signal<bool> completion_storage_stall;
+#endif
   unsigned mac_accept_count = 0;
+  unsigned total_mac_accept_count = 0;
+  unsigned result_fire_count = 0;
+  unsigned long total_cycles = 0;
+  unsigned long last_mac_fire_cycle = 0;
+  unsigned long last_result_fire_cycle = 0;
+#if ENABLE_PERF_COUNTERS
+  unsigned long completion_storage_stall_cycles = 0;
+#endif
+  unsigned blocked_mac_accept_start = 0;
 
   ac_int<B_WIDTH, false> expected_b[B_SETS][Dut::K][Dut::N];
 
@@ -99,6 +116,9 @@ struct CIMArrayTbCase : sc_module {
     dut.mac_request_channel(mac_request_channel);
     dut.write_request_channel(write_request_channel);
     dut.result_channel(result_channel);
+#if ENABLE_PERF_COUNTERS
+    dut.completion_storage_stall(completion_storage_stall);
+#endif
 
     clear_expected_state();
 
@@ -143,22 +163,37 @@ struct CIMArrayTbCase : sc_module {
     settle();
   }
 
-  // Count actual array request transfers independently of the simulated source
-  // buffer
+  // Count actual array and result transfers at their DUT-side interfaces
   void observe_mac_acceptance() {
+    total_cycles++;
     if (!rstn.read()) {
       mac_accept_count = 0;
       return;
     }
-#ifdef CONNECTIONS_SIM_ONLY
-    const bool fired = mac_request_channel._VLDNAMEOUT_.read() &&
-                       mac_request_channel._RDYNAMEOUT_.read();
-#else
-    const bool fired = mac_request_channel._VLDNAME_.read() &&
-                       mac_request_channel._RDYNAME_.read();
+#if ENABLE_PERF_COUNTERS
+    if (completion_storage_stall.read()) {
+      completion_storage_stall_cycles++;
+    }
 #endif
-    if (fired) {
+#ifdef CONNECTIONS_SIM_ONLY
+    const bool mac_fired = mac_request_channel._VLDNAMEOUT_.read() &&
+                           mac_request_channel._RDYNAMEOUT_.read();
+    const bool result_fired =
+        result_channel._VLDNAMEIN_.read() && result_channel._RDYNAMEIN_.read();
+#else
+    const bool mac_fired = mac_request_channel._VLDNAME_.read() &&
+                           mac_request_channel._RDYNAME_.read();
+    const bool result_fired =
+        result_channel._VLDNAME_.read() && result_channel._RDYNAME_.read();
+#endif
+    if (mac_fired) {
       mac_accept_count++;
+      total_mac_accept_count++;
+      last_mac_fire_cycle = total_cycles;
+    }
+    if (result_fired) {
+      result_fire_count++;
+      last_result_fire_cycle = total_cycles;
     }
   }
 
@@ -351,10 +386,10 @@ struct CIMArrayTbCase : sc_module {
   void queue_expected_beats(Set mset, bool multicast,
                             int target_output_axis_idx, bool reduce,
                             int phase) {
-    const int selected_output_tiles = multicast ? OUTPUT_AXIS_TILES : 1;
+    const int selected_output_lanes = multicast ? OUTPUT_AXIS_TILES : 1;
     const int logical_results = reduce
-                                    ? selected_output_tiles
-                                    : selected_output_tiles * INPUT_AXIS_TILES;
+                                    ? selected_output_lanes
+                                    : selected_output_lanes * INPUT_AXIS_TILES;
     const int result_beats =
         (logical_results + C_PORT_TILES - 1) / C_PORT_TILES;
     for (int result_beat_idx = 0; result_beat_idx < result_beats;
@@ -421,33 +456,78 @@ struct CIMArrayTbCase : sc_module {
     return request;
   }
 
-  // Drive one targeted MAC request and queue its expected C beats
-  void drive_targeted_mac(Set mset, int output_axis_idx, int phase,
-                          bool reduce = false) {
+  // Buffer one MAC request until completion storage accepts it
+  void arm_blocked_mac_push(const MACRequest& request) {
+    blocked_mac_accept_start = total_mac_accept_count;
+    require(mac_request_channel.PushNB(request),
+            "MAC source buffer was not empty before blocked request");
+    settle();
+  }
+
+  // Return whether the held source request transferred into CIMArray
+  bool blocked_mac_accepted() const {
+    return total_mac_accept_count != blocked_mac_accept_start;
+  }
+
+  // Wait until one result has transferred into the testbench endpoint
+  void wait_for_result_fire(unsigned start_count) {
+    for (int cycle = 0; cycle < 100 && result_fire_count == start_count;
+         cycle++) {
+      tick();
+    }
+    require(result_fire_count == start_count + 1,
+            "timed out waiting for one DUT-side result transfer");
+  }
+
+  // Admit one MAC while independently draining older ready results
+  void push_mac_request(const MACRequest& request) {
     const unsigned accepted_before = mac_accept_count;
-    MACRequest request = build_mac_request(mset, phase);
-    request.output_axis_idx = output_axis_idx;
-    request.reduce = reduce;
-    queue_expected_beats(mset, false, output_axis_idx, reduce, phase);
-    mac_request_channel.Push(request);
+    while (!mac_request_channel.PushNB(request)) {
+      CBeat actual;
+      if (result_channel.PopNB(actual)) {
+        check_beat(actual);
+      }
+      tick();
+    }
     settle();
     while (mac_accept_count == accepted_before) {
+      CBeat actual;
+      if (result_channel.PopNB(actual)) {
+        check_beat(actual);
+      }
       tick();
     }
   }
 
+  // Drive one targeted MAC request and queue its expected C beats
+  void drive_targeted_mac(Set mset, int output_axis_idx, int phase,
+                          bool reduce = false) {
+    MACRequest request = build_mac_request(mset, phase);
+    request.output_axis_idx = output_axis_idx;
+    request.reduce = reduce;
+    queue_expected_beats(mset, false, output_axis_idx, reduce, phase);
+    push_mac_request(request);
+  }
+
   // Drive one multicast MAC request and queue its expected C beats
   void drive_multicast_mac(Set mset, int phase, bool reduce = false) {
-    const unsigned accepted_before = mac_accept_count;
     MACRequest request = build_mac_request(mset, phase);
     request.multicast = 1;
     request.reduce = reduce;
     queue_expected_beats(mset, true, 0, reduce, phase);
+    push_mac_request(request);
+  }
+
+  // Admit one MAC while deliberately holding all older output beats
+  void drive_held_mac(Set mset, int output_axis_idx, bool multicast,
+                      bool reduce, int phase) {
+    MACRequest request = build_mac_request(mset, phase);
+    request.output_axis_idx = output_axis_idx;
+    request.multicast = multicast;
+    request.reduce = reduce;
+    queue_expected_beats(mset, multicast, output_axis_idx, reduce, phase);
     mac_request_channel.Push(request);
     settle();
-    while (mac_accept_count == accepted_before) {
-      tick();
-    }
   }
 
   // Compare one received C beat against the oldest expected beat
@@ -577,17 +657,278 @@ struct CIMArrayTbCase : sc_module {
     drain_expected_beats();
   }
 
-  // Check that ready output removes every queue-induced stall from the native
-  // tile issue interval
+  // Diverge output-lane cursors before reduced and raw multicasts join them
+  void run_mixed_completion_cursor_check() {
+    if constexpr (INPUT_AXIS_TILES != 2 || OUTPUT_AXIS_TILES < 3 ||
+                  RESULT_SLOTS_PER_OUTPUT_LANE < 6) {
+      return;
+    } else {
+      const Set mset = transaction_wset(157);
+      load_weight_set(mset, 157);
+      const unsigned accepted_before = total_mac_accept_count;
+
+      drive_held_mac(mset, 0, false, true, 163);
+      drive_held_mac(mset, 1, false, false, 167);
+      drive_held_mac(mset, 0, true, true, 173);
+      drive_held_mac(mset, 0, false, false, 179);
+      drive_held_mac(mset, 2, false, true, 181);
+      drive_held_mac(mset, 0, true, false, 191);
+
+      for (int cycle = 0; cycle < MAC_LATENCY + 6; cycle++) {
+        tick();
+      }
+      require(total_mac_accept_count - accepted_before == 6,
+              "mixed completion sequence did not accept every request");
+
+      drain_expected_beats();
+      require(expected_beats.empty(),
+              "mixed completion sequence left expected results undrained");
+    }
+  }
+
+  // Check selective same-edge slot credit and one-shot final-beat release
+  void run_exact_completion_release_check() {
+    if constexpr (INPUT_AXIS_TILES != 2 || OUTPUT_AXIS_TILES < 3 ||
+                  RESULT_SLOTS_PER_OUTPUT_LANE < 6) {
+      return;
+    } else {
+      const Set mset = transaction_wset(193);
+      load_weight_set(mset, 193);
+
+      const unsigned blocker_start = result_fire_count;
+      drive_held_mac(mset, 2, false, true, 197);
+      wait_for_result_fire(blocker_start);
+
+      const unsigned fill_accept_start = total_mac_accept_count;
+      constexpr int kFillOperations = RESULT_SLOTS_PER_OUTPUT_LANE;
+      const unsigned fill_accept_target =
+          fill_accept_start + 2 * kFillOperations;
+      for (int operation = 0; operation < kFillOperations; operation++) {
+        drive_held_mac(mset, 0, false, true, 211 + operation * 2);
+        drive_held_mac(mset, 1, false, true, 212 + operation * 2);
+      }
+      for (int cycle = 0;
+           cycle < 100 && total_mac_accept_count != fill_accept_target;
+           cycle++) {
+        tick();
+      }
+      require(total_mac_accept_count == fill_accept_target,
+              "targeted output-lane fill did not accept every request");
+
+      MACRequest first_replacement = build_mac_request(mset, 227);
+      first_replacement.output_axis_idx = 1;
+      first_replacement.reduce = 1;
+      queue_expected_beats(mset, false, 1, true, 227);
+      arm_blocked_mac_push(first_replacement);
+      const unsigned held_result_count = result_fire_count;
+      tick();
+      tick();
+      require(!blocked_mac_accepted(),
+              "full output lane did not hold its replacement request");
+      require(result_fire_count == held_result_count,
+              "buffered blocker failed to hold the next completion");
+
+      pop_and_check();
+      const unsigned before_lane0 = result_fire_count;
+      wait_for_result_fire(before_lane0);
+      require(!blocked_mac_accepted(),
+              "lane-zero release credited a blocked lane-one request");
+
+      pop_and_check();
+      const unsigned before_lane1 = result_fire_count;
+      wait_for_result_fire(before_lane1);
+      require(blocked_mac_accepted() &&
+                  last_mac_fire_cycle == last_result_fire_cycle,
+              "lane-one release missed same-edge replacement admission");
+
+      MACRequest second_replacement = build_mac_request(mset, 229);
+      second_replacement.output_axis_idx = 1;
+      second_replacement.reduce = 1;
+      queue_expected_beats(mset, false, 1, true, 229);
+      arm_blocked_mac_push(second_replacement);
+      const unsigned second_held_result_count = result_fire_count;
+      tick();
+      tick();
+      require(!blocked_mac_accepted(),
+              "one lane-one release granted more than one slot credit");
+      require(result_fire_count == second_held_result_count,
+              "buffered lane-one result did not apply output backpressure");
+
+      pop_and_check();
+      const unsigned before_second_lane0 = result_fire_count;
+      wait_for_result_fire(before_second_lane0);
+      require(!blocked_mac_accepted(),
+              "second lane-zero release credited lane one");
+
+      pop_and_check();
+      const unsigned before_second_lane1 = result_fire_count;
+      wait_for_result_fire(before_second_lane1);
+      require(blocked_mac_accepted() &&
+                  last_mac_fire_cycle == last_result_fire_cycle,
+              "second lane-one release missed same-edge admission");
+
+      drain_expected_beats();
+    }
+  }
+
+  // Check exact same-edge release and reuse of a one-entry completion queue
+  void run_depth_one_completion_release_check() {
+    if constexpr (Dut::COMPLETION_QUEUE_DEPTH != 1) {
+      return;
+    } else {
+      const Set mset = transaction_wset(257);
+      load_weight_set(mset, 257);
+
+      const unsigned blocker_start = result_fire_count;
+      drive_held_mac(mset, 0, false, true, 263);
+      wait_for_result_fire(blocker_start);
+
+      const unsigned fill_accept_start = total_mac_accept_count;
+      drive_held_mac(mset, 0, false, true, 269);
+      for (int cycle = 0;
+           cycle < 100 && total_mac_accept_count != fill_accept_start + 1;
+           cycle++) {
+        tick();
+      }
+      require(total_mac_accept_count == fill_accept_start + 1,
+              "depth-one completion did not fill its only slot");
+
+      MACRequest replacement = build_mac_request(mset, 271);
+      replacement.output_axis_idx = 0;
+      replacement.reduce = 1;
+      queue_expected_beats(mset, false, 0, true, 271);
+      arm_blocked_mac_push(replacement);
+      tick();
+      tick();
+      require(!blocked_mac_accepted(),
+              "depth-one completion did not hold its replacement");
+
+      pop_and_check();
+      const unsigned before_release = result_fire_count;
+      wait_for_result_fire(before_release);
+      require(blocked_mac_accepted() &&
+                  last_mac_fire_cycle == last_result_fire_cycle,
+              "depth-one final release missed same-edge slot reuse");
+
+      drain_expected_beats();
+    }
+  }
+
+  // Check that only the accepted final beat releases raw multicast storage
+  void run_multibeat_completion_release_check() {
+    if constexpr (INPUT_AXIS_TILES != 2 || OUTPUT_AXIS_TILES < 3 ||
+                  C_PORT_TILES != 2 || RESULT_SLOTS_PER_OUTPUT_LANE < 6) {
+      return;
+    } else {
+      const Set mset = transaction_wset(233);
+      load_weight_set(mset, 233);
+
+      const unsigned blocker_start = result_fire_count;
+      drive_held_mac(mset, 2, false, true, 239);
+      wait_for_result_fire(blocker_start);
+
+      const unsigned fill_accept_start = total_mac_accept_count;
+      constexpr int kFillOperations =
+          RESULT_SLOTS_PER_OUTPUT_LANE / INPUT_AXIS_TILES;
+      const unsigned fill_accept_target = fill_accept_start + kFillOperations;
+      for (int operation = 0; operation < kFillOperations; operation++) {
+        drive_held_mac(mset, 0, true, false, 241 + operation);
+      }
+      for (int cycle = 0;
+           cycle < 100 && total_mac_accept_count != fill_accept_target;
+           cycle++) {
+        tick();
+      }
+      require(total_mac_accept_count == fill_accept_target,
+              "multicast output-lane fill did not accept every request");
+
+      MACRequest replacement = build_mac_request(mset, 251);
+      replacement.multicast = 1;
+      replacement.reduce = 0;
+      queue_expected_beats(mset, true, 0, false, 251);
+      arm_blocked_mac_push(replacement);
+      tick();
+      tick();
+      require(!blocked_mac_accepted(),
+              "full multicast output lanes did not hold their replacement");
+
+      pop_and_check();
+      const unsigned before_beat0 = result_fire_count;
+      wait_for_result_fire(before_beat0);
+      require(!blocked_mac_accepted(),
+              "first nonfinal C beat released multicast storage");
+
+      pop_and_check();
+      const unsigned before_beat1 = result_fire_count;
+      wait_for_result_fire(before_beat1);
+      require(!blocked_mac_accepted(),
+              "second nonfinal C beat released multicast storage");
+
+      const unsigned stalled_final_count = result_fire_count;
+      constexpr int kFinalStallCycles =
+          2 * Dut::COMPLETION_QUEUE_DEPTH + MAC_LATENCY + 3;
+      for (int cycle = 0; cycle < kFinalStallCycles; cycle++) {
+        tick();
+      }
+      require(
+          result_fire_count == stalled_final_count && !blocked_mac_accepted(),
+          "stalled final C beat released multicast storage");
+
+      pop_and_check();
+      const unsigned before_final = result_fire_count;
+      wait_for_result_fire(before_final);
+      require(blocked_mac_accepted() &&
+                  last_mac_fire_cycle == last_result_fire_cycle,
+              "accepted final C beat missed same-edge multicast admission");
+
+      MACRequest second_replacement = build_mac_request(mset, 277);
+      second_replacement.multicast = 1;
+      second_replacement.reduce = 0;
+      queue_expected_beats(mset, true, 0, false, 277);
+      arm_blocked_mac_push(second_replacement);
+      tick();
+      tick();
+      require(!blocked_mac_accepted(),
+              "refilled multicast output lanes did not hold a replacement");
+
+      pop_and_check();
+      const unsigned before_next_beat0 = result_fire_count;
+      wait_for_result_fire(before_next_beat0);
+      require(!blocked_mac_accepted(),
+              "final-to-nonfinal transition released on its first C beat");
+
+      pop_and_check();
+      const unsigned before_next_beat1 = result_fire_count;
+      wait_for_result_fire(before_next_beat1);
+      require(!blocked_mac_accepted(),
+              "final-to-nonfinal transition released on its second C beat");
+
+      pop_and_check();
+      const unsigned before_next_final = result_fire_count;
+      wait_for_result_fire(before_next_final);
+      require(blocked_mac_accepted() &&
+                  last_mac_fire_cycle == last_result_fire_cycle,
+              "next accepted final C beat missed same-edge admission");
+
+      drain_expected_beats();
+    }
+  }
+
+  // Check sustained issue correctness while the configured slot pool applies
+  // its measured backpressure
   void run_sustained_issue_check() {
     const Set mset = transaction_wset(53);
     load_weight_set(mset, 53);
 
-    constexpr int kOperations = Dut::RESULT_QUEUE_DEPTH * 3 + 2;
+    constexpr int kWrapOperations = 2 * Dut::COMPLETION_QUEUE_DEPTH + 3;
+    constexpr int kOperations = kWrapOperations > 48 ? kWrapOperations : 48;
+    const unsigned long start_cycle = total_cycles;
+    const unsigned start_accepted = total_mac_accept_count;
+#if ENABLE_PERF_COUNTERS
+    const unsigned long start_stall = completion_storage_stall_cycles;
+#endif
     int accepted = 0;
     int completed = 0;
-    int cycle = 0;
-    int last_issue_cycle = -Dut::MAC_ISSUE_WINDOW;
 
     while (completed < kOperations) {
       if (accepted < kOperations) {
@@ -596,19 +937,9 @@ struct CIMArrayTbCase : sc_module {
         request.output_axis_idx = 0;
         request.reduce = 1;
         const bool request_accepted = mac_request_channel.PushNB(request);
-        if (!request_accepted &&
-            cycle - last_issue_cycle >= Dut::MAC_ISSUE_WINDOW) {
-          std::ostringstream text;
-          text << "completion queue extended the native issue window"
-               << " cycle=" << cycle << " accepted=" << accepted
-               << " completed=" << completed
-               << " depth=" << Dut::RESULT_QUEUE_DEPTH;
-          require(false, text.str());
-        }
         if (request_accepted) {
           queue_expected_beats(mset, false, 0, true, phase);
           accepted++;
-          last_issue_cycle = cycle;
         }
       }
 
@@ -618,10 +949,25 @@ struct CIMArrayTbCase : sc_module {
         completed++;
       }
       tick();
-      cycle++;
     }
     require(expected_beats.empty(),
             "sustained issue check left expected results undrained");
+#ifdef SCVERIFY
+    constexpr const char* kSweepLabel = "RTL_COMPLETION_SWEEP";
+#else
+    constexpr const char* kSweepLabel = "SYSTEMC_FUNCTIONAL_SWEEP";
+#endif
+    std::cout << kSweepLabel
+              << " slots_per_output_lane=" << RESULT_SLOTS_PER_OUTPUT_LANE
+              << " total_slots=" << Dut::RESULT_SLOT_COUNT
+              << " operations=" << kOperations
+              << " cycles=" << total_cycles - start_cycle
+              << " accepted=" << total_mac_accept_count - start_accepted;
+#if ENABLE_PERF_COUNTERS
+    std::cout << " stall_cycles="
+              << completion_storage_stall_cycles - start_stall;
+#endif
+    std::cout << std::endl;
   }
 
   // Check that a full completion queue stops issue and retains every result
@@ -630,7 +976,8 @@ struct CIMArrayTbCase : sc_module {
     const Set mset = transaction_wset(59);
     load_weight_set(mset, 59);
 
-    for (int operation = 0; operation < Dut::RESULT_QUEUE_DEPTH; operation++) {
+    for (int operation = 0; operation < RESULT_SLOTS_PER_OUTPUT_LANE;
+         operation++) {
       const int phase = 300 + operation;
       MACRequest request = build_mac_request(mset, phase);
       request.output_axis_idx = 0;
@@ -684,11 +1031,31 @@ struct CIMArrayTbCase : sc_module {
     drain_expected_beats();
   }
 
-  // Reset an in-flight transaction and confirm the next one completes cleanly
+  // Reset a stalled final result and confirm the next operation completes
   void run_reset_recovery_check() {
     const Set mset = transaction_wset(31);
     load_weight_set(mset, 31);
-    drive_targeted_mac(mset, 0, 37);
+
+    const unsigned blocker_start = result_fire_count;
+    drive_held_mac(mset, 0, false, true, 37);
+    wait_for_result_fire(blocker_start);
+
+    const unsigned staged_accept_start = total_mac_accept_count;
+    drive_held_mac(mset, 0, false, true, 41);
+    for (int cycle = 0;
+         cycle < 100 && total_mac_accept_count != staged_accept_start + 1;
+         cycle++) {
+      tick();
+    }
+    require(total_mac_accept_count == staged_accept_start + 1,
+            "reset test did not accept its staged completion");
+
+    const unsigned stalled_final_count = result_fire_count;
+    for (int cycle = 0; cycle < MAC_LATENCY + 6; cycle++) {
+      tick();
+    }
+    require(result_fire_count == stalled_final_count,
+            "reset test failed to hold its final result");
 
     rstn.write(false);
     reset_channels();
@@ -712,6 +1079,10 @@ struct CIMArrayTbCase : sc_module {
     run_set_retention_check();
     run_b_port_span_retention_check();
     run_targeted_issue_check();
+    run_mixed_completion_cursor_check();
+    run_exact_completion_release_check();
+    run_depth_one_completion_release_check();
+    run_multibeat_completion_release_check();
     run_sustained_issue_check();
     run_completion_queue_backpressure_check();
     run_replicate_write_check();
@@ -750,7 +1121,7 @@ int sc_main(int argc, char** argv) {
 
   CIMArrayTbCase<4, 2, 2, 8, 8, 20, 2, 1, CIM_MODE_BIT_PARALLEL_VALUE, 8, 8,
                  true, 2, 2, 1, 2>
-      native_ii1_non_power_queue_signed("native_ii1_non_power_queue_signed");
+      native_ii1_minimum_slots_signed("native_ii1_minimum_slots_signed");
 
   CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_SERIAL_VALUE, 4, 4,
                  false, 2, 1, 1, 2>
@@ -764,11 +1135,11 @@ int sc_main(int argc, char** argv) {
                  false, 2, 2, 2, 2>
       two_axis_serial_unsigned("two_axis_serial_unsigned");
 
-  // Signed bit-serial is the case the mode actually risks: the MSB slice carries
-  // negative weight, so the macro negates that partial sum before accumulating.
-  // The unsigned serial cases above never exercise that negation
-  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_SERIAL_VALUE, 4, 4,
-                 true, 2, 2, 2, 2>
+  // Signed bit-serial is the case the mode actually risks: the MSB slice
+  // carries negative weight, so the macro negates that partial sum before
+  // accumulating. The unsigned serial cases above never exercise that negation
+  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_SERIAL_VALUE, 4, 4, true,
+                 2, 2, 2, 2>
       two_axis_serial_signed("two_axis_serial_signed");
 
   CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 4,
@@ -778,11 +1149,20 @@ int sc_main(int argc, char** argv) {
   CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 4,
                  true, 2, 2, 2, 4, 2, 2, 4, CIM_C_BEAT_OUTPUT_MAJOR>
       narrow_b_port_signed("narrow_b_port_signed");
+
+  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 4,
+                 true, 2, 2, 2, 3, 2, 3, 2, CIM_C_BEAT_INPUT_MAJOR, 20, 6>
+      mixed_cursor_input_major_signed("mixed_cursor_input_major_signed");
+
+  CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 4,
+                 true, 2, 2, 2, 3, 2, 3, 2, CIM_C_BEAT_OUTPUT_MAJOR, 20, 6>
+      mixed_cursor_output_major_signed("mixed_cursor_output_major_signed");
 #else
   CIMArrayTbCase<4, 2, 2, 4, 4, 12, 2, 2, CIM_MODE_BIT_PARALLEL_VALUE, 4, 4,
                  false, 2, 2, 2, 3, 2, CIM_TEST_B_PORT_TILES,
                  (CIM_TEST_C_BEAT_LAYOUT == CIM_C_BEAT_INPUT_MAJOR) ? 2 : 3,
-                 CIM_TEST_C_BEAT_LAYOUT, CIM_TEST_C_WIDTH>
+                 CIM_TEST_C_BEAT_LAYOUT, CIM_TEST_C_WIDTH,
+                 CIM_ARRAY_TEST_RESULT_SLOTS_PER_OUTPUT_LANE>
       cim_array_scverify("cim_array_scverify");
 #endif
 

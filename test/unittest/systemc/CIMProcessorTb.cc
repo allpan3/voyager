@@ -39,6 +39,15 @@
 #define CIM_PROCESSOR_TEST_BASE_C_WIDTH 12
 #endif
 
+#ifndef CIM_PROCESSOR_TEST_STRICT_CADENCE
+#define CIM_PROCESSOR_TEST_STRICT_CADENCE 0
+#endif
+
+static_assert(
+    CIM_PROCESSOR_TEST_STRICT_CADENCE == 0 ||
+        CIM_PROCESSOR_TEST_STRICT_CADENCE == 1,
+    "CIM_PROCESSOR_TEST_STRICT_CADENCE must be 0 or 1");
+
 #ifndef CIM_PROCESSOR_TEST_B_SETS
 #define CIM_PROCESSOR_TEST_B_SETS 8
 #endif
@@ -59,8 +68,8 @@ static constexpr int BASE_B_WIDTH = 4;
 static constexpr int BASE_C_WIDTH = 20;
 static constexpr int TILE_INPUT_AXIS_ELEMENTS = 1;
 static constexpr int TILE_OUTPUT_AXIS_ELEMENTS = 2;
-static constexpr int INPUT_AXIS_TILES = 1;
-static constexpr int OUTPUT_AXIS_TILES = 2;
+static constexpr int INPUT_AXIS_TILES = CIM_INPUT_AXIS_TILES;
+static constexpr int OUTPUT_AXIS_TILES = CIM_OUTPUT_AXIS_TILES;
 #else
 static constexpr int CH_IN = 2;
 static constexpr int CH_OUT = CIM_PROCESSOR_TEST_CH_OUT;
@@ -70,11 +79,8 @@ static constexpr int BASE_B_WIDTH = CIM_PROCESSOR_TEST_BASE_B_WIDTH;
 static constexpr int BASE_C_WIDTH = CIM_PROCESSOR_TEST_BASE_C_WIDTH;
 static constexpr int TILE_INPUT_AXIS_ELEMENTS = 2;
 static constexpr int TILE_OUTPUT_AXIS_ELEMENTS = 1;
-static constexpr int INPUT_AXIS_TILES = 2;
-// N = TILE_N * OUTPUT_AXIS_TILES, and TILE_N is 1 here, so the tile count is
-// the output dimension. Keep this in step with CIM_PROCESSOR_OC_DIMENSION and
-// the -DCIM_OUTPUT_AXIS_TILES / -DCIM_C_PORT_TILES flags in the Makefile
-static constexpr int OUTPUT_AXIS_TILES = 8;
+static constexpr int INPUT_AXIS_TILES = CIM_INPUT_AXIS_TILES;
+static constexpr int OUTPUT_AXIS_TILES = CIM_OUTPUT_AXIS_TILES;
 #endif
 
 static constexpr int WRITE_CH_IN = 1;
@@ -89,21 +95,22 @@ static constexpr int A_PORT_TILES = INPUT_AXIS_TILES;
 #endif
 static constexpr int B_PORT_TILES = CIM_TEST_B_PORT_TILES;
 static constexpr int C_PORT_TILES = OUTPUT_AXIS_TILES;
+static constexpr int RESULT_SLOTS_PER_OUTPUT_LANE =
+    CIM_ARRAY_RESULT_SLOTS_PER_OUTPUT_LANE;
 static constexpr int K = CH_IN * TILE_INPUT_AXIS_ELEMENTS * INPUT_AXIS_TILES;
 static constexpr int TILE_N =
     (CH_OUT / (B_WIDTH / BASE_B_WIDTH)) * TILE_OUTPUT_AXIS_ELEMENTS;
 static constexpr int N = TILE_N * OUTPUT_AXIS_TILES;
 static constexpr int BUFFER_DEPTH = 16;
 
-using Processor =
-    CIMProcessor<std::tuple<DataTypes::int8>, std::tuple<DataTypes::int8>,
-                 DataTypes::int8, DataTypes::int8, DataTypes::int24,
-                 DataTypes::int24, DataTypes::fp8_e8m0, K, N, BUFFER_DEPTH,
-                 CH_IN, CH_OUT, B_SETS, BASE_A_WIDTH, BASE_B_WIDTH,
-                 BASE_C_WIDTH, WRITE_CH_IN, MAC_LATENCY, MODE, SIGNED,
-                 TILE_INPUT_AXIS_ELEMENTS, TILE_OUTPUT_AXIS_ELEMENTS,
-                 INPUT_AXIS_TILES, OUTPUT_AXIS_TILES, A_PORT_TILES,
-                 B_PORT_TILES, C_PORT_TILES, CIM_C_BEAT_OUTPUT_MAJOR>;
+using Processor = CIMProcessor<
+    std::tuple<DataTypes::int8>, std::tuple<DataTypes::int8>, DataTypes::int8,
+    DataTypes::int8, DataTypes::int24, DataTypes::int24, DataTypes::fp8_e8m0, K,
+    N, BUFFER_DEPTH, CH_IN, CH_OUT, B_SETS, BASE_A_WIDTH, BASE_B_WIDTH,
+    BASE_C_WIDTH, WRITE_CH_IN, MAC_LATENCY, MODE, SIGNED,
+    TILE_INPUT_AXIS_ELEMENTS, TILE_OUTPUT_AXIS_ELEMENTS, INPUT_AXIS_TILES,
+    OUTPUT_AXIS_TILES, A_PORT_TILES, B_PORT_TILES, C_PORT_TILES,
+    CIM_C_BEAT_OUTPUT_MAJOR, RESULT_SLOTS_PER_OUTPUT_LANE>;
 
 using Dut = CIMPROCESSOR_DUT_TYPE(Processor);
 using Buffer = DataTypes::int24;
@@ -546,7 +553,7 @@ SC_MODULE(CIMProcessorTb) {
     }
   }
 
-  // Print and validate consecutive acceptance intervals
+  // Print acceptance intervals and validate the configured cadence
   void report_throughput(const char *name,
                          const std::vector<unsigned long> &cycles,
                          int expected_count, int expected_interval) {
@@ -556,7 +563,7 @@ SC_MODULE(CIMProcessorTb) {
     require(static_cast<int>(cycles.size()) == expected_count,
             count_message.str());
 
-    std::cout << "RTL_CADENCE " << name << "_intervals=";
+    std::cout << "CIM_PROCESSOR_CADENCE " << name << "_intervals=";
     for (std::size_t index = 1; index < cycles.size(); index++) {
       if (index > 1) {
         std::cout << ",";
@@ -573,6 +580,46 @@ SC_MODULE(CIMProcessorTb) {
     }
     std::cout << std::endl;
   }
+
+#if ENABLE_PERF_COUNTERS
+  // Read one stable synthesized performance snapshot counter
+  MatrixPerformance::Counter read_performance_counter(
+      MatrixPerformance::CounterId counter_id) {
+    perf_counter_select.write(counter_id);
+    tick();
+    tick();
+    return perf_counter_value.read();
+  }
+
+  // Report direct completion-storage stalls for the throughput job
+  void report_completion_storage_counters() {
+    perf_counter_select.write(MatrixPerformance::SNAPSHOT_SEQUENCE);
+    tick();
+    tick();
+    while (perf_counter_value.read() == 0) {
+      tick();
+    }
+
+    const MatrixPerformance::Counter active_cycles =
+        read_performance_counter(MatrixPerformance::PROCESSOR_ACTIVE_CYCLES);
+    const MatrixPerformance::Counter issue_cycles =
+        read_performance_counter(MatrixPerformance::ARRAY_ISSUE_CYCLES);
+    const MatrixPerformance::Counter input_backpressure_cycles =
+        read_performance_counter(MatrixPerformance::INPUT_BACKPRESSURE_CYCLES);
+    const MatrixPerformance::Counter completion_storage_stall_cycles =
+        read_performance_counter(
+            MatrixPerformance::CIM_COMPLETION_QUEUE_STALL_CYCLES);
+
+    std::cout << "RTL_COMPLETION_COUNTER input_axis_tiles=" << INPUT_AXIS_TILES
+              << " output_axis_tiles=" << OUTPUT_AXIS_TILES
+              << " slots_per_output_lane=" << RESULT_SLOTS_PER_OUTPUT_LANE
+              << " active_cycles=" << active_cycles
+              << " issue_cycles=" << issue_cycles
+              << " input_backpressure_cycles=" << input_backpressure_cycles
+              << " completion_storage_stall_cycles="
+              << completion_storage_stall_cycles << std::endl;
+  }
+#endif
 
   // Drive queued biases only when the processor requests them
   void drive_bias() {
@@ -784,8 +831,15 @@ SC_MODULE(CIMProcessorTb) {
     }
     report_throughput("input", throughput_input_cycles, kThroughputOperations,
                       0);
-    report_throughput("output", throughput_output_cycles, kThroughputOperations,
-                      Processor::Array::MAC_ISSUE_WINDOW);
+    const int expected_output_interval =
+        CIM_PROCESSOR_TEST_STRICT_CADENCE
+            ? Processor::Array::MAC_ISSUE_WINDOW
+            : 0;
+    report_throughput("output", throughput_output_cycles,
+                      kThroughputOperations, expected_output_interval);
+#if ENABLE_PERF_COUNTERS
+    report_completion_storage_counters();
+#endif
 
     const BufferVector nominal_bias = queue_bias(0);
     BufferVector nominal_0 = nominal_bias;
@@ -910,7 +964,11 @@ SC_MODULE(CIMProcessorTb) {
 #endif
 
     if (!test_failed) {
-      std::cout << "[PASS] cim_processor_result_throughput" << std::endl;
+      if constexpr (CIM_PROCESSOR_TEST_STRICT_CADENCE) {
+        std::cout << "[PASS] cim_processor_result_throughput" << std::endl;
+      } else {
+        std::cout << "[PASS] cim_processor_result_stream" << std::endl;
+      }
       std::cout << "[PASS] cim_processor_nominal_accumulation" << std::endl;
       std::cout << "[PASS] cim_processor_weight_reuse" << std::endl;
       std::cout << "[PASS] cim_processor_backpressure" << std::endl;

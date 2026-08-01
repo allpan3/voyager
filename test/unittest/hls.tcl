@@ -33,6 +33,8 @@ set OC_DIMENSION   [env_required OC_DIMENSION]
 set CIM_A_PORT_TILES [env_required CIM_A_PORT_TILES]
 set CIM_B_PORT_TILES [env_required CIM_B_PORT_TILES]
 set CIM_C_PORT_TILES [env_required CIM_C_PORT_TILES]
+set CIM_ARRAY_RESULT_SLOTS_PER_OUTPUT_LANE \
+    [env_required CIM_ARRAY_RESULT_SLOTS_PER_OUTPUT_LANE]
 
 # Optional VCS SCVerify cosim. Attach the requested self-checking testbench and
 # enable Catapult's SCVerify+VCS flow so the block can be co-simulated (C++
@@ -74,6 +76,7 @@ foreach name {
   CIM_TILE_INPUT_AXIS_ELEMENTS CIM_TILE_OUTPUT_AXIS_ELEMENTS
   CIM_INPUT_AXIS_TILES CIM_OUTPUT_AXIS_TILES
   CIM_A_PORT_TILES CIM_B_PORT_TILES CIM_C_PORT_TILES CIM_C_BEAT_LAYOUT
+  CIM_ARRAY_RESULT_SLOTS_PER_OUTPUT_LANE
 } {
   if {[info exists ::env($name)]} {
     append cim_geometry_flags " -D$name=$::env($name)"
@@ -81,7 +84,9 @@ foreach name {
 }
 append compiler_flags $cim_geometry_flags
 set processor_test_flags ""
-foreach name {CH_OUT BASE_A_WIDTH BASE_B_WIDTH BASE_C_WIDTH} {
+foreach name {
+  CH_OUT BASE_A_WIDTH BASE_B_WIDTH BASE_C_WIDTH STRICT_CADENCE
+} {
   set env_name "CIM_PROCESSOR_TEST_$name"
   if {[info exists ::env($env_name)]} {
     append processor_test_flags " -D$env_name=$::env($env_name)"
@@ -96,6 +101,8 @@ append compiler_flags " -DCIM_TEST_B_PORT_TILES=$CIM_B_PORT_TILES"
 if {[info exists ::env(CIM_C_WIDTH)]} {
   append compiler_flags " -DCIM_TEST_C_WIDTH=$::env(CIM_C_WIDTH)"
 }
+append compiler_flags \
+    " -DCIM_ARRAY_TEST_RESULT_SLOTS_PER_OUTPUT_LANE=$CIM_ARRAY_RESULT_SLOTS_PER_OUTPUT_LANE"
 if {[info exists ::env(DOUBLE_BUFFERED_ACCUM_BUFFER)]} {
   append compiler_flags " -DDOUBLE_BUFFERED_ACCUM_BUFFER=$::env(DOUBLE_BUFFERED_ACCUM_BUFFER)"
 }
@@ -132,6 +139,8 @@ if {$SCVERIFY} {
   if {[info exists ::env(CIM_C_WIDTH)]} {
     append scverify_comp_flags " -DCIM_TEST_C_WIDTH=$::env(CIM_C_WIDTH)"
   }
+  append scverify_comp_flags \
+      " -DCIM_ARRAY_TEST_RESULT_SLOTS_PER_OUTPUT_LANE=$CIM_ARRAY_RESULT_SLOTS_PER_OUTPUT_LANE"
   if {[info exists ::env(DOUBLE_BUFFERED_ACCUM_BUFFER)]} {
     append scverify_comp_flags " -DDOUBLE_BUFFERED_ACCUM_BUFFER=$::env(DOUBLE_BUFFERED_ACCUM_BUFFER)"
   }

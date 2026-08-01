@@ -27,7 +27,8 @@ template <typename InputTypeTuple, typename WeightTypeTuple, typename Input,
           int WRITE_CH_IN, int MAC_LATENCY, int MODE, bool SIGNED,
           int TILE_INPUT_AXIS_ELEMENTS, int TILE_OUTPUT_AXIS_ELEMENTS,
           int INPUT_AXIS_TILES, int OUTPUT_AXIS_TILES, int A_PORT_TILES,
-          int B_PORT_TILES, int C_PORT_TILES, int C_BEAT_LAYOUT>
+          int B_PORT_TILES, int C_PORT_TILES, int C_BEAT_LAYOUT,
+          int RESULT_SLOTS_PER_OUTPUT_LANE = INPUT_AXIS_TILES>
 SC_MODULE(CIMProcessor) {
  public:
   static constexpr int K = rows;
@@ -45,7 +46,7 @@ SC_MODULE(CIMProcessor) {
                WRITE_CH_IN, MAC_LATENCY, MODE, A_WIDTH, B_WIDTH, C_WIDTH,
                SIGNED, TILE_INPUT_AXIS_ELEMENTS, TILE_OUTPUT_AXIS_ELEMENTS,
                INPUT_AXIS_TILES, OUTPUT_AXIS_TILES, A_PORT_TILES, B_PORT_TILES,
-               C_PORT_TILES, C_BEAT_LAYOUT>;
+               C_PORT_TILES, C_BEAT_LAYOUT, RESULT_SLOTS_PER_OUTPUT_LANE>;
   using ABeat = typename Array::ABeat;
   using CBeat = typename Array::CBeat;
   using Set = typename Array::Set;
@@ -124,10 +125,11 @@ SC_MODULE(CIMProcessor) {
   // Both macro modes are driven identically from here. The processor never
   // assumes an issue-window length: it hands MAC requests to the array and
   // waits on the array's ready/credit handshake, and every window- and
-  // latency-derived constant below the array comes from Element::issue_window(),
-  // which already accounts for the per-slice serial walk. Bit-serial therefore
-  // only makes each issue longer -- it does not change the protocol.
-  // The widths one serial slice needs are enforced in CIMElement
+  // latency-derived constant below the array comes from
+  // Element::issue_window(), which already accounts for the per-slice serial
+  // walk. Bit-serial therefore only makes each issue longer -- it does not
+  // change the protocol. The widths one serial slice needs are enforced in
+  // CIMElement
   static_assert(MODE == 0 || MODE == 1,
                 "CIMProcessor supports bit-parallel (0) and bit-serial (1) CIM "
                 "macros");
@@ -252,6 +254,9 @@ SC_MODULE(CIMProcessor) {
   Connections::Combinational<MACRequest> CCS_INIT_S1(mac_request_channel);
   Connections::Combinational<WriteRequest> CCS_INIT_S1(write_request_channel);
   Connections::Combinational<CBeat> CCS_INIT_S1(result_channel);
+#if ENABLE_PERF_COUNTERS
+  sc_signal<bool> completion_storage_stall;
+#endif
 
   // Isolate CIM result retirement from the SA-shaped accumulation pipeline
   Connections::Combinational<Pack1D<Psum, N>> CCS_INIT_S1(
@@ -326,6 +331,9 @@ SC_MODULE(CIMProcessor) {
     cim_array.mac_request_channel(mac_request_channel);
     cim_array.write_request_channel(write_request_channel);
     cim_array.result_channel(result_channel);
+#if ENABLE_PERF_COUNTERS
+    cim_array.completion_storage_stall(completion_storage_stall);
+#endif
 
     accum_to_wb_fifo.clk(clk);
     accum_to_wb_fifo.rst(rstn);
@@ -1098,12 +1106,12 @@ SC_MODULE(CIMProcessor) {
           counters[MatrixPerformance::storage_index(
               MatrixPerformance::INPUT_UNAVAILABLE_CYCLES)]++;
 #ifdef __SYNTHESIS__
-        const bool completion_queue_stalled =
+        const bool input_backpressured =
             mac_request_channel.vld.read() && !mac_request_channel.rdy.read();
-        if (completion_queue_stalled)
+        if (input_backpressured)
           counters[MatrixPerformance::storage_index(
               MatrixPerformance::INPUT_BACKPRESSURE_CYCLES)]++;
-        if (completion_queue_stalled)
+        if (completion_storage_stall.read())
           counters[MatrixPerformance::storage_index(
               MatrixPerformance::CIM_COMPLETION_QUEUE_STALL_CYCLES)]++;
         const bool set_wait =

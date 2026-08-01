@@ -22,6 +22,7 @@ WAVEFORM_ARG := $(if $(WAVEFORM),--waveform,)
 DATATYPE ?= INT8
 IC_DIMENSION ?= 4
 OC_DIMENSION ?= 2
+ENABLE_PERF_COUNTERS ?= 0
 
 SYSTEMC_CC ?= $(CATAPULT_ROOT)/bin/g++
 ifneq ($(wildcard $(CONDA_ENV)/bin/verilator),)
@@ -32,11 +33,21 @@ endif
 VERILATOR_ROOT ?= $(shell $(VERILATOR) -V 2>/dev/null | sed -n 's/.*VERILATOR_ROOT *= *//p' | head -1)
 
 SYSTEMC_BUILD := $(THIS_DIR)/build/systemc/$(DATATYPE)_$(IC_DIMENSION)x$(OC_DIMENSION)
-CIM_PROCESSOR_IC_DIMENSION := 8
-CIM_PROCESSOR_OC_DIMENSION := 8
-CIM_PROCESSOR_LARGE_IC_DIMENSION := 64
-CIM_PROCESSOR_LARGE_OC_DIMENSION := 128
+CIM_PROCESSOR_IC_DIMENSION ?= 8
+CIM_PROCESSOR_OC_DIMENSION ?= 8
+CIM_PROCESSOR_INPUT_AXIS_TILES ?= 2
+CIM_PROCESSOR_OUTPUT_AXIS_TILES ?= 8
+CIM_PROCESSOR_LARGE_IC_DIMENSION ?= 64
+CIM_PROCESSOR_LARGE_OC_DIMENSION ?= 128
+CIM_PROCESSOR_LARGE_INPUT_AXIS_TILES ?= 1
+CIM_PROCESSOR_LARGE_OUTPUT_AXIS_TILES ?= 2
 CIM_PROCESSOR_B_SETS ?= 8
+CIM_ARRAY_TEST_RESULT_SLOTS_PER_OUTPUT_LANE ?= 2
+CIM_ARRAY_PROCESSOR_TEST_RESULT_SLOTS_PER_OUTPUT_LANE ?= $(CIM_PROCESSOR_INPUT_AXIS_TILES)
+CIM_ARRAY_PROCESSOR_LARGE_TEST_RESULT_SLOTS_PER_OUTPUT_LANE ?= $(CIM_PROCESSOR_LARGE_INPUT_AXIS_TILES)
+CIM_PROCESSOR_TEST_STRICT_CADENCE ?= 0
+# Four slots cover the pinned IAT2 unit test's seven-cycle credit loop
+CIM_ARRAY_PROCESSOR_CADENCE_TEST_RESULT_SLOTS_PER_OUTPUT_LANE ?= 4
 # Macro MAC mode: 0 bit-parallel, 1 bit-serial. Declared here rather than with
 # the other CIM parameters below because the build paths and the -D flag blocks
 # are immediate (:=) and would otherwise capture an empty value
@@ -44,9 +55,9 @@ CIM_MODE ?= 0
 # The macro MAC mode belongs in the build path: bit-parallel and bit-serial
 # compile the same sources to different timing, so sharing a directory would let
 # a mode switch silently reuse the other mode's binary
-CIM_PROCESSOR_SYSTEMC_BUILD = $(THIS_DIR)/build/systemc/processor/INT8_$(CIM_PROCESSOR_IC_DIMENSION)x$(CIM_PROCESSOR_OC_DIMENSION)_bs$(CIM_PROCESSOR_B_SETS)_db0_m$(CIM_MODE)
-CIM_PROCESSOR_DB_SYSTEMC_BUILD = $(THIS_DIR)/build/systemc/processor/INT8_$(CIM_PROCESSOR_IC_DIMENSION)x$(CIM_PROCESSOR_OC_DIMENSION)_bs$(CIM_PROCESSOR_B_SETS)_db1_m$(CIM_MODE)
-CIM_PROCESSOR_LARGE_SYSTEMC_BUILD = $(THIS_DIR)/build/systemc/processor/INT8_$(CIM_PROCESSOR_LARGE_IC_DIMENSION)x$(CIM_PROCESSOR_LARGE_OC_DIMENSION)_bs$(CIM_PROCESSOR_B_SETS)_large_m$(CIM_MODE)
+CIM_PROCESSOR_SYSTEMC_BUILD = $(THIS_DIR)/build/systemc/processor/INT8_$(CIM_PROCESSOR_IC_DIMENSION)x$(CIM_PROCESSOR_OC_DIMENSION)_bs$(CIM_PROCESSOR_B_SETS)_db0_m$(CIM_MODE)_iat$(CIM_PROCESSOR_INPUT_AXIS_TILES)_oat$(CIM_PROCESSOR_OUTPUT_AXIS_TILES)_rslots$(CIM_ARRAY_PROCESSOR_TEST_RESULT_SLOTS_PER_OUTPUT_LANE)_cad$(CIM_PROCESSOR_TEST_STRICT_CADENCE)
+CIM_PROCESSOR_DB_SYSTEMC_BUILD = $(THIS_DIR)/build/systemc/processor/INT8_$(CIM_PROCESSOR_IC_DIMENSION)x$(CIM_PROCESSOR_OC_DIMENSION)_bs$(CIM_PROCESSOR_B_SETS)_db1_m$(CIM_MODE)_iat$(CIM_PROCESSOR_INPUT_AXIS_TILES)_oat$(CIM_PROCESSOR_OUTPUT_AXIS_TILES)_rslots$(CIM_ARRAY_PROCESSOR_TEST_RESULT_SLOTS_PER_OUTPUT_LANE)_cad$(CIM_PROCESSOR_TEST_STRICT_CADENCE)
+CIM_PROCESSOR_LARGE_SYSTEMC_BUILD = $(THIS_DIR)/build/systemc/processor/INT8_$(CIM_PROCESSOR_LARGE_IC_DIMENSION)x$(CIM_PROCESSOR_LARGE_OC_DIMENSION)_bs$(CIM_PROCESSOR_B_SETS)_large_m$(CIM_MODE)_iat$(CIM_PROCESSOR_LARGE_INPUT_AXIS_TILES)_oat$(CIM_PROCESSOR_LARGE_OUTPUT_AXIS_TILES)_rslots$(CIM_ARRAY_PROCESSOR_LARGE_TEST_RESULT_SLOTS_PER_OUTPUT_LANE)_cad$(CIM_PROCESSOR_TEST_STRICT_CADENCE)
 CIM_MATRIX_UNIT_SYSTEMC_BUILD = $(CIM_PROCESSOR_SYSTEMC_BUILD)
 SYSTEMC_GENERATED := $(SYSTEMC_BUILD)/generated
 SYSTEMC_CASES := $(THIS_DIR)/systemc/cim_element_cosim_cases.py
@@ -84,6 +95,7 @@ SYSTEMC_CXXFLAGS := \
 	-D$(DATATYPE) \
 	-DIC_DIMENSION=$(IC_DIMENSION) \
 	-DOC_DIMENSION=$(OC_DIMENSION) \
+	-DENABLE_PERF_COUNTERS=$(ENABLE_PERF_COUNTERS) \
 	-O3 \
 	-std=c++17 \
 	-Wno-deprecated-declarations
@@ -107,6 +119,7 @@ CIM_MATRIX_UNIT_CXXFLAGS := \
 	-DCIM_CH_OUT=2 \
 	-DCIM_B_SETS=$(CIM_PROCESSOR_B_SETS) \
 	-DCIM_PROCESSOR_TEST_B_SETS=$(CIM_PROCESSOR_B_SETS) \
+	-DCIM_PROCESSOR_TEST_STRICT_CADENCE=$(CIM_PROCESSOR_TEST_STRICT_CADENCE) \
 	-DCIM_BASE_A_WIDTH=4 \
 	-DCIM_BASE_B_WIDTH=4 \
 	-DCIM_BASE_C_WIDTH=12 \
@@ -117,12 +130,13 @@ CIM_MATRIX_UNIT_CXXFLAGS := \
 	-DCIM_SIGNED=true \
 	-DCIM_TILE_INPUT_AXIS_ELEMENTS=2 \
 	-DCIM_TILE_OUTPUT_AXIS_ELEMENTS=1 \
-	-DCIM_INPUT_AXIS_TILES=2 \
-	-DCIM_OUTPUT_AXIS_TILES=8 \
-	-DCIM_A_PORT_TILES=2 \
+	-DCIM_INPUT_AXIS_TILES=$(CIM_PROCESSOR_INPUT_AXIS_TILES) \
+	-DCIM_OUTPUT_AXIS_TILES=$(CIM_PROCESSOR_OUTPUT_AXIS_TILES) \
+	-DCIM_A_PORT_TILES=$(CIM_PROCESSOR_INPUT_AXIS_TILES) \
 	-DCIM_B_PORT_TILES=1 \
-	-DCIM_C_PORT_TILES=8 \
-	-DCIM_C_BEAT_LAYOUT=1
+	-DCIM_C_PORT_TILES=$(CIM_PROCESSOR_OUTPUT_AXIS_TILES) \
+	-DCIM_C_BEAT_LAYOUT=1 \
+	-DCIM_ARRAY_RESULT_SLOTS_PER_OUTPUT_LANE=$(CIM_ARRAY_PROCESSOR_TEST_RESULT_SLOTS_PER_OUTPUT_LANE)
 
 CIM_PROCESSOR_LARGE_CXXFLAGS := \
 	-I$(CONDA_ENV)/include \
@@ -139,6 +153,7 @@ CIM_PROCESSOR_LARGE_CXXFLAGS := \
 	-DCIM_CH_OUT=64 \
 	-DCIM_B_SETS=$(CIM_PROCESSOR_B_SETS) \
 	-DCIM_PROCESSOR_TEST_B_SETS=$(CIM_PROCESSOR_B_SETS) \
+	-DCIM_PROCESSOR_TEST_STRICT_CADENCE=$(CIM_PROCESSOR_TEST_STRICT_CADENCE) \
 	-DCIM_BASE_A_WIDTH=4 \
 	-DCIM_BASE_B_WIDTH=4 \
 	-DCIM_BASE_C_WIDTH=20 \
@@ -149,12 +164,13 @@ CIM_PROCESSOR_LARGE_CXXFLAGS := \
 	-DCIM_SIGNED=true \
 	-DCIM_TILE_INPUT_AXIS_ELEMENTS=1 \
 	-DCIM_TILE_OUTPUT_AXIS_ELEMENTS=2 \
-	-DCIM_INPUT_AXIS_TILES=1 \
-	-DCIM_OUTPUT_AXIS_TILES=2 \
-	-DCIM_A_PORT_TILES=1 \
+	-DCIM_INPUT_AXIS_TILES=$(CIM_PROCESSOR_LARGE_INPUT_AXIS_TILES) \
+	-DCIM_OUTPUT_AXIS_TILES=$(CIM_PROCESSOR_LARGE_OUTPUT_AXIS_TILES) \
+	-DCIM_A_PORT_TILES=$(CIM_PROCESSOR_LARGE_INPUT_AXIS_TILES) \
 	-DCIM_B_PORT_TILES=1 \
-	-DCIM_C_PORT_TILES=2 \
-	-DCIM_C_BEAT_LAYOUT=1
+	-DCIM_C_PORT_TILES=$(CIM_PROCESSOR_LARGE_OUTPUT_AXIS_TILES) \
+	-DCIM_C_BEAT_LAYOUT=1 \
+	-DCIM_ARRAY_RESULT_SLOTS_PER_OUTPUT_LANE=$(CIM_ARRAY_PROCESSOR_LARGE_TEST_RESULT_SLOTS_PER_OUTPUT_LANE)
 
 ###########################################################
 # Standalone Catapult HLS for CIMTile and CIMArray
@@ -170,7 +186,6 @@ HLS_DRIVER := $(THIS_DIR)/hls.tcl
 TECHNOLOGY ?= generic
 CLOCK_PERIOD ?= $(if $(filter generic,$(TECHNOLOGY)),5,1.0)
 DOUBLE_BUFFERED_ACCUM_BUFFER ?= false
-ENABLE_PERF_COUNTERS ?= 0
 HLS_BUILD := $(THIS_DIR)/build/catapult/$(TECHNOLOGY)/clock_$(CLOCK_PERIOD)
 
 # Geometry pinned by CIMArrayTb.cc in SCVerify mode
@@ -182,6 +197,7 @@ SCVERIFY_ARRAY_HLS_ARGS := \
 	CIM_TILE_INPUT_AXIS_ELEMENTS=2 CIM_TILE_OUTPUT_AXIS_ELEMENTS=2 \
 	CIM_INPUT_AXIS_TILES=2 CIM_OUTPUT_AXIS_TILES=3 \
 	CIM_B_PORT_TILES=1 \
+	CIM_ARRAY_RESULT_SLOTS_PER_OUTPUT_LANE=$(CIM_ARRAY_TEST_RESULT_SLOTS_PER_OUTPUT_LANE) \
 	DATATYPE=INT8 IC_DIMENSION=4 OC_DIMENSION=2
 
 # Geometry pinned by CIMProcessorTb.cc in SCVerify mode
@@ -191,8 +207,12 @@ SCVERIFY_PROCESSOR_HLS_ARGS := \
 	CIM_WRITE_CH_IN=1 CIM_MAC_LATENCY=1 CIM_MODE=0 \
 	CIM_A_WIDTH=8 CIM_B_WIDTH=8 CIM_SIGNED=true \
 	CIM_TILE_INPUT_AXIS_ELEMENTS=2 CIM_TILE_OUTPUT_AXIS_ELEMENTS=1 \
-	CIM_INPUT_AXIS_TILES=2 CIM_OUTPUT_AXIS_TILES=8 \
+	CIM_INPUT_AXIS_TILES=$(CIM_PROCESSOR_INPUT_AXIS_TILES) \
+	CIM_OUTPUT_AXIS_TILES=$(CIM_PROCESSOR_OUTPUT_AXIS_TILES) \
+	CIM_A_PORT_TILES=$(CIM_PROCESSOR_INPUT_AXIS_TILES) \
 	CIM_B_PORT_TILES=1 \
+	CIM_C_PORT_TILES=$(CIM_PROCESSOR_OUTPUT_AXIS_TILES) \
+	CIM_ARRAY_RESULT_SLOTS_PER_OUTPUT_LANE=$(CIM_ARRAY_PROCESSOR_TEST_RESULT_SLOTS_PER_OUTPUT_LANE) \
 	CIM_C_BEAT_LAYOUT=1 DATATYPE=INT8 \
 	IC_DIMENSION=$(CIM_PROCESSOR_IC_DIMENSION) \
 	OC_DIMENSION=$(CIM_PROCESSOR_OC_DIMENSION)
@@ -228,27 +248,28 @@ ifeq ($(filter $(CIM_C_BEAT_LAYOUT),0 1),)
 $(error CIM_C_BEAT_LAYOUT must be 0 or 1)
 endif
 CIM_C_PORT_TILES ?= $(if $(filter 0,$(CIM_C_BEAT_LAYOUT)),$(CIM_INPUT_AXIS_TILES),$(CIM_OUTPUT_AXIS_TILES))
+CIM_ARRAY_RESULT_SLOTS_PER_OUTPUT_LANE ?= $(CIM_INPUT_AXIS_TILES)
 
 # Base macro geometry arguments followed by tile and array-grid geometry
 # Spelling (comma-space, `true`) must match how the compiler mangles the
 # specialization
 CIM_TPARAMS := $(CIM_CH_IN), $(CIM_CH_OUT), $(CIM_B_SETS), $(CIM_BASE_A_WIDTH), $(CIM_BASE_B_WIDTH), $(CIM_BASE_C_WIDTH), $(CIM_WRITE_CH_IN), $(CIM_MAC_LATENCY), $(CIM_MODE), $(CIM_A_WIDTH), $(CIM_B_WIDTH), $(CIM_SIGNED)
 CIM_TILE_TPARAMS := $(CIM_TPARAMS), $(CIM_TILE_INPUT_AXIS_ELEMENTS), $(CIM_TILE_OUTPUT_AXIS_ELEMENTS)
-CIM_ARRAY_TPARAMS := $(CIM_CH_IN), $(CIM_CH_OUT), $(CIM_B_SETS), $(CIM_BASE_A_WIDTH), $(CIM_BASE_B_WIDTH), $(CIM_BASE_C_WIDTH), $(CIM_WRITE_CH_IN), $(CIM_MAC_LATENCY), $(CIM_MODE), $(CIM_A_WIDTH), $(CIM_B_WIDTH), $(CIM_C_WIDTH), $(CIM_SIGNED), $(CIM_TILE_INPUT_AXIS_ELEMENTS), $(CIM_TILE_OUTPUT_AXIS_ELEMENTS), $(CIM_INPUT_AXIS_TILES), $(CIM_OUTPUT_AXIS_TILES), $(CIM_A_PORT_TILES), $(CIM_B_PORT_TILES), $(CIM_C_PORT_TILES), $(CIM_C_BEAT_LAYOUT)
+CIM_ARRAY_TPARAMS := $(CIM_CH_IN), $(CIM_CH_OUT), $(CIM_B_SETS), $(CIM_BASE_A_WIDTH), $(CIM_BASE_B_WIDTH), $(CIM_BASE_C_WIDTH), $(CIM_WRITE_CH_IN), $(CIM_MAC_LATENCY), $(CIM_MODE), $(CIM_A_WIDTH), $(CIM_B_WIDTH), $(CIM_C_WIDTH), $(CIM_SIGNED), $(CIM_TILE_INPUT_AXIS_ELEMENTS), $(CIM_TILE_OUTPUT_AXIS_ELEMENTS), $(CIM_INPUT_AXIS_TILES), $(CIM_OUTPUT_AXIS_TILES), $(CIM_A_PORT_TILES), $(CIM_B_PORT_TILES), $(CIM_C_PORT_TILES), $(CIM_C_BEAT_LAYOUT), $(CIM_ARRAY_RESULT_SLOTS_PER_OUTPUT_LANE)
 HLS_TOP_TILE := CIMTile<$(CIM_TILE_TPARAMS)>
 HLS_TOP_ARRAY := CIMArray<$(CIM_ARRAY_TPARAMS)>
 CIM_PROCESSOR_BUFFER_SIZE ?= 16
-CIM_PROCESSOR_TPARAMS := InputTypeList, WeightTypeList, DataTypes::int8, DataTypes::int8, DataTypes::int24, DataTypes::int24, DataTypes::fp8_e8m0, $(CIM_PROCESSOR_IC_DIMENSION), $(CIM_PROCESSOR_OC_DIMENSION), $(CIM_PROCESSOR_BUFFER_SIZE), $(CIM_CH_IN), $(CIM_CH_OUT), $(CIM_B_SETS), $(CIM_BASE_A_WIDTH), $(CIM_BASE_B_WIDTH), $(CIM_BASE_C_WIDTH), $(CIM_WRITE_CH_IN), $(CIM_MAC_LATENCY), $(CIM_MODE), $(CIM_SIGNED), $(CIM_TILE_INPUT_AXIS_ELEMENTS), $(CIM_TILE_OUTPUT_AXIS_ELEMENTS), $(CIM_INPUT_AXIS_TILES), $(CIM_OUTPUT_AXIS_TILES), $(CIM_A_PORT_TILES), $(CIM_B_PORT_TILES), $(CIM_C_PORT_TILES), $(CIM_C_BEAT_LAYOUT)
+CIM_PROCESSOR_TPARAMS := InputTypeList, WeightTypeList, DataTypes::int8, DataTypes::int8, DataTypes::int24, DataTypes::int24, DataTypes::fp8_e8m0, $(CIM_PROCESSOR_IC_DIMENSION), $(CIM_PROCESSOR_OC_DIMENSION), $(CIM_PROCESSOR_BUFFER_SIZE), $(CIM_CH_IN), $(CIM_CH_OUT), $(CIM_B_SETS), $(CIM_BASE_A_WIDTH), $(CIM_BASE_B_WIDTH), $(CIM_BASE_C_WIDTH), $(CIM_WRITE_CH_IN), $(CIM_MAC_LATENCY), $(CIM_MODE), $(CIM_SIGNED), $(CIM_TILE_INPUT_AXIS_ELEMENTS), $(CIM_TILE_OUTPUT_AXIS_ELEMENTS), $(CIM_INPUT_AXIS_TILES), $(CIM_OUTPUT_AXIS_TILES), $(CIM_A_PORT_TILES), $(CIM_B_PORT_TILES), $(CIM_C_PORT_TILES), $(CIM_C_BEAT_LAYOUT), $(CIM_ARRAY_RESULT_SLOTS_PER_OUTPUT_LANE)
 HLS_TOP_PROCESSOR := CIMProcessor<$(CIM_PROCESSOR_TPARAMS)>
 CIM_TILE_CONFIG := ci$(CIM_CH_IN)_co$(CIM_CH_OUT)_bs$(CIM_B_SETS)_base$(CIM_BASE_A_WIDTH)x$(CIM_BASE_B_WIDTH)x$(CIM_BASE_C_WIDTH)_w$(CIM_WRITE_CH_IN)_lat$(CIM_MAC_LATENCY)_m$(CIM_MODE)_a$(CIM_A_WIDTH)_b$(CIM_B_WIDTH)_s$(CIM_SIGNED)_tie$(CIM_TILE_INPUT_AXIS_ELEMENTS)_toe$(CIM_TILE_OUTPUT_AXIS_ELEMENTS)
-CIM_ARRAY_CONFIG := ci$(CIM_CH_IN)_co$(CIM_CH_OUT)_bs$(CIM_B_SETS)_base$(CIM_BASE_A_WIDTH)x$(CIM_BASE_B_WIDTH)x$(CIM_BASE_C_WIDTH)_w$(CIM_WRITE_CH_IN)_lat$(CIM_MAC_LATENCY)_m$(CIM_MODE)_a$(CIM_A_WIDTH)_b$(CIM_B_WIDTH)_c$(CIM_C_WIDTH)_s$(CIM_SIGNED)_tie$(CIM_TILE_INPUT_AXIS_ELEMENTS)_toe$(CIM_TILE_OUTPUT_AXIS_ELEMENTS)_iat$(CIM_INPUT_AXIS_TILES)_oat$(CIM_OUTPUT_AXIS_TILES)_apt$(CIM_A_PORT_TILES)_bpt$(CIM_B_PORT_TILES)_cpt$(CIM_C_PORT_TILES)_cbl$(CIM_C_BEAT_LAYOUT)
+CIM_ARRAY_CONFIG := ci$(CIM_CH_IN)_co$(CIM_CH_OUT)_bs$(CIM_B_SETS)_base$(CIM_BASE_A_WIDTH)x$(CIM_BASE_B_WIDTH)x$(CIM_BASE_C_WIDTH)_w$(CIM_WRITE_CH_IN)_lat$(CIM_MAC_LATENCY)_m$(CIM_MODE)_a$(CIM_A_WIDTH)_b$(CIM_B_WIDTH)_c$(CIM_C_WIDTH)_s$(CIM_SIGNED)_tie$(CIM_TILE_INPUT_AXIS_ELEMENTS)_toe$(CIM_TILE_OUTPUT_AXIS_ELEMENTS)_iat$(CIM_INPUT_AXIS_TILES)_oat$(CIM_OUTPUT_AXIS_TILES)_apt$(CIM_A_PORT_TILES)_bpt$(CIM_B_PORT_TILES)_cpt$(CIM_C_PORT_TILES)_cbl$(CIM_C_BEAT_LAYOUT)_rslots$(CIM_ARRAY_RESULT_SLOTS_PER_OUTPUT_LANE)
 HLS_TILE_BUILD := $(HLS_BUILD)/CIMTile/$(CIM_TILE_CONFIG)
 HLS_TILE_PROJECT := $(HLS_TILE_BUILD)/CIMTile.v1
 HLS_TILE_RTL := $(HLS_TILE_PROJECT)/rtl.v
 HLS_ARRAY_BUILD := $(HLS_BUILD)/CIMArray/$(CIM_ARRAY_CONFIG)
 HLS_ARRAY_PROJECT := $(HLS_ARRAY_BUILD)/CIMArray.v1
 HLS_ARRAY_RTL := $(HLS_ARRAY_PROJECT)/rtl.v
-HLS_PROCESSOR_BUILD := $(HLS_BUILD)/CIMProcessor/$(CIM_ARRAY_CONFIG)_ic$(CIM_PROCESSOR_IC_DIMENSION)_oc$(CIM_PROCESSOR_OC_DIMENSION)_db$(DOUBLE_BUFFERED_ACCUM_BUFFER)
+HLS_PROCESSOR_BUILD := $(HLS_BUILD)/CIMProcessor/$(CIM_ARRAY_CONFIG)_ic$(CIM_PROCESSOR_IC_DIMENSION)_oc$(CIM_PROCESSOR_OC_DIMENSION)_db$(DOUBLE_BUFFERED_ACCUM_BUFFER)_cad$(CIM_PROCESSOR_TEST_STRICT_CADENCE)
 HLS_PROCESSOR_PROJECT := $(HLS_PROCESSOR_BUILD)/CIMProcessor.v1
 HLS_PROCESSOR_RTL := $(HLS_PROCESSOR_PROJECT)/rtl.v
 SCVERIFY_ARRAY_PROJECT := $(HLS_ARRAY_PROJECT)
@@ -300,12 +321,14 @@ HLS_ENV = \
 	CIM_B_PORT_TILES=$(CIM_B_PORT_TILES) \
 	CIM_C_PORT_TILES=$(CIM_C_PORT_TILES) \
 	CIM_C_BEAT_LAYOUT=$(CIM_C_BEAT_LAYOUT) \
+	CIM_ARRAY_RESULT_SLOTS_PER_OUTPUT_LANE=$(CIM_ARRAY_RESULT_SLOTS_PER_OUTPUT_LANE) \
+	CIM_PROCESSOR_TEST_STRICT_CADENCE=$(CIM_PROCESSOR_TEST_STRICT_CADENCE) \
 	DOUBLE_BUFFERED_ACCUM_BUFFER=$(DOUBLE_BUFFERED_ACCUM_BUFFER) \
 	ENABLE_PERF_COUNTERS=$(ENABLE_PERF_COUNTERS) \
 	HLS_RESET_NAME=rstn \
 	$(if $(HLS_SCVERIFY),HLS_SCVERIFY=$(HLS_SCVERIFY))
 
-.PHONY: test test-macro test-element build-systemc build-systemc-element build-systemc-tile build-systemc-array build-systemc-processor build-systemc-processor-double-buffered build-systemc-processor-large build-systemc-matrix-unit test-systemc-element test-systemc-tile test-systemc-array test-systemc-processor test-systemc-processor-standard test-systemc-processor-double-buffered test-systemc-processor-large test-systemc-matrix-unit check-systemc-env check-verilator-env clean hls hls-tile hls-array hls-processor hls-processor-double-buffered hls-processor-run scverify-array scverify-array-run scverify-processor scverify-processor-double-buffered scverify-processor-run check-catapult-root check-catapult-env FORCE
+.PHONY: test test-macro test-element build-systemc build-systemc-element build-systemc-tile build-systemc-array build-systemc-processor build-systemc-processor-double-buffered build-systemc-processor-large build-systemc-matrix-unit test-systemc-element test-systemc-tile test-systemc-array test-systemc-processor test-systemc-processor-standard test-systemc-processor-cadence test-systemc-processor-double-buffered test-systemc-processor-large test-systemc-matrix-unit check-systemc-env check-verilator-env clean hls hls-tile hls-array hls-processor hls-processor-double-buffered hls-processor-run scverify-array scverify-array-run scverify-processor scverify-processor-cadence scverify-processor-double-buffered scverify-processor-run check-catapult-root check-catapult-env FORCE
 
 test: test-macro test-element test-systemc-element test-systemc-tile test-systemc-array test-systemc-processor test-systemc-matrix-unit
 
@@ -340,10 +363,15 @@ test-systemc-tile: check-systemc-env
 test-systemc-array: check-systemc-env
 	@$(PYTHON) $(SYSTEMC_RUNNER) --suite cim_array_systemc --build-target build-systemc-array --binary $(SYSTEMC_BUILD)/CIMArrayTb --log-dir $(SYSTEMC_BUILD)/logs/cim_array --makefile $(THIS_DIR)/Makefile --datatype $(DATATYPE) --ic-dimension $(IC_DIMENSION) --oc-dimension $(OC_DIMENSION)
 
-test-systemc-processor: test-systemc-processor-standard test-systemc-processor-double-buffered test-systemc-processor-large
+test-systemc-processor: test-systemc-processor-standard test-systemc-processor-cadence test-systemc-processor-double-buffered test-systemc-processor-large
 
 test-systemc-processor-standard: check-systemc-env
 	@$(PYTHON) $(SYSTEMC_RUNNER) --suite cim_processor_systemc --build-target build-systemc-processor --binary $(CIM_PROCESSOR_SYSTEMC_BUILD)/CIMProcessorTb --log-dir $(CIM_PROCESSOR_SYSTEMC_BUILD)/logs/cim_processor --makefile $(THIS_DIR)/Makefile --datatype INT8 --ic-dimension $(CIM_PROCESSOR_IC_DIMENSION) --oc-dimension $(CIM_PROCESSOR_OC_DIMENSION)
+
+test-systemc-processor-cadence:
+	$(MAKE) -C $(THIS_DIR) test-systemc-processor-standard \
+		CIM_ARRAY_PROCESSOR_TEST_RESULT_SLOTS_PER_OUTPUT_LANE=$(CIM_ARRAY_PROCESSOR_CADENCE_TEST_RESULT_SLOTS_PER_OUTPUT_LANE) \
+		CIM_PROCESSOR_TEST_STRICT_CADENCE=1
 
 test-systemc-processor-double-buffered: check-systemc-env
 	@$(PYTHON) $(SYSTEMC_RUNNER) --suite cim_processor_double_buffered_systemc --build-target build-systemc-processor-double-buffered --binary $(CIM_PROCESSOR_DB_SYSTEMC_BUILD)/CIMProcessorTb --log-dir $(CIM_PROCESSOR_DB_SYSTEMC_BUILD)/logs/cim_processor --makefile $(THIS_DIR)/Makefile --datatype INT8 --ic-dimension $(CIM_PROCESSOR_IC_DIMENSION) --oc-dimension $(CIM_PROCESSOR_OC_DIMENSION)
@@ -494,6 +522,11 @@ $(SCVERIFY_ARRAY_MK): $(SCVERIFY_ARRAY_DEPS) | check-catapult-env
 scverify-processor:
 	$(MAKE) -C $(THIS_DIR) scverify-processor-run HLS_SCVERIFY=1 HLS_SCVERIFY_TB=$(SCVERIFY_PROCESSOR_TB) DOUBLE_BUFFERED_ACCUM_BUFFER=false $(SCVERIFY_PROCESSOR_HLS_ARGS)
 
+scverify-processor-cadence:
+	$(MAKE) -C $(THIS_DIR) scverify-processor \
+		CIM_ARRAY_PROCESSOR_TEST_RESULT_SLOTS_PER_OUTPUT_LANE=$(CIM_ARRAY_PROCESSOR_CADENCE_TEST_RESULT_SLOTS_PER_OUTPUT_LANE) \
+		CIM_PROCESSOR_TEST_STRICT_CADENCE=1
+
 scverify-processor-double-buffered:
 	$(MAKE) -C $(THIS_DIR) scverify-processor-run HLS_SCVERIFY=1 HLS_SCVERIFY_TB=$(SCVERIFY_PROCESSOR_TB) DOUBLE_BUFFERED_ACCUM_BUFFER=true $(SCVERIFY_PROCESSOR_HLS_ARGS)
 
@@ -511,7 +544,7 @@ $(SCVERIFY_PROCESSOR_MK): $(SCVERIFY_PROCESSOR_DEPS) | check-catapult-env
 	HLS_PROJECT_DIR=$(HLS_PROCESSOR_BUILD) HLS_CLOCKS='clk' \
 	$(CATAPULT) -shell -file $(HLS_DRIVER) -logfile $(HLS_PROCESSOR_BUILD).log
 
-# HLS env: the shared toolchain root plus the catapult binary (no test-config vars).
+# HLS environment shared by synthesis and SCVerify testbench compilation
 check-catapult-env: check-catapult-root
 	@command -v $(CATAPULT) >/dev/null 2>&1 || { echo "'$(CATAPULT)' not found in PATH (source env.sh)"; exit 2; }
 

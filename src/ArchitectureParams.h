@@ -362,6 +362,12 @@ using F9 = StdFloat<3, 5>;
 #endif
 #endif
 
+// One unreduced request needs one slot per input-axis tile
+// Performance configurations may add slots for return latency and elasticity
+#ifndef CIM_ARRAY_RESULT_SLOTS_PER_OUTPUT_LANE
+#define CIM_ARRAY_RESULT_SLOTS_PER_OUTPUT_LANE CIM_INPUT_AXIS_TILES
+#endif
+
 // ================================================================
 // Datatype Width Configuration
 // ================================================================
