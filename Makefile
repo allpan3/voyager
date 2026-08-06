@@ -250,11 +250,13 @@ MATRIX_BACKEND_RTL := $(CATAPULT_BUILD_DIR)/CIMProcessor/CIMProcessor.v1/concat_
 # against; the per-file RTL flow does, and needs the CIM include path
 SCVERIFY_RTL_MK := Verify_rtl_v_vcs.mk
 SCVERIFY_RTL_ARGS := VLOG_INCDIRS=$(PROJ_ROOT)/src/CIM
+MATRIX_UNIT_RTL := $(CATAPULT_BUILD_DIR)/MatrixUnit/MatrixUnit.v1/concat_rtl.sv
 ACCELERATOR_RTL := $(CATAPULT_BUILD_DIR)/Accelerator/Accelerator.v1/concat_rtl.sv
 else
 MATRIX_BACKEND_RTL := $(CATAPULT_BUILD_DIR)/MatrixProcessor/MatrixProcessor.v1/concat_rtl.v
 SCVERIFY_RTL_MK := Verify_concat_sim_rtl_v_vcs.mk
 SCVERIFY_RTL_ARGS :=
+MATRIX_UNIT_RTL := $(CATAPULT_BUILD_DIR)/MatrixUnit/MatrixUnit.v1/concat_rtl.v
 ACCELERATOR_RTL := $(CATAPULT_BUILD_DIR)/Accelerator/Accelerator.v1/concat_rtl.v
 endif
 
@@ -264,6 +266,7 @@ InputController: $(CATAPULT_BUILD_DIR)/InputController/InputController.v1/concat
 WeightController: $(CATAPULT_BUILD_DIR)/WeightController/WeightController.v1/concat_rtl.v
 SystolicArray: $(CATAPULT_BUILD_DIR)/SystolicArray/SystolicArray.v1/concat_rtl.v
 MatrixProcessor: $(CATAPULT_BUILD_DIR)/MatrixProcessor/MatrixProcessor.v1/concat_rtl.v
+MatrixUnit: $(MATRIX_UNIT_RTL)
 CIMArray:
 	env -u CATAPULT_BUILD_DIR $(MAKE) cim-array-rtl MATRIX_BACKEND=1 CIM_C_BEAT_LAYOUT=1
 CIMProcessor:
@@ -397,6 +400,20 @@ $(CATAPULT_BUILD_DIR)/DwCUnit/DwCUnit.v1/concat_rtl.v: src/DwCUnit.h $(CATAPULT_
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=DwCUnit catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/DwCUnit.log
 
+$(MATRIX_UNIT_RTL): \
+	src/MatrixUnit.h \
+	src/DoubleBuffer.h \
+	scripts/blocks/MatrixUnit.tcl \
+	scripts/architecture.tcl \
+	scripts/utils/setup_project.tcl \
+	$(CATAPULT_BUILD_DIR)/InputController/InputController.v1/concat_rtl.v \
+	$(CATAPULT_BUILD_DIR)/WeightController/WeightController.v1/concat_rtl.v \
+	$(CATAPULT_BUILD_DIR)/MatrixParamsDeserializer/MatrixParamsDeserializer.v1/concat_rtl.v \
+	$(MATRIX_BACKEND_RTL) \
+	$(PROTOS_DEPENDENCY)
+	mkdir -p $(CATAPULT_BUILD_DIR)
+	BLOCK=MatrixUnit catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/MatrixUnit.log
+
 $(ACCELERATOR_RTL): \
 	src/Accelerator.h \
 	src/DoubleBuffer.h \
@@ -414,7 +431,7 @@ $(ACCELERATOR_RTL): \
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=Accelerator catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/Accelerator.log
 
-.PHONY: rtl Accelerator InputController WeightController MatrixProcessor CIMArray CIMProcessor cim-array-rtl cim-processor-rtl ProcessingElement CIMElement CIMUnit VectorUnit VectorParamsDeserializer VectorFetchUnit VectorPipeline VectorReducer VectorAccumulator OutputController MatrixVectorUnit MulAddTree DwCUnit
+.PHONY: rtl Accelerator InputController WeightController MatrixProcessor MatrixUnit CIMArray CIMProcessor cim-array-rtl cim-processor-rtl ProcessingElement CIMElement CIMUnit VectorUnit VectorParamsDeserializer VectorFetchUnit VectorPipeline VectorReducer VectorAccumulator OutputController MatrixVectorUnit MulAddTree DwCUnit
 
 # Run RTL simulation
 .PHONY: rtl-sim
