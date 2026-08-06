@@ -22,6 +22,7 @@ module CIMVanillaMacro #(
     input wire CEN,               //Compute enable, low active
     output reg [DOUT_BITS-1:0] DOUT
 );
+// synthesis translate_off
     logic [$clog2(A_BITS+1)-1:0] bit_cnt;
 
     logic [DIN_BITS-1:0] WSRAM [CIN];
@@ -70,6 +71,7 @@ module CIMVanillaMacro #(
         end
     end
     endgenerate
+// synthesis translate_on
 endmodule
 /* verilator lint_on WIDTHTRUNC */
 /* verilator lint_on WIDTHEXPAND */

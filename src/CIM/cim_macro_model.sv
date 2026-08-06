@@ -29,9 +29,8 @@ module CIMIntMacroModel #(
     input  logic [BITS_ROW-1:0]   mrow,                    // Address to select the row for MAC computation
     output logic [C_WIDTH-1:0]    c [CH_OUT]
 );
-`ifndef SYNTHESIS
+// synthesis translate_off
   import CIMExceptionPkg::*;
-`endif
 
   // Stored B data
   logic [B_WIDTH-1:0] b_mem [NUM_ROWS][CH_IN][CH_OUT];
@@ -51,7 +50,6 @@ module CIMIntMacroModel #(
   logic [B_WIDTH-1:0] b_mac [CH_IN][CH_OUT];
   assign b_mac = b_mem[mrow];
 
-`ifndef SYNTHESIS
   // Report model protocol violations as fatal unless a collection test asks to log and keep going
   task automatic report_model_violation(input string exception_type, input string message);
     begin
@@ -69,7 +67,6 @@ module CIMIntMacroModel #(
       report_model_violation(EXCEPTION_TYPE_ROW_WRITE_MAC_COLLISION, $sformatf("CIMIntMacroModel row protocol violation: write and MAC target row %0d while both enables are high", wrow));
     end
   end
-`endif
 
   // -- MAC logic
   generate
@@ -317,4 +314,5 @@ module CIMIntMacroModel #(
     end
   endgenerate
 
+// synthesis translate_on
 endmodule
