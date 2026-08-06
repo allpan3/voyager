@@ -1134,8 +1134,7 @@ SC_MODULE(CIMProcessor) {
           counters[MatrixPerformance::storage_index(
               MatrixPerformance::WEIGHT_UNAVAILABLE_CYCLES)]++;
 #ifdef __SYNTHESIS__
-        if (write_request_channel.vld.read() &&
-            !write_request_channel.rdy.read())
+        if (weight_channel.vld.read() && !weight_channel.rdy.read())
           counters[MatrixPerformance::storage_index(
               MatrixPerformance::WEIGHT_BACKPRESSURE_CYCLES)]++;
         if (result_channel.vld.read() && !result_channel.rdy.read())

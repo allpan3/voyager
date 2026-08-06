@@ -869,7 +869,7 @@ struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
           counters[MatrixPerformance::storage_index(
               MatrixPerformance::WEIGHT_UNAVAILABLE_CYCLES)]++;
 #ifdef __SYNTHESIS__
-        if (weight_skewer_din.vld.read() && !weight_skewer_din.rdy.read())
+        if (weight_channel.vld.read() && !weight_channel.rdy.read())
           counters[MatrixPerformance::storage_index(
               MatrixPerformance::WEIGHT_BACKPRESSURE_CYCLES)]++;
         if (psum_out_skewer_dout.vld.read() && !psum_out_skewer_dout.rdy.read())
