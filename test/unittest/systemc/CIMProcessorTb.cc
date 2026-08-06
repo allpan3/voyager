@@ -608,7 +608,12 @@ SC_MODULE(CIMProcessorTb) {
         read_performance_counter(MatrixPerformance::INPUT_BACKPRESSURE_CYCLES);
     const MatrixPerformance::Counter completion_storage_stall_cycles =
         read_performance_counter(
-            MatrixPerformance::CIM_COMPLETION_QUEUE_STALL_CYCLES);
+            MatrixPerformance::CIM_COMPLETION_STORAGE_STALL_CYCLES);
+    const MatrixPerformance::Counter result_slot_stall_cycles =
+        read_performance_counter(MatrixPerformance::CIM_RESULT_SLOT_STALL_CYCLES);
+    const MatrixPerformance::Counter completion_descriptor_stall_cycles =
+        read_performance_counter(
+            MatrixPerformance::CIM_COMPLETION_DESCRIPTOR_STALL_CYCLES);
 
     std::cout << "RTL_COMPLETION_COUNTER input_axis_tiles=" << INPUT_AXIS_TILES
               << " output_axis_tiles=" << OUTPUT_AXIS_TILES
@@ -617,7 +622,10 @@ SC_MODULE(CIMProcessorTb) {
               << " issue_cycles=" << issue_cycles
               << " input_backpressure_cycles=" << input_backpressure_cycles
               << " completion_storage_stall_cycles="
-              << completion_storage_stall_cycles << std::endl;
+              << completion_storage_stall_cycles
+              << " result_slot_stall_cycles=" << result_slot_stall_cycles
+              << " completion_descriptor_stall_cycles="
+              << completion_descriptor_stall_cycles << std::endl;
   }
 #endif
 

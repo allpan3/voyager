@@ -335,6 +335,8 @@ SC_MODULE(CIMArray) {
   Connections::Out<CBeat> CCS_INIT_S1(result_channel);
 #if ENABLE_PERF_COUNTERS
   sc_out<bool> CCS_INIT_S1(completion_storage_stall);
+  sc_out<bool> CCS_INIT_S1(result_slot_stall);
+  sc_out<bool> CCS_INIT_S1(completion_descriptor_stall);
 #endif
 
   // Construct CIM tiles and HLS control threads
@@ -659,19 +661,30 @@ SC_MODULE(CIMArray) {
     return reduce ? 1 : INPUT_AXIS_TILES;
   }
 
-  // Return whether all selected output lanes and the descriptor queue can
-  // reserve one request, including storage released on the same edge
-  bool completion_storage_available(const MACRequest& request) const {
+  // Track each completion-storage resource's admission result
+  struct CompletionStorageAvailability {
+    bool descriptors;
+    bool result_slots;
+
+    // Return whether every completion-storage resource is available
+    bool all() const { return descriptors && result_slots; }
+  };
+
+  // Return completion-storage admission including same-edge release credit
+  CompletionStorageAvailability completion_storage_availability(
+      const MACRequest& request) const {
     const bool release_fire = completion_releases_on_fire();
     const CompletionToken release_token = completion_release_head.read();
     const int released_slots = release_fire
                                    ? request_slots_per_selected_output_lane(
                                          token_reduced(release_token))
                                    : 0;
-    bool available =
+    CompletionStorageAvailability availability;
+    availability.descriptors =
         !completion_queue_full(completion_allocate_pointer.read(),
                                completion_release_pointer.read()) ||
         release_fire;
+    availability.result_slots = true;
     const int requested_slots =
         request_slots_per_selected_output_lane(request.reduce != 0);
 
@@ -688,10 +701,11 @@ SC_MODULE(CIMArray) {
                      token_output_lane_selected(release_token, output_axis_idx)
                  ? released_slots
                  : 0);
-        available = available && available_slots >= requested_slots;
+        availability.result_slots =
+            availability.result_slots && available_slots >= requested_slots;
       }
     }
-    return available;
+    return availability;
   }
 
   // Return whether any element still holds the B set of an in-flight MAC
@@ -731,8 +745,8 @@ SC_MODULE(CIMArray) {
     if (mac_valid) {
       const MACRequest mac_request =
           ConnectionsSignal::peek(mac_request_channel);
-      mac_fires =
-          completion_storage_available(mac_request) && mac_tiles_ready();
+      mac_fires = completion_storage_availability(mac_request).all() &&
+                  mac_tiles_ready();
       firing_mset = mac_request.mset;
     }
     const bool blocked_by_firing_mac = mac_fires && request.wset == firing_mset;
@@ -766,8 +780,28 @@ SC_MODULE(CIMArray) {
     request.reduce = 0;
     clear_pack(request.a);
 
-    const bool valid =
-        rstn.read() && ConnectionsSignal::valid(mac_request_channel);
+    if (!rstn.read()) {
+      ConnectionsSignal::set_ready(mac_request_channel, false);
+      bus_mset.write(0);
+#pragma hls_unroll yes
+      for (int input_axis_idx = 0; input_axis_idx < INPUT_AXIS_TILES;
+           input_axis_idx++) {
+        bus_a[input_axis_idx].write(request.a[input_axis_idx]);
+      }
+#pragma hls_unroll yes
+      for (int output_axis_idx = 0; output_axis_idx < OUTPUT_AXIS_TILES;
+           output_axis_idx++) {
+        mac_issue[output_axis_idx].write(false);
+      }
+#if ENABLE_PERF_COUNTERS
+      completion_storage_stall.write(false);
+      result_slot_stall.write(false);
+      completion_descriptor_stall.write(false);
+#endif
+      return;
+    }
+
+    const bool valid = ConnectionsSignal::valid(mac_request_channel);
     if (valid) {
       request = ConnectionsSignal::peek(mac_request_channel);
     }
@@ -777,12 +811,15 @@ SC_MODULE(CIMArray) {
                       "MAC request output_axis_idx is outside the output axis");
     }
 #endif
-    const bool storage_available = completion_storage_available(request);
-    const bool ready = rstn.read() && storage_available && mac_tiles_ready();
+    const CompletionStorageAvailability storage =
+        completion_storage_availability(request);
+    const bool ready = rstn.read() && storage.all() && mac_tiles_ready();
     const bool fire = valid && ready;
     ConnectionsSignal::set_ready(mac_request_channel, ready);
 #if ENABLE_PERF_COUNTERS
-    completion_storage_stall.write(valid && !storage_available);
+    completion_storage_stall.write(valid && !storage.all());
+    result_slot_stall.write(valid && !storage.result_slots);
+    completion_descriptor_stall.write(valid && !storage.descriptors);
 #endif
 
     bus_mset.write(fire ? request.mset : held_mset.read());
@@ -826,7 +863,7 @@ SC_MODULE(CIMArray) {
         held_mset.write(request.mset);
 
 #ifndef __SYNTHESIS__
-        if (!completion_storage_available(request)) {
+        if (!completion_storage_availability(request).all()) {
           SC_REPORT_FATAL("CIMArray",
                           "MAC issue overflowed completion storage despite "
                           "unavailable output-lane slots");

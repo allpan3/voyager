@@ -256,6 +256,8 @@ SC_MODULE(CIMProcessor) {
   Connections::Combinational<CBeat> CCS_INIT_S1(result_channel);
 #if ENABLE_PERF_COUNTERS
   sc_signal<bool> completion_storage_stall;
+  sc_signal<bool> result_slot_stall;
+  sc_signal<bool> completion_descriptor_stall;
 #endif
 
   // Isolate CIM result retirement from the SA-shaped accumulation pipeline
@@ -333,6 +335,8 @@ SC_MODULE(CIMProcessor) {
     cim_array.result_channel(result_channel);
 #if ENABLE_PERF_COUNTERS
     cim_array.completion_storage_stall(completion_storage_stall);
+    cim_array.result_slot_stall(result_slot_stall);
+    cim_array.completion_descriptor_stall(completion_descriptor_stall);
 #endif
 
     accum_to_wb_fifo.clk(clk);
@@ -1113,7 +1117,13 @@ SC_MODULE(CIMProcessor) {
               MatrixPerformance::INPUT_BACKPRESSURE_CYCLES)]++;
         if (completion_storage_stall.read())
           counters[MatrixPerformance::storage_index(
-              MatrixPerformance::CIM_COMPLETION_QUEUE_STALL_CYCLES)]++;
+              MatrixPerformance::CIM_COMPLETION_STORAGE_STALL_CYCLES)]++;
+        if (result_slot_stall.read())
+          counters[MatrixPerformance::storage_index(
+              MatrixPerformance::CIM_RESULT_SLOT_STALL_CYCLES)]++;
+        if (completion_descriptor_stall.read())
+          counters[MatrixPerformance::storage_index(
+              MatrixPerformance::CIM_COMPLETION_DESCRIPTOR_STALL_CYCLES)]++;
         const bool set_wait =
             set_ready_deq.rdy.read() && !set_ready_deq.vld.read();
         if (set_wait)

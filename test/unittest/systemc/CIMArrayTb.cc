@@ -84,6 +84,8 @@ struct CIMArrayTbCase : sc_module {
   Connections::Combinational<CBeat> result_channel;
 #if ENABLE_PERF_COUNTERS
   sc_signal<bool> completion_storage_stall;
+  sc_signal<bool> result_slot_stall;
+  sc_signal<bool> completion_descriptor_stall;
 #endif
   unsigned mac_accept_count = 0;
   unsigned total_mac_accept_count = 0;
@@ -93,6 +95,8 @@ struct CIMArrayTbCase : sc_module {
   unsigned long last_result_fire_cycle = 0;
 #if ENABLE_PERF_COUNTERS
   unsigned long completion_storage_stall_cycles = 0;
+  unsigned long result_slot_stall_cycles = 0;
+  unsigned long completion_descriptor_stall_cycles = 0;
 #endif
   unsigned blocked_mac_accept_start = 0;
 
@@ -118,6 +122,8 @@ struct CIMArrayTbCase : sc_module {
     dut.result_channel(result_channel);
 #if ENABLE_PERF_COUNTERS
     dut.completion_storage_stall(completion_storage_stall);
+    dut.result_slot_stall(result_slot_stall);
+    dut.completion_descriptor_stall(completion_descriptor_stall);
 #endif
 
     clear_expected_state();
@@ -173,6 +179,12 @@ struct CIMArrayTbCase : sc_module {
 #if ENABLE_PERF_COUNTERS
     if (completion_storage_stall.read()) {
       completion_storage_stall_cycles++;
+    }
+    if (result_slot_stall.read()) {
+      result_slot_stall_cycles++;
+    }
+    if (completion_descriptor_stall.read()) {
+      completion_descriptor_stall_cycles++;
     }
 #endif
 #ifdef CONNECTIONS_SIM_ONLY
@@ -926,6 +938,9 @@ struct CIMArrayTbCase : sc_module {
     const unsigned start_accepted = total_mac_accept_count;
 #if ENABLE_PERF_COUNTERS
     const unsigned long start_stall = completion_storage_stall_cycles;
+    const unsigned long start_slot_stall = result_slot_stall_cycles;
+    const unsigned long start_descriptor_stall =
+        completion_descriptor_stall_cycles;
 #endif
     int accepted = 0;
     int completed = 0;
@@ -952,6 +967,18 @@ struct CIMArrayTbCase : sc_module {
     }
     require(expected_beats.empty(),
             "sustained issue check left expected results undrained");
+#if ENABLE_PERF_COUNTERS
+    const unsigned long storage_stalls =
+        completion_storage_stall_cycles - start_stall;
+    const unsigned long slot_stalls =
+        result_slot_stall_cycles - start_slot_stall;
+    const unsigned long descriptor_stalls =
+        completion_descriptor_stall_cycles - start_descriptor_stall;
+    require(storage_stalls >= slot_stalls &&
+                storage_stalls >= descriptor_stalls &&
+                storage_stalls <= slot_stalls + descriptor_stalls,
+            "completion-storage stall union disagrees with its components");
+#endif
 #ifdef SCVERIFY
     constexpr const char* kSweepLabel = "RTL_COMPLETION_SWEEP";
 #else
@@ -964,15 +991,16 @@ struct CIMArrayTbCase : sc_module {
               << " cycles=" << total_cycles - start_cycle
               << " accepted=" << total_mac_accept_count - start_accepted;
 #if ENABLE_PERF_COUNTERS
-    std::cout << " stall_cycles="
-              << completion_storage_stall_cycles - start_stall;
+    std::cout << " completion_storage_stall_cycles=" << storage_stalls
+              << " result_slot_stall_cycles=" << slot_stalls
+              << " completion_descriptor_stall_cycles=" << descriptor_stalls;
 #endif
     std::cout << std::endl;
   }
 
-  // Check that a full completion queue stops issue and retains every result
+  // Check that full lane-local result slots stop issue and retain every result
   // through output backpressure
-  void run_completion_queue_backpressure_check() {
+  void run_result_slot_backpressure_check() {
     const Set mset = transaction_wset(59);
     load_weight_set(mset, 59);
 
@@ -991,7 +1019,7 @@ struct CIMArrayTbCase : sc_module {
     blocked_request.output_axis_idx = 0;
     blocked_request.reduce = 1;
     require(!mac_request_channel.PushNB(blocked_request),
-            "completion queue accepted a request without a free slot");
+            "completion storage accepted a request without a free result slot");
 
     drain_expected_beats();
 
@@ -1084,7 +1112,7 @@ struct CIMArrayTbCase : sc_module {
     run_depth_one_completion_release_check();
     run_multibeat_completion_release_check();
     run_sustained_issue_check();
-    run_completion_queue_backpressure_check();
+    run_result_slot_backpressure_check();
     run_replicate_write_check();
     run_overwrite_after_set_switch_check();
     run_reset_recovery_check();

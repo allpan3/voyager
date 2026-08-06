@@ -616,7 +616,9 @@ void Harness::print_matrix_performance() {
       "weight_unavailable_cycles",  "weight_backpressure_cycles",
       "result_backpressure_cycles", "accumulation_stall_cycles",
       "output_backpressure_cycles", "output_fifo_full_cycles",
-      "cim_set_wait_cycles",        "cim_completion_queue_stall_cycles",
+      "cim_set_wait_cycles",        "cim_completion_storage_stall_cycles",
+      "cim_result_slot_stall_cycles",
+      "cim_completion_descriptor_stall_cycles",
   };
 
   MatrixPerformance::Counter values[MatrixPerformance::COUNTER_COUNT];
