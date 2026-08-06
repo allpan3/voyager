@@ -14,8 +14,9 @@ dependencies:
       - deepdiff
       - huggingface-hub==1.24.0
       - xonsh
+      - prompt_toolkit==3.0.53
       - openpyxl
-      - git+https://github.com/mflowgen/mflowgen.git@69412255acc2c509e98105804e5a97d9738ddfe1#egg=mflowgen
+      - git+https://github.com/allpan3/mflowgen.git@8914a6d9cd67430ed61914a6b8ae11a14a60f61f#egg=mflowgen
       - pandas
       - compiledb
       - -e voyager-compiler
