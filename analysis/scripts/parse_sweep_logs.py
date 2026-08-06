@@ -4,7 +4,7 @@
 Usage: parse_sweep_logs.py <sweep_dir> <out_csv>
 
 Config metadata comes entirely from <sweep_dir>/manifest.csv (emitted by
-matrix_backend_sweep.sh), so nothing about the design space is hardcoded here.
+matrix_backend_sweep.py), so nothing about the design space is hardcoded here.
 Log files are named
     <config>[_pw<bits>]__<layer>.log         SystemC functional run
     <config>[_pw<bits>]__rtl__<layer>.log    RTL cosim (cycle-accurate + counters)
@@ -22,11 +22,15 @@ PERF_COUNTERS = [
     "weight_unavailable_cycles", "weight_backpressure_cycles",
     "result_backpressure_cycles", "accumulation_stall_cycles",
     "output_backpressure_cycles", "output_fifo_full_cycles",
-    "cim_set_wait_cycles", "cim_completion_queue_stall_cycles",
+    "cim_set_wait_cycles", "cim_completion_storage_stall_cycles",
+    "cim_result_slot_stall_cycles",
+    "cim_completion_descriptor_stall_cycles",
 ]
 CIM_STALL_COUNTERS = [
     "cim_set_wait_cycles",
-    "cim_completion_queue_stall_cycles",
+    "cim_completion_storage_stall_cycles",
+    "cim_result_slot_stall_cycles",
+    "cim_completion_descriptor_stall_cycles",
 ]
 
 
@@ -56,6 +60,12 @@ def cim_mac_issue_cycles(meta):
 manifest_path = os.path.join(SWEEP_DIR, "manifest.csv")
 if not os.path.exists(manifest_path):
     sys.exit(f"no manifest at {manifest_path}")
+
+workload_path = os.path.join(SWEEP_DIR, "workloads.csv")
+WORKLOAD_NETWORK = {}
+if os.path.exists(workload_path):
+    for workload in csv.DictReader(open(workload_path)):
+        WORKLOAD_NETWORK[workload["layer"]] = workload["network"]
 
 CFG = {}
 for m in csv.DictReader(open(manifest_path)):
@@ -95,6 +105,7 @@ for m in csv.DictReader(open(manifest_path)):
         # The array every point is judged against. Absent in older manifests;
         # the workbook falls back to inferring it from the systolic rows.
         baseline_geometry=m.get("baseline_geometry") or "",
+        technology=m.get("technology") or "",
         datatype=m.get("datatype") or "",
         clock_period_ns=float(clock_period),
         native_width=(native + "b") if (is_cim and native) else "",
@@ -102,6 +113,7 @@ for m in csv.DictReader(open(manifest_path)):
         mac_latency=(m.get("cim_mac_latency") or "1") if is_cim else "",
         mode=(m.get("cim_mode") or "0") if is_cim else "",
         b_sets=(m.get("cim_b_sets") or "2") if is_cim else "",
+        result_slots=(m.get("cim_result_slots_per_output_lane") or "") if is_cim else "",
         ch_in=m["ch_in"], ch_out=m["ch_out"],
         ch_in_value=int(m["ch_in"]) if is_cim else None,
         input_axis_tiles=m["input_axis_tiles"] or "",
@@ -121,6 +133,9 @@ for fn in sorted(os.listdir(SWEEP_DIR)):
     sim = "systemc"
     if layer.startswith("rtl__"):
         sim, layer = "rtl", layer[len("rtl__"):]
+    # Treat workloads.csv as the reportable workload allowlist
+    if WORKLOAD_NETWORK and layer not in WORKLOAD_NETWORK:
+        continue
     # _pw<bits> pins both ports; _pw<ic>x<oc> pins them separately (asymmetric
     # geometries). No suffix means the widths were left derived, i.e. matched.
     mm = re.match(r"^(.*)_pw(\d+)(?:x(\d+))?$", tag)
@@ -149,7 +164,7 @@ for fn in sorted(os.listdir(SWEEP_DIR)):
         return [float(value) for value in re.findall(pat, txt, re.M | re.I)]
 
     ok = bool(re.search(r"Error\s+count:\s+0\b", txt))
-    number = r"(\d+(?:\.\d+)?)"
+    number = r"([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)"
     total_ns = grab_number(rf"^Total Runtime:\s+{number}\s*ns")
     matrix_unit_values = grab_numbers(rf"^Matrix Unit Runtime:\s+{number}\s*ns")
     matrix_unit_ns = sum(matrix_unit_values) if matrix_unit_values else None
@@ -175,9 +190,10 @@ for fn in sorted(os.listdir(SWEEP_DIR)):
         perf = dict(kv.split("=") for kv in pm.group(1).split())
         if "processor_active_cycles" not in perf and "core_cycles" in perf:
             perf["processor_active_cycles"] = perf["core_cycles"]
-        if "cim_completion_queue_stall_cycles" not in perf:
-            perf["cim_completion_queue_stall_cycles"] = perf.get(
-                "cim_array_credit_stall_cycles", ""
+        if "cim_completion_storage_stall_cycles" not in perf:
+            perf["cim_completion_storage_stall_cycles"] = perf.get(
+                "cim_completion_queue_stall_cycles",
+                perf.get("cim_array_credit_stall_cycles", ""),
             )
 
     # Normalize one synthesized stall counter against its snapshot duration
@@ -221,6 +237,7 @@ for fn in sorted(os.listdir(SWEEP_DIR)):
         config=cfg, sim=sim, bw_mode="pinned" if pinned else "matched",
         ic_port_width_bits=ic_pw, oc_port_width_bits=oc_pw,
         clock_period_ns=clock_ns,
+        technology=meta["technology"],
         backend=meta["backend"], geometry=f"{ic}x{oc}", IC=ic, OC=oc, macs=ic * oc,
         baseline_geometry=meta["baseline_geometry"],
         datatype=meta["datatype"],
@@ -228,12 +245,13 @@ for fn in sorted(os.listdir(SWEEP_DIR)):
         cim_mac_latency=meta["mac_latency"],
         cim_mode="bit-serial" if meta["mode"] == "1" else ("bit-parallel" if meta["mode"] == "0" else ""),
         cim_b_sets=meta["b_sets"],
+        cim_result_slots_per_output_lane=meta["result_slots"],
         cim_ch_in=meta["ch_in"], cim_ch_out=meta["ch_out"],
         input_axis_tiles=meta["input_axis_tiles"],
         output_axis_tiles=meta["output_axis_tiles"],
         cim_tile_input_axis_elements=meta["tile_in_elems"],
         cim_tile_output_axis_elements=meta["tile_out_elems"],
-        layer=layer, passed=ok,
+        network=WORKLOAD_NETWORK.get(layer, ""), layer=layer, passed=ok,
         runtime_cycles=round(cyc) if cyc else "",
         runtime_us=round(total_ns / 1000.0, 3) if cyc else "",
         matrix_unit_cycles=round(matrix_unit_cyc) if matrix_unit_cyc else "",
@@ -252,7 +270,7 @@ for fn in sorted(os.listdir(SWEEP_DIR)):
         write_bw_pct_of_peak=round(100 * wr_bpc / peak_wr_bpc, 1) if wr_bpc else "",
         **{name: perf.get(name, "") for name in PERF_COUNTERS},
         **{
-            name.removesuffix("_cycles") + "_pct_of_processor": perf_pct_of_processor(name)
+            name[:-len("_cycles")] + "_pct_of_processor": perf_pct_of_processor(name)
             for name in CIM_STALL_COUNTERS
         },
     ))

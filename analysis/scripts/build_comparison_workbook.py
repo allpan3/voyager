@@ -56,19 +56,15 @@ CENTER = Alignment(wrap_text=True, horizontal="center", vertical="center")
 RIGHT = Alignment(horizontal="right", vertical="center")
 THIN_BOTTOM = Border(bottom=Side(style="thin", color=GRID))
 
-LAYER_ORDER = [
-    "mobilebert_encoder_layer_0_ffn_0_output_dense_fused",
-    "mobilebert_encoder_layer_0_output_bottleneck_dense_fused",
-    "mobilebert_encoder_layer_0_attention_output_dense_fused",
-    "matmul_6_fused",
-    "matmul_2_fused",
-]
 LAYER_SHORT = {
     "mobilebert_encoder_layer_0_ffn_0_output_dense_fused": "ffn_0_output_dense",
     "mobilebert_encoder_layer_0_output_bottleneck_dense_fused": "output_bottleneck_dense",
     "mobilebert_encoder_layer_0_attention_output_dense_fused": "attention_output_dense",
     "matmul_6_fused": "matmul_6 (attention context)",
     "matmul_2_fused": "matmul_2 (attention scores)",
+    "layer1_0_conv1_fused": "ResNet-18 layer1.0 conv1",
+    "layer2_0_conv1_fused": "ResNet-18 layer2.0 conv1",
+    "layer4_1_conv2_fused": "ResNet-18 layer4.1 conv2",
 }
 REQUIRED_RTL_FIELDS = [
     "runtime_cycles",
@@ -85,8 +81,10 @@ STALL_FIELDS = [
     ("accumulation_stall_cycles", "Accumulation stall"),
     ("output_fifo_full_cycles", "Output FIFO full"),
     ("output_backpressure_cycles", "Output backpressure"),
-    ("cim_set_wait_cycles", "CIM set wait"),
-    ("cim_completion_queue_stall_cycles", "CIM completion queue"),
+    ("cim_set_wait_cycles", "MAC wait on B set"),
+    ("cim_completion_storage_stall_cycles", "CIM completion storage"),
+    ("cim_result_slot_stall_cycles", "CIM result slots"),
+    ("cim_completion_descriptor_stall_cycles", "CIM descriptor queue"),
 ]
 STALL_DEFINITIONS = {
     "input_unavailable_cycles": (
@@ -96,9 +94,14 @@ STALL_DEFINITIONS = {
         "window formation. This counter identifies upstream input starvation but not which upstream stage caused it."
     ),
     "input_backpressure_cycles": (
-        "SA: a valid input beat is waiting at the input skewer because the array-side consumer is not ready.\n\n"
-        "CIM: a fully formed MAC request is valid, but CIMArray has ready low. The current CIM counter therefore "
-        "matches CIM completion-queue stall cycles."
+        "SA: push_inputs has accepted an input beat and presents its decoded vector to the input skewer, but at least "
+        "one per-row skewer FIFO cannot accept it. A PE row can stop consuming when its downstream input or partial-"
+        "sum output cannot advance, when result-deskewer or accumulation-path pressure propagates backward through "
+        "the partial-sum chain, or when a swap_weights input waits for the PE's one-entry next-weight FIFO.\n\n"
+        "CIM: issue_operations has accepted an input beat and presents a fully formed MAC request, but CIMArray has "
+        "ready low. This is the union of completion-storage unavailability and at least one selected tile having MAC "
+        "ready low. Waiting for a B-set-ready token happens before the input is accepted and is counted separately as "
+        "MAC wait on B set."
     ),
     "weight_unavailable_cycles": (
         "Counted when the processor's weight loader is ready for the next weight beat, but the upstream weight "
@@ -108,12 +111,14 @@ STALL_DEFINITIONS = {
         "or production of the next resident-set row beat."
     ),
     "weight_backpressure_cycles": (
-        "SA: push_weights has already popped a valid weight beat and is presenting it to the serialized weight "
-        "skewer, but one or more per-column skewer FIFOs cannot accept the vector while earlier weights drain into "
-        "the array.\n\n"
-        "CIM: load_weights has already popped a beat and is presenting a resident-set write request, but CIMArray "
-        "has ready low. The current CIMArray write port is always ready outside reset, so this counter is expected "
-        "to remain zero. Waiting for set_consumed happens before a request is presented and is not counted here."
+        "Counted when the upstream weight channel presents a valid beat but the processor's weight loader is not "
+        "ready to accept it. This is the producer-valid/consumer-not-ready counterpart to Weight unavailable and is "
+        "measured at the same processor input for SA and CIM.\n\n"
+        "SA receives this channel from the weight-buffer output. A common cause is push_weights holding a previously "
+        "accepted row while the serialized weight skewer or PE next-weight FIFOs drain. CIM receives the channel "
+        "directly from WeightController. It can block before accepting the next beat while waiting for resident-bank "
+        "reuse or while a previously accepted beat reaches CIMArray. MAC wait on B set instead measures compute-side "
+        "waiting for a resident set to finish loading."
     ),
     "result_backpressure_cycles": (
         "A raw array result is valid but the processor-side result consumer is not ready.\n\n"
@@ -139,16 +144,26 @@ STALL_DEFINITIONS = {
         "differs from Output FIFO full, which is measured at the FIFO's enqueue side."
     ),
     "cim_set_wait_cycles": (
-        "CIM only. The MAC issue loop has reached a weight-set swap and is ready to pop set_filled, but the loader has "
-        "not finished every row of that resident set. The loader may still be receiving weight beats or writing them "
-        "into CIMArray."
+        "CIM only. The MAC issue loop is ready to begin the next operation group but the required B-set-ready token "
+        "is unavailable because the loader has not finished that resident set. This is compute-side waiting for a B "
+        "set, not weight-channel backpressure. The loader may still be receiving weight beats or writing them into "
+        "CIMArray."
     ),
-    "cim_completion_queue_stall_cycles": (
-        "CIM only. Each accepted MAC immediately reserves one entry in CIMArray's central completion queue because "
-        "the fixed-latency tile pipeline cannot be stopped after issue.\n\n"
-        "The entry first holds request metadata, then the captured tile results, and is released only after its final "
-        "CBeat is accepted by CIMProcessor. This stall means all entries are reserved and no entry is being released "
-        "on the current cycle; it does not refer to a speculative result."
+    "cim_completion_storage_stall_cycles": (
+        "CIM only. A valid MAC request cannot reserve all completion resources. This is the union of descriptor-queue "
+        "exhaustion and insufficient result slots in any selected output lane, including same-edge CBeat release "
+        "credit. The component conditions can overlap, so their counters are diagnostic breakdowns and are not "
+        "additive."
+    ),
+    "cim_result_slot_stall_cycles": (
+        "CIM only. A valid MAC request lacks enough free result slots in at least one selected output lane. Reduced "
+        "requests reserve one slot per selected lane; unreduced requests reserve one slot per input-axis tile in each "
+        "selected lane. Slots remain reserved until the request's final CBeat is accepted."
+    ),
+    "cim_completion_descriptor_stall_cycles": (
+        "CIM only. A valid MAC request finds every central completion-descriptor entry reserved and no descriptor is "
+        "released by a final CBeat on the same cycle. Each accepted request owns one descriptor until its final CBeat "
+        "is accepted."
     ),
 }
 
@@ -196,6 +211,7 @@ def instance_label(row):
         base += (
             f" | native {native_width} | ci{ch_in}/co{ch_out} | {mode} | {sets} sets"
             f" | MAC latency {row.get('cim_mac_latency') or '1'}"
+            f" | {row.get('cim_result_slots_per_output_lane') or '?'} slots/lane"
         )
     return base
 
@@ -262,8 +278,22 @@ def set_widths(sheet, widths):
 
 
 all_layers = list(OrderedDict((row["layer"], None) for row in rows))
-layers = [layer for layer in LAYER_ORDER if layer in all_layers]
-layers.extend(sorted(layer for layer in all_layers if layer not in layers))
+workload_path = Path(SRC).resolve().with_name("workloads.csv")
+if workload_path.is_file():
+    with workload_path.open(newline="") as stream:
+        declared_layers = [row["layer"] for row in csv.DictReader(stream)]
+    layers = [layer for layer in declared_layers if layer in all_layers]
+else:
+    layers = all_layers
+
+
+# Return whether one RTL row carries complete matrix performance evidence
+def valid_rtl(row):
+    return (
+        row is not None
+        and passed(row["passed"])
+        and all(row.get(field) not in ("", None) for field in REQUIRED_RTL_FIELDS)
+    )
 
 point_rows = OrderedDict()
 for row in rows:
@@ -276,9 +306,7 @@ for key, observations in point_rows.items():
     passing_layers = [
         layer
         for layer in layers
-        if layer in rtl
-        and passed(rtl[layer]["passed"])
-        and all(rtl[layer].get(field) not in ("", None) for field in REQUIRED_RTL_FIELDS)
+        if valid_rtl(rtl.get(layer))
     ]
     reportable = len(passing_layers) == len(layers)
     if reportable:
@@ -286,7 +314,7 @@ for key, observations in point_rows.items():
     elif not rtl:
         reason = "RTL generation or simulation did not produce layer results"
     else:
-        reason = f"{len(passing_layers)}/{len(layers)} layers passed with complete RTL counters"
+        reason = f"{len(passing_layers)}/{len(layers)} workloads passed with complete RTL counters"
     points.append(
         {
             "key": key,
@@ -354,6 +382,7 @@ config_headers = [
     "CH_IN",
     "CH_OUT",
     "MAC latency",
+    "Result slots/lane",
     "SA reference",
 ]
 metric_headers = []
@@ -418,6 +447,7 @@ matrix_points = sorted(
         integer(point["row"].get("cim_b_sets")) or 0,
         integer(point["row"].get("cim_ch_in")) or 0,
         integer(point["row"].get("cim_ch_out")) or 0,
+        integer(point["row"].get("cim_result_slots_per_output_lane")) or 0,
     ),
 )
 for point in matrix_points:
@@ -437,6 +467,9 @@ for point in matrix_points:
         integer(row.get("cim_ch_in")) if row["backend"] == "cim" else None,
         integer(row.get("cim_ch_out")) if row["backend"] == "cim" else None,
         integer(row.get("cim_mac_latency"))
+        if row["backend"] == "cim"
+        else None,
+        integer(row.get("cim_result_slots_per_output_lane"))
         if row["backend"] == "cim"
         else None,
         instance_label(reference["row"]),
@@ -462,10 +495,10 @@ comparison_last = comparison_row - 1
 ws.auto_filter.ref = (
     f"A5:{get_column_letter(comparison_last_column)}{comparison_last}"
 )
-ws.freeze_panes = "M6"
+ws.freeze_panes = f"{get_column_letter(len(config_headers) + 1)}6"
 set_widths(
     ws,
-    [31, 9, 10, 14, 15, 13, 13, 8, 9, 9, 12, 34]
+    [31, 9, 10, 14, 15, 13, 13, 8, 9, 9, 12, 18, 34]
     + [14, 17, 14] * len(layers),
 )
 
@@ -503,8 +536,10 @@ result_row = 5
 for point in reportable_points:
     row = point["row"]
     fill = SA_BLUE if row["backend"] == "systolic" else CIM_GREEN
-    for layer in layers:
-        rtl = point["rtl"][layer]
+    for layer in all_layers:
+        rtl = point["rtl"].get(layer)
+        if not valid_rtl(rtl):
+            continue
         values = [
             instance_label(row),
             row["config"],
@@ -610,7 +645,7 @@ stall_headers = [
 style_title(ws, "Passing RTL stall counters — SA and CIM", len(stall_headers))
 ws["A2"] = (
     "Counters are simultaneous conditions and may overlap. "
-    "Complete signal-level definitions are in the final Definition sheet."
+    "Complete signal-level definitions are in the final Methodology sheet."
 )
 ws["A2"].font = Font(name=FONT, italic=True, color=GRAY)
 ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(stall_headers))
@@ -622,8 +657,10 @@ stall_row = 5
 for point in reportable_points:
     row = point["row"]
     fill = SA_BLUE if row["backend"] == "systolic" else CIM_GREEN
-    for layer in layers:
-        rtl = point["rtl"][layer]
+    for layer in all_layers:
+        rtl = point["rtl"].get(layer)
+        if not valid_rtl(rtl):
+            continue
         values = [
             instance_label(row),
             LAYER_SHORT.get(layer, layer),
@@ -658,6 +695,7 @@ design_headers = [
     "Instance",
     "Config",
     "Backend",
+    "Technology",
     "Datatype",
     "Array",
     "Input port bits",
@@ -669,8 +707,9 @@ design_headers = [
     "Macro native width",
     "CH_IN",
     "CH_OUT",
+    "Result slots/lane",
     "RTL status",
-    "Passing RTL layers",
+    "Passing RTL workloads",
     "Failure reason",
 ]
 style_title(ws, "Sweep design points and RTL status", len(design_headers))
@@ -690,6 +729,7 @@ for point in points:
         instance_label(row),
         row["config"],
         row["backend"],
+        row.get("technology") or None,
         row.get("datatype") or None,
         row["geometry"],
         integer(row["ic_port_width_bits"]),
@@ -701,6 +741,8 @@ for point in points:
         row.get("cim_macro_native_width") or None,
         integer(row.get("cim_ch_in")),
         integer(row.get("cim_ch_out")),
+        integer(row.get("cim_result_slots_per_output_lane"))
+        if row["backend"] == "cim" else None,
         "PASS" if point["reportable"] else "FAILED",
         f"{len(point['passing_layers'])}/{len(layers)}",
         point["reason"],
@@ -709,10 +751,11 @@ for point in points:
         ws.cell(design_row, column, value)
     fill = SA_BLUE if row["backend"] == "systolic" else CIM_GREEN
     style_body_row(ws, design_row, 1, len(design_headers), fill)
-    ws.cell(design_row, 15).fill = PatternFill(
+    status_column = design_headers.index("RTL status") + 1
+    ws.cell(design_row, status_column).fill = PatternFill(
         "solid", fgColor=PASS_GREEN if point["reportable"] else FAIL_RED
     )
-    ws.cell(design_row, 15).font = BODY_BOLD
+    ws.cell(design_row, status_column).font = BODY_BOLD
     design_row += 1
 add_table(
     ws,
@@ -723,11 +766,15 @@ add_table(
     len(design_headers),
 )
 ws.freeze_panes = "F5"
-set_widths(ws, [43, 31, 11, 12, 11, 14, 15, 16, 16, 16, 12, 18, 10, 10, 12, 17, 54])
+set_widths(
+    ws,
+    [43, 31, 11, 13, 12, 11, 14, 15, 16, 16, 16, 12, 18, 10, 10,
+     18, 12, 19, 54],
+)
 
-# ---------------------------------------------------------------- Definition
-ws = wb.create_sheet("Definition")
-style_title(ws, "Definition", 3)
+# --------------------------------------------------------------- Methodology
+ws = wb.create_sheet("Methodology")
+style_title(ws, "Methodology", 3)
 method_rows = [
     (
         "MatrixUnit cycles",
@@ -775,6 +822,19 @@ method_rows = [
         "Stall counters",
         "SA and CIM",
         "Stall conditions may overlap and must not be added. Complete signal-level definitions follow below.",
+    ),
+    (
+        "CIM result slots per output lane",
+        "CIM_ARRAY_RESULT_SLOTS_PER_OUTPUT_LANE",
+        "Physical tile-vector result entries owned independently by each output lane. Production reduced requests "
+        "reserve one slot in every selected lane until their final C beat is accepted; standalone unreduced requests "
+        "reserve INPUT_AXIS_TILES slots per selected lane.",
+    ),
+    (
+        "Result-slot selection",
+        "Explicit sweep parameter",
+        "The workbook does not infer that any slot count is sufficient. Use the measured CIM result-slot and "
+        "completion-storage stall counters to evaluate each hardware and workload combination.",
     ),
 ]
 method_rows.extend(

@@ -1,0 +1,8 @@
+# Generated analysis artifacts
+/.DS_Store
+/*.xlsx
+/*.xlsx.verification.json
+/figures/
+/workbook_qa/
+/*.inspect.ndjson
+__pycache__/
