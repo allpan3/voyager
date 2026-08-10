@@ -64,6 +64,11 @@ SC_MODULE(MatrixUnitTb) {
   Connections::SyncChannel start_channel;
   Connections::SyncChannel done_channel;
 
+#if ENABLE_PERF_COUNTERS
+  sc_signal<MatrixPerformance::CounterIndex> perf_counter_select;
+  sc_signal<MatrixPerformance::Counter> perf_counter_value;
+#endif
+
   std::deque<uint64_t> expected_input_addresses;
   std::deque<uint64_t> expected_weight_addresses;
   std::deque<int> expected_weight_burst_sizes;
@@ -100,6 +105,10 @@ SC_MODULE(MatrixUnitTb) {
     dut.output_addr(output_addr_channel);
     dut.start(start_channel);
     dut.done(done_channel);
+#if ENABLE_PERF_COUNTERS
+    dut.perf_counter_select(perf_counter_select);
+    dut.perf_counter_value(perf_counter_value);
+#endif
 
     SC_THREAD(run);
     sensitive << clk.posedge_event();

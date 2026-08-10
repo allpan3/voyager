@@ -85,7 +85,7 @@ foreach name {
 append compiler_flags $cim_geometry_flags
 set processor_test_flags ""
 foreach name {
-  CH_OUT BASE_A_WIDTH BASE_B_WIDTH BASE_C_WIDTH STRICT_CADENCE
+  CH_OUT B_SETS BASE_A_WIDTH BASE_B_WIDTH BASE_C_WIDTH STRICT_CADENCE
 } {
   set env_name "CIM_PROCESSOR_TEST_$name"
   if {[info exists ::env($env_name)]} {
