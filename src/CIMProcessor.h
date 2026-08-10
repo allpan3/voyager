@@ -624,24 +624,39 @@ SC_MODULE(CIMProcessor) {
       scheduled.first_set = next_set;
       scheduled_weight_descriptor_enq.Push(scheduled);
 
-      for (ac_int<16, false> tile_slot = 0; tile_slot < logical.set_count;
-           tile_slot++) {
-        const Set write_set = next_set;
-        while (!resident_set_has_state(write_set, SET_FREE)) {
-          wait();
-        }
+      ac_int<16, false> tile_slot = 0;
+      int k = 0;
+      int span = 0;
+      Set write_set = next_set;
 
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
-        for (int k = 0; k < K; k++) {
-          for (int span = 0; span < WEIGHT_BEATS_PER_ROW; span++) {
-            const ac_int<WEIGHT_WRITE_WIDTH, false> beat = weight_channel.Pop();
-            write_weight_beat(write_set, k, span, beat);
+      while (tile_slot < logical.set_count) {
+        // Only the first payload beat needs to wait for ownership of this set
+        if (k == 0 && span == 0) {
+          while (!resident_set_has_state(write_set, SET_FREE)) {
+            wait();
           }
         }
 
-        set_ready_channel.Push(write_set);
-        next_set = next_resident_set(next_set);
+        const ac_int<WEIGHT_WRITE_WIDTH, false> beat = weight_channel.Pop();
+        write_weight_beat(write_set, k, span, beat);
+
+        const bool row_complete = span == WEIGHT_BEATS_PER_ROW - 1;
+        const bool set_complete = row_complete && k == K - 1;
+        if (set_complete) {
+          set_ready_channel.Push(write_set);
+          tile_slot++;
+          write_set = next_resident_set(write_set);
+          next_set = write_set;
+          k = 0;
+          span = 0;
+        } else if (row_complete) {
+          k++;
+          span = 0;
+        } else {
+          span++;
+        }
       }
     }
   }
