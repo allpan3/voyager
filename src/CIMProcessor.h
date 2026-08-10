@@ -245,9 +245,9 @@ SC_MODULE(CIMProcessor) {
     }
   };
 
-  // ResidentSetState records the independently visible lifecycle of one set
-  enum ResidentSetState { SET_FREE = 0, SET_LOADING = 1, SET_READY = 2 };
-  using ResidentSetStateBits = ac_int<2, false>;
+  // ResidentSetState records whether one physical set is free or ready
+  enum ResidentSetState { SET_FREE = 0, SET_READY = 1 };
+  using ResidentSetStateBits = ac_int<1, false>;
 
   Array CCS_INIT_S1(cim_array);
   Connections::Combinational<MACRequest> CCS_INIT_S1(mac_request_channel);
@@ -292,7 +292,6 @@ SC_MODULE(CIMProcessor) {
 
   // Centralize per-set state updates from the loader and compute scheduler
   sc_signal<ResidentSetStateBits> resident_set_state[B_SETS];
-  Connections::Combinational<Set> CCS_INIT_S1(set_claim_channel);
   Connections::Combinational<Set> CCS_INIT_S1(set_ready_channel);
   Connections::Combinational<Set> CCS_INIT_S1(set_release_channel);
 
@@ -559,7 +558,6 @@ SC_MODULE(CIMProcessor) {
 
   // Apply loader and compute transitions to the per-set state scoreboard
   void set_scoreboard() {
-    set_claim_channel.ResetRead();
     set_ready_channel.ResetRead();
     set_release_channel.ResetRead();
 #pragma hls_unroll yes
@@ -572,19 +570,13 @@ SC_MODULE(CIMProcessor) {
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
     while (true) {
-      Set claimed_set = 0;
       Set ready_set = 0;
       Set released_set = 0;
-      const bool claimed = set_claim_channel.PopNB(claimed_set);
       const bool became_ready = set_ready_channel.PopNB(ready_set);
       const bool released = set_release_channel.PopNB(released_set);
 #ifndef __SYNTHESIS__
-      if (claimed && !resident_set_has_state(claimed_set, SET_FREE)) {
-        SC_REPORT_FATAL("CIMProcessor", "claimed resident set is not free");
-      }
-      if (became_ready && !resident_set_has_state(ready_set, SET_LOADING)) {
-        SC_REPORT_FATAL("CIMProcessor",
-                        "completed resident set was not loading");
+      if (became_ready && !resident_set_has_state(ready_set, SET_FREE)) {
+        SC_REPORT_FATAL("CIMProcessor", "completed resident set is not free");
       }
       if (released && !resident_set_has_state(released_set, SET_READY)) {
         SC_REPORT_FATAL("CIMProcessor", "released resident set is not ready");
@@ -594,9 +586,6 @@ SC_MODULE(CIMProcessor) {
 #pragma hls_unroll yes
       for (int set = 0; set < B_SETS; set++) {
         ResidentSetStateBits next = resident_set_state[set].read();
-        if (claimed && claimed_set == Set(set)) {
-          next = SET_LOADING;
-        }
         if (became_ready && ready_set == Set(set)) {
           next = SET_READY;
         }
@@ -615,7 +604,6 @@ SC_MODULE(CIMProcessor) {
     weight_descriptor_channel.Reset();
     write_request_channel.ResetWrite();
     scheduled_weight_descriptor_enq.ResetWrite();
-    set_claim_channel.ResetWrite();
     set_ready_channel.ResetWrite();
 
     wait();
@@ -642,7 +630,6 @@ SC_MODULE(CIMProcessor) {
         while (!resident_set_has_state(write_set, SET_FREE)) {
           wait();
         }
-        set_claim_channel.Push(write_set);
 
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
