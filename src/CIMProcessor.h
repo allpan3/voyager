@@ -6,9 +6,9 @@
 
 #include <type_traits>
 
+#include "AccelTypes.h"
 #include "ArchitectureParams.h"
 #include "CIMArray.h"
-#include "CIMWeightSchedule.h"
 #include "Params.h"
 #include "PerfMonitor.h"
 
@@ -53,6 +53,7 @@ SC_MODULE(CIMProcessor) {
   using MACRequest = typename Array::MACRequest;
   using WriteRequest = typename Array::WriteRequest;
 
+  static constexpr int LOOP_WIDTH = 10;
   // Carry one ordered accumulator transaction between read issue and completion
   struct AccumulationMetadata {
     Pack1D<Psum, N> result;
@@ -103,10 +104,9 @@ SC_MODULE(CIMProcessor) {
   // Narrowing the B port splits one row into more array writes
   static constexpr int WEIGHT_BEATS_PER_ROW = OUTPUT_AXIS_TILES / B_PORT_TILES;
 
-  static constexpr int LOOP_WIDTH = 10;
   static constexpr int ACCUM_TO_WB_FIFO_DEPTH = SUPPORT_MX ? 8 : 1;
   static constexpr int OUTPUT_FIFO_DEPTH = 8;
-  static constexpr int SETS_PER_BANK = B_SETS / 2;
+  static constexpr int RESIDENT_SET_COUNT = B_SETS;
 #if DOUBLE_BUFFERED_ACCUM_BUFFER
   static constexpr int ACCUM_BUFFER_BANKS = 2;
 #else
@@ -145,10 +145,9 @@ SC_MODULE(CIMProcessor) {
                 "in one C beat");
   static_assert(WRITE_CH_IN == 1,
                 "CIMProcessor currently stores one CIM weight row per request");
-  static_assert(B_SETS >= 2 && B_SETS % 2 == 0,
-                "CIM resident sets must split into two equal banks");
-  static_assert(SETS_PER_BANK <= 0xFFFF,
-                "CIM resident bank size exceeds schedule metadata");
+  static_assert(B_SETS > 0, "CIMProcessor requires a resident weight set");
+  static_assert(B_SETS <= 0xFFFF,
+                "CIM resident set count exceeds schedule metadata");
   static_assert(K == Array::K, "CIMProcessor K must match the CIM input axis");
   static_assert(K == CIM_ARRAY_K_DIMENSION,
                 "CIMProcessor rows must match the CIM array K dimension");
@@ -184,7 +183,7 @@ SC_MODULE(CIMProcessor) {
   // Retain MatrixProcessor's weight_channel protocol at physical B-beat width
   Connections::In<ac_int<WEIGHT_WRITE_WIDTH, false>> CCS_INIT_S1(
       weight_channel);
-  Connections::In<CIMWeightGroup> CCS_INIT_S1(weight_group_channel);
+  Connections::In<CIMWeightDescriptor> CCS_INIT_S1(weight_descriptor_channel);
   Connections::In<Pack1D<Buffer, N>> CCS_INIT_S1(bias_channel);
   Connections::In<MatrixParams> CCS_INIT_S1(params_in);
 
@@ -214,41 +213,41 @@ SC_MODULE(CIMProcessor) {
 #endif
 
  private:
-  // Bind one logical resident group to a contiguous physical set range
-  struct ScheduledWeightGroup {
-    CIMWeightGroup logical;
-    ac_int<1, false> bank;
-    ac_int<16, false> first_slot;
+  // Bind one logical resident tile to a contiguous range on the set ring
+  struct ScheduledWeightDescriptor {
+    CIMWeightDescriptor logical;
+    Set first_set;
 
-    static const unsigned int width = CIMWeightGroup::width + 17;
+    static const unsigned int width = CIMWeightDescriptor::width + Set::width;
 
     template <unsigned int Size>
     void Marshall(Marshaller<Size> &m) {
       m & logical;
-      m & bank;
-      m & first_slot;
+      m & first_set;
     }
 
     inline friend void sc_trace(sc_trace_file *tf,
-                                const ScheduledWeightGroup &group,
+                                const ScheduledWeightDescriptor &descriptor,
                                 const std::string &name) {
-      sc_trace(tf, group.logical, name + ".logical");
-      sc_trace(tf, group.bank, name + ".bank");
-      sc_trace(tf, group.first_slot, name + ".first_slot");
+      sc_trace(tf, descriptor.logical, name + ".logical");
+      sc_trace(tf, descriptor.first_set, name + ".first_set");
     }
 
-    inline friend std::ostream &operator<<(std::ostream &os,
-                                           const ScheduledWeightGroup &group) {
-      os << group.logical << " " << group.bank << " " << group.first_slot;
+    inline friend std::ostream &operator<<(
+        std::ostream &os, const ScheduledWeightDescriptor &descriptor) {
+      os << descriptor.logical << " " << descriptor.first_set;
       return os;
     }
 
-    inline friend bool operator==(const ScheduledWeightGroup &lhs,
-                                  const ScheduledWeightGroup &rhs) {
-      return lhs.logical == rhs.logical && lhs.bank == rhs.bank &&
-             lhs.first_slot == rhs.first_slot;
+    inline friend bool operator==(const ScheduledWeightDescriptor &lhs,
+                                  const ScheduledWeightDescriptor &rhs) {
+      return lhs.logical == rhs.logical && lhs.first_set == rhs.first_set;
     }
   };
+
+  // ResidentSetState records the independently visible lifecycle of one set
+  enum ResidentSetState { SET_FREE = 0, SET_LOADING = 1, SET_READY = 2 };
+  using ResidentSetStateBits = ac_int<2, false>;
 
   Array CCS_INIT_S1(cim_array);
   Connections::Combinational<MACRequest> CCS_INIT_S1(mac_request_channel);
@@ -260,7 +259,7 @@ SC_MODULE(CIMProcessor) {
   sc_signal<bool> completion_descriptor_stall;
 #endif
 
-  // Isolate CIM result retirement from the SA-shaped accumulation pipeline
+  // Isolate CIM result retirement from the accumulation pipeline
   Connections::Combinational<Pack1D<Psum, N>> CCS_INIT_S1(
       result_to_accum_channel);
 
@@ -283,23 +282,19 @@ SC_MODULE(CIMProcessor) {
       accum_output_fifo);
   Connections::Combinational<Pack1D<Buffer, N>> CCS_INIT_S1(accum_output_enq);
 
-  // Buffer one bank of group assignments and newly filled physical sets
-  Connections::Fifo<ScheduledWeightGroup, SETS_PER_BANK> CCS_INIT_S1(
-      scheduled_weight_group_fifo);
-  Connections::Combinational<ScheduledWeightGroup> CCS_INIT_S1(
-      scheduled_weight_group_enq);
-  Connections::Combinational<ScheduledWeightGroup> CCS_INIT_S1(
-      scheduled_weight_group_deq);
-  Connections::Fifo<Set, SETS_PER_BANK> CCS_INIT_S1(set_ready_fifo);
-  Connections::Combinational<Set> CCS_INIT_S1(set_ready_enq);
-  Connections::Combinational<Set> CCS_INIT_S1(set_ready_deq);
+  // Buffer one ring traversal of descriptor assignments
+  Connections::Fifo<ScheduledWeightDescriptor, B_SETS> CCS_INIT_S1(
+      scheduled_weight_descriptor_fifo);
+  Connections::Combinational<ScheduledWeightDescriptor> CCS_INIT_S1(
+      scheduled_weight_descriptor_enq);
+  Connections::Combinational<ScheduledWeightDescriptor> CCS_INIT_S1(
+      scheduled_weight_descriptor_deq);
 
-  // Release each physical bank after the replacement bank accepts its first
-  // MAC, proving every prior issue window has closed
-  Connections::Fifo<bool, 2> CCS_INIT_S1(set_consumed_fifo_0);
-  Connections::Fifo<bool, 2> CCS_INIT_S1(set_consumed_fifo_1);
-  Connections::Combinational<bool> set_consumed_enq[2];
-  Connections::Combinational<bool> set_consumed_deq[2];
+  // Centralize per-set state updates from the loader and compute scheduler
+  sc_signal<ResidentSetStateBits> resident_set_state[B_SETS];
+  Connections::Combinational<Set> CCS_INIT_S1(set_claim_channel);
+  Connections::Combinational<Set> CCS_INIT_S1(set_ready_channel);
+  Connections::Combinational<Set> CCS_INIT_S1(set_release_channel);
 
   Connections::Fifo<MatrixParams, 1> CCS_INIT_S1(
       process_accumulation_params_fifo);
@@ -320,6 +315,8 @@ SC_MODULE(CIMProcessor) {
 
 #if ENABLE_PERF_COUNTERS
   sc_signal<bool> perf_completion_toggle;
+  // Publish scheduler-observed weight-set stalls at job granularity
+  sc_signal<MatrixPerformance::Counter> perf_mac_wait_weight_set_load_cycles;
   sc_signal<MatrixPerformance::SnapshotSequence> perf_snapshot_sequence;
   sc_signal<MatrixPerformance::Counter>
       perf_snapshot[MatrixPerformance::PERFORMANCE_COUNTER_COUNT];
@@ -354,15 +351,10 @@ SC_MODULE(CIMProcessor) {
     accumulation_metadata_fifo.enq(accumulation_metadata_enq);
     accumulation_metadata_fifo.deq(accumulation_metadata_deq);
 
-    scheduled_weight_group_fifo.clk(clk);
-    scheduled_weight_group_fifo.rst(rstn);
-    scheduled_weight_group_fifo.enq(scheduled_weight_group_enq);
-    scheduled_weight_group_fifo.deq(scheduled_weight_group_deq);
-
-    set_ready_fifo.clk(clk);
-    set_ready_fifo.rst(rstn);
-    set_ready_fifo.enq(set_ready_enq);
-    set_ready_fifo.deq(set_ready_deq);
+    scheduled_weight_descriptor_fifo.clk(clk);
+    scheduled_weight_descriptor_fifo.rst(rstn);
+    scheduled_weight_descriptor_fifo.enq(scheduled_weight_descriptor_enq);
+    scheduled_weight_descriptor_fifo.deq(scheduled_weight_descriptor_deq);
 
     process_accumulation_params_fifo.clk(clk);
     process_accumulation_params_fifo.rst(rstn);
@@ -379,15 +371,9 @@ SC_MODULE(CIMProcessor) {
     write_back_params_fifo.enq(write_back_params_enq);
     write_back_params_fifo.deq(write_back_params_deq);
 
-    set_consumed_fifo_0.clk(clk);
-    set_consumed_fifo_0.rst(rstn);
-    set_consumed_fifo_0.enq(set_consumed_enq[0]);
-    set_consumed_fifo_0.deq(set_consumed_deq[0]);
-
-    set_consumed_fifo_1.clk(clk);
-    set_consumed_fifo_1.rst(rstn);
-    set_consumed_fifo_1.enq(set_consumed_enq[1]);
-    set_consumed_fifo_1.deq(set_consumed_deq[1]);
+    SC_THREAD(set_scoreboard);
+    sensitive << clk.pos();
+    async_reset_signal_is(rstn, false);
 
     SC_THREAD(issue_operations);
     sensitive << clk.pos();
@@ -544,69 +530,131 @@ SC_MODULE(CIMProcessor) {
     write_request_channel.Push(request);
   }
 
-  // Pack logical groups sequentially into each physical set bank
-  void load_weights() {
-    weight_channel.Reset();
-    weight_group_channel.Reset();
-    write_request_channel.ResetWrite();
-    scheduled_weight_group_enq.ResetWrite();
-    set_ready_enq.ResetWrite();
-    set_consumed_deq[0].ResetRead();
-    set_consumed_deq[1].ResetRead();
+  // Advance one physical set index around the resident-set ring
+  static Set next_resident_set(Set current) {
+    return current == Set(B_SETS - 1) ? Set(0) : Set(current + 1);
+  }
+
+  // Select one tile-relative physical set around the resident-set ring
+  static Set resident_set_at_offset(Set first, ac_int<16, false> offset) {
+    ac_int<17, false> index = first;
+    index += offset;
+    if (index >= B_SETS) {
+      index -= B_SETS;
+    }
+    return Set(index);
+  }
+
+  // Return whether the selected physical set currently has the requested state
+  bool resident_set_has_state(Set selected, ResidentSetState expected) const {
+    bool matches = false;
+#pragma hls_unroll yes
+    for (int set = 0; set < B_SETS; set++) {
+      if (selected == Set(set)) {
+        matches = resident_set_state[set].read() == expected;
+      }
+    }
+    return matches;
+  }
+
+  // Apply loader and compute transitions to the per-set state scoreboard
+  void set_scoreboard() {
+    set_claim_channel.ResetRead();
+    set_ready_channel.ResetRead();
+    set_release_channel.ResetRead();
+#pragma hls_unroll yes
+    for (int set = 0; set < B_SETS; set++) {
+      resident_set_state[set].write(ResidentSetStateBits(SET_FREE));
+    }
 
     wait();
 
-    ac_int<1, false> bank = 0;
-    ac_int<16, false> next_slot = 0;
-    bool used_before[2] = {false, false};
+#pragma hls_pipeline_init_interval 1
+#pragma hls_pipeline_stall_mode flush
     while (true) {
-      const CIMWeightGroup logical = weight_group_channel.Pop();
-
+      Set claimed_set = 0;
+      Set ready_set = 0;
+      Set released_set = 0;
+      const bool claimed = set_claim_channel.PopNB(claimed_set);
+      const bool became_ready = set_ready_channel.PopNB(ready_set);
+      const bool released = set_release_channel.PopNB(released_set);
 #ifndef __SYNTHESIS__
-      if (logical.set_count == 0 || logical.set_count > SETS_PER_BANK ||
-          logical.replay_count == 0) {
-        SC_REPORT_FATAL("CIMProcessor", "invalid resident weight group");
+      if (claimed && !resident_set_has_state(claimed_set, SET_FREE)) {
+        SC_REPORT_FATAL("CIMProcessor", "claimed resident set is not free");
+      }
+      if (became_ready && !resident_set_has_state(ready_set, SET_LOADING)) {
+        SC_REPORT_FATAL("CIMProcessor",
+                        "completed resident set was not loading");
+      }
+      if (released && !resident_set_has_state(released_set, SET_READY)) {
+        SC_REPORT_FATAL("CIMProcessor", "released resident set is not ready");
       }
 #endif
 
-      if (logical.set_count > SETS_PER_BANK - next_slot) {
-        bank = !bank;
-        next_slot = 0;
+#pragma hls_unroll yes
+      for (int set = 0; set < B_SETS; set++) {
+        ResidentSetStateBits next = resident_set_state[set].read();
+        if (claimed && claimed_set == Set(set)) {
+          next = SET_LOADING;
+        }
+        if (became_ready && ready_set == Set(set)) {
+          next = SET_READY;
+        }
+        if (released && released_set == Set(set)) {
+          next = SET_FREE;
+        }
+        resident_set_state[set].write(next);
       }
+      wait();
+    }
+  }
 
-      if (next_slot == 0 && used_before[bank]) {
-        // No set in this bank may be overwritten before the replacement bank
-        // closes its final issue window
-        set_consumed_deq[bank].Pop();
+  // Pack logical tiles sequentially around the physical set ring
+  void load_weights() {
+    weight_channel.Reset();
+    weight_descriptor_channel.Reset();
+    write_request_channel.ResetWrite();
+    scheduled_weight_descriptor_enq.ResetWrite();
+    set_claim_channel.ResetWrite();
+    set_ready_channel.ResetWrite();
+
+    wait();
+
+    Set next_set = 0;
+    while (true) {
+      const CIMWeightDescriptor logical = weight_descriptor_channel.Pop();
+
+#ifndef __SYNTHESIS__
+      if (logical.set_count == 0 || logical.set_count > B_SETS ||
+          logical.replay_count == 0) {
+        SC_REPORT_FATAL("CIMProcessor", "invalid resident weight tile");
       }
+#endif
 
-      ScheduledWeightGroup scheduled;
+      ScheduledWeightDescriptor scheduled;
       scheduled.logical = logical;
-      scheduled.bank = bank;
-      scheduled.first_slot = next_slot;
-      scheduled_weight_group_enq.Push(scheduled);
+      scheduled.first_set = next_set;
+      scheduled_weight_descriptor_enq.Push(scheduled);
 
-      for (ac_int<16, false> group_slot = 0; group_slot < logical.set_count;
-           group_slot++) {
-        const Set wset = Set(bank * SETS_PER_BANK + next_slot + group_slot);
+      for (ac_int<16, false> tile_slot = 0; tile_slot < logical.set_count;
+           tile_slot++) {
+        const Set write_set = next_set;
+        while (!resident_set_has_state(write_set, SET_FREE)) {
+          wait();
+        }
+        set_claim_channel.Push(write_set);
 
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
         for (int k = 0; k < K; k++) {
           for (int span = 0; span < WEIGHT_BEATS_PER_ROW; span++) {
             const ac_int<WEIGHT_WRITE_WIDTH, false> beat = weight_channel.Pop();
-            write_weight_beat(wset, k, span, beat);
+            write_weight_beat(write_set, k, span, beat);
           }
         }
 
-        set_ready_enq.Push(wset);
-      }
-
-      used_before[bank] = true;
-      next_slot += logical.set_count;
-      if (next_slot == SETS_PER_BANK) {
-        bank = !bank;
-        next_slot = 0;
+        set_ready_channel.Push(write_set);
+        next_set = next_resident_set(next_set);
       }
     }
   }
@@ -633,29 +681,30 @@ SC_MODULE(CIMProcessor) {
     collect_results_params_enq.ResetWrite();
     write_back_params_enq.ResetWrite();
     mac_request_channel.ResetWrite();
-    scheduled_weight_group_deq.ResetRead();
-    set_ready_deq.ResetRead();
-    set_consumed_enq[0].ResetWrite();
-    set_consumed_enq[1].ResetWrite();
+    scheduled_weight_descriptor_deq.ResetRead();
+    set_release_channel.ResetWrite();
     start.Reset();
+#if ENABLE_PERF_COUNTERS
+    perf_mac_wait_weight_set_load_cycles.write(0);
+#endif
 
     wait();
 
-    ScheduledWeightGroup group;
-    Set active_wset = 0;
+    ScheduledWeightDescriptor descriptor;
+    Set selected_weight_set = 0;
     ac_int<16, false> set_slot = 0;
     ac_int<16, false> replay = 0;
-    bool need_group = true;
-    bool have_active_bank = false;
-    ac_int<1, false> active_bank = 0;
+    bool need_descriptor = true;
+    bool selected_set_final_visit = false;
     while (true) {
       const MatrixParams params = params_in.Pop();
-      // MatrixProcessor::push_inputs also sends params to push_weights_params;
-      // this thread owns both schedules
       process_accumulation_params_enq.Push(params);
       collect_results_params_enq.Push(params);
       write_back_params_enq.Push(params);
       start.SyncPush();
+#if ENABLE_PERF_COUNTERS
+      MatrixPerformance::Counter mac_wait_weight_set_load_cycles = 0;
+#endif
 
 #ifndef __SYNTHESIS__
       if (params.use_input_codebook || params.use_weight_codebook) {
@@ -686,65 +735,53 @@ SC_MODULE(CIMProcessor) {
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
       for (ac_int<32, false> step = 0; step < total_ops; step++) {
-        bool release_after_issue = false;
-        ac_int<1, false> release_bank = 0;
         if (needs_weight_load(params, loop_counters, outer_reuse_indices,
                               reuse_weights, step)) {
-          if (need_group) {
-            group = scheduled_weight_group_deq.Pop();
+          if (need_descriptor) {
+            descriptor = scheduled_weight_descriptor_deq.Pop();
 
 #ifndef __SYNTHESIS__
-            const ac_int<17, false> group_limit =
-                ac_int<17, false>(group.first_slot) +
-                ac_int<17, false>(group.logical.set_count);
-            if (group.logical.set_count == 0 ||
-                group.logical.set_count > SETS_PER_BANK ||
-                group_limit > SETS_PER_BANK ||
-                group.logical.replay_count == 0) {
+            if (descriptor.logical.set_count == 0 ||
+                descriptor.logical.set_count > B_SETS ||
+                descriptor.first_set >= B_SETS ||
+                descriptor.logical.replay_count == 0) {
               SC_REPORT_FATAL("CIMProcessor",
-                              "invalid scheduled resident weight group");
+                              "invalid scheduled resident weight tile");
             }
 #endif
 
-            if (have_active_bank && group.bank != active_bank) {
-              release_after_issue = true;
-              release_bank = active_bank;
-            }
-            active_bank = group.bank;
-            have_active_bank = true;
             set_slot = 0;
             replay = 0;
-            need_group = false;
+            need_descriptor = false;
           }
 
-          const Set expected_wset =
-              Set(group.bank * SETS_PER_BANK + group.first_slot + set_slot);
+          selected_weight_set =
+              resident_set_at_offset(descriptor.first_set, set_slot);
+          selected_set_final_visit =
+              replay == descriptor.logical.replay_count - 1;
           if (replay == 0) {
-            active_wset = set_ready_deq.Pop();
-#ifndef __SYNTHESIS__
-            if (active_wset != expected_wset) {
-              SC_REPORT_FATAL("CIMProcessor",
-                              "resident set ready order does not match group");
-            }
+            while (!resident_set_has_state(selected_weight_set, SET_READY)) {
+#if ENABLE_PERF_COUNTERS
+              mac_wait_weight_set_load_cycles++;
 #endif
-          } else {
-            active_wset = expected_wset;
+              wait();
+            }
           }
 
           set_slot++;
-          if (set_slot == group.logical.set_count) {
+          if (set_slot == descriptor.logical.set_count) {
             set_slot = 0;
             replay++;
-            if (replay == group.logical.replay_count) {
+            if (replay == descriptor.logical.replay_count) {
               replay = 0;
-              need_group = true;
+              need_descriptor = true;
             }
           }
         }
 
         MACRequest request;
         request.a = pack_a_beat(input_channel.Pop());
-        request.mset = active_wset;
+        request.mset = selected_weight_set;
         // Current mapping multicasts each A beat to every tile along the output
         // axis output_axis_idx is ignored for multicast requests; zero is its
         // canonical unused value
@@ -757,26 +794,32 @@ SC_MODULE(CIMProcessor) {
         // CIMArray
         mac_request_channel.Push(request);
 
-        // The first accepted issue on the replacement bank closes every issue
-        // window in the previous bank
-        if (release_after_issue) {
-          set_consumed_enq[release_bank].Push(true);
-        }
-
         advance_loop_counters(loop_counters, params);
+        const bool leaves_selected_set =
+            step + 1 == total_ops ||
+            needs_weight_load(params, loop_counters, outer_reuse_indices,
+                              reuse_weights, step + 1);
+        if (selected_set_final_visit && leaves_selected_set) {
+          // The array independently blocks same-set writes until this accepted
+          // MAC closes its physical issue window
+          set_release_channel.Push(selected_weight_set);
+        }
       }
 
+#if ENABLE_PERF_COUNTERS
+      perf_mac_wait_weight_set_load_cycles.write(
+          mac_wait_weight_set_load_cycles);
+#endif
 #ifndef __SYNTHESIS__
-      if (!need_group) {
+      if (!need_descriptor) {
         SC_REPORT_FATAL("CIMProcessor",
-                        "matrix job ended inside a resident weight group");
+                        "matrix job ended inside a resident weight tile");
       }
 #endif
     }
   }
 
-  // Match the address expression in MatrixProcessor::process_accumulation and
-  // write_back
+  // Match the address expression in MatrixProcessor accumulation and write-back
   static ac_int<16, false> accumulation_address(
       const MatrixParams &params,
       const ac_int<LOOP_WIDTH, false> loop_counters[2][6]) {
@@ -813,6 +856,15 @@ SC_MODULE(CIMProcessor) {
                params.loops[0][params.fy_loop_idx[0]] - 1 &&
            loop_counters[1][params.fy_loop_idx[1]] ==
                params.loops[1][params.fy_loop_idx[1]] - 1;
+  }
+
+  // Return whether this operation writes a partial sum for a later operation
+  static bool writes_accumulation(
+      const MatrixParams &params,
+      const ac_int<LOOP_WIDTH, false> loop_counters[2][6]) {
+    return !finishes_accumulation(params, loop_counters) ||
+           (DOUBLE_BUFFERED_ACCUM_BUFFER &&
+            params.write_output_to_accum_buffer);
   }
 
   // Match MatrixProcessor's double-buffer bank-switch boundary
@@ -919,10 +971,8 @@ SC_MODULE(CIMProcessor) {
             metadata.initial = bias;
           }
         } else {
-          const ac_int<16, false> address =
-              accumulation_address(params, loop_counters);
           accumulation_buffer_read_address[accumulation_buffer_bank].Push(
-              address);
+              accumulation_address(params, loop_counters));
         }
 
         accumulation_metadata_enq.Push(metadata);
@@ -1010,10 +1060,10 @@ SC_MODULE(CIMProcessor) {
 #pragma hls_pipeline_stall_mode flush
       for (ac_int<32, false> step = 0; step < total_ops; step++) {
         const Pack1D<Buffer, N> accumulated = accum_to_wb_deq.Pop();
-        const bool last = finishes_accumulation(params, loop_counters);
+        const bool write_accumulation =
+            writes_accumulation(params, loop_counters);
 
-        if (last && !(DOUBLE_BUFFERED_ACCUM_BUFFER &&
-                      params.write_output_to_accum_buffer)) {
+        if (!write_accumulation) {
           accum_output_enq.Push(accumulated);
         } else {
           BufferWriteRequest<Pack1D<Buffer, N>> request;
@@ -1080,6 +1130,9 @@ SC_MODULE(CIMProcessor) {
       if (completed) {
         snapshot_sequence++;
         perf_snapshot_sequence.write(snapshot_sequence);
+        counters[MatrixPerformance::storage_index(
+            MatrixPerformance::MAC_WAIT_WEIGHT_SET_LOAD_CYCLES)] =
+            perf_mac_wait_weight_set_load_cycles.read();
 #pragma hls_unroll yes
         for (int i = 0; i < MatrixPerformance::PERFORMANCE_COUNTER_COUNT; i++) {
           perf_snapshot[i].write(counters[i]);
@@ -1124,11 +1177,6 @@ SC_MODULE(CIMProcessor) {
         if (completion_descriptor_stall.read())
           counters[MatrixPerformance::storage_index(
               MatrixPerformance::CIM_COMPLETION_DESCRIPTOR_STALL_CYCLES)]++;
-        const bool set_wait =
-            set_ready_deq.rdy.read() && !set_ready_deq.vld.read();
-        if (set_wait)
-          counters[MatrixPerformance::storage_index(
-              MatrixPerformance::CIM_SET_WAIT_CYCLES)]++;
 #endif
         if (weight_channel.rdy.read() && !weight_channel.vld.read())
           counters[MatrixPerformance::storage_index(

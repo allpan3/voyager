@@ -48,6 +48,40 @@ struct MemoryRequest {
   }
 };
 
+// CIMWeightDescriptor describes one resident weight tile and its logical
+// replays
+struct CIMWeightDescriptor {
+  ac_int<16, false> set_count;
+  ac_int<16, false> replay_count;
+
+  static const unsigned int width = 32;
+
+  template <unsigned int Size>
+  void Marshall(Marshaller<Size>& m) {
+    m & set_count;
+    m & replay_count;
+  }
+
+  inline friend void sc_trace(sc_trace_file* tf,
+                              const CIMWeightDescriptor& descriptor,
+                              const std::string& name) {
+    sc_trace(tf, descriptor.set_count, name + ".set_count");
+    sc_trace(tf, descriptor.replay_count, name + ".replay_count");
+  }
+
+  inline friend std::ostream& operator<<(
+      std::ostream& os, const CIMWeightDescriptor& descriptor) {
+    os << descriptor.set_count << " " << descriptor.replay_count;
+    return os;
+  }
+
+  inline friend bool operator==(const CIMWeightDescriptor& lhs,
+                                const CIMWeightDescriptor& rhs) {
+    return lhs.set_count == rhs.set_count &&
+           lhs.replay_count == rhs.replay_count;
+  }
+};
+
 template <typename T>
 struct PEInput {
   T data;
@@ -168,7 +202,8 @@ void clear_pack(Pack1D<T, pack_width>& pack) {
   }
 }
 
-// Datatype-specific specializations preserve their required field-wise marshalling
+// Datatype-specific specializations preserve their required field-wise
+// marshalling
 
 template <size_t pack_width, int W, int es>
 class Pack1D<PEInput<Posit<W, es>>, pack_width> {

@@ -39,15 +39,17 @@ SC_MODULE(MatrixUnit) {
 #endif
 
 #if MATRIX_BACKEND == MATRIX_BACKEND_CIM
-  using ActiveMatrixProcessor = CIMProcessor<
-      InputTypeList, WeightTypeList, SA_INPUT_TYPE, SA_WEIGHT_TYPE,
-      ACCUM_DATATYPE, ACCUM_BUFFER_DATATYPE, SCALE_DATATYPE, IC_DIMENSION,
-      OC_DIMENSION, ACCUM_BUFFER_SIZE, CIM_CH_IN, CIM_CH_OUT, CIM_B_SETS,
-      CIM_BASE_A_WIDTH, CIM_BASE_B_WIDTH, CIM_BASE_C_WIDTH, CIM_WRITE_CH_IN,
-      CIM_MAC_LATENCY, CIM_MODE, CIM_SIGNED, CIM_TILE_INPUT_AXIS_ELEMENTS,
-      CIM_TILE_OUTPUT_AXIS_ELEMENTS, CIM_INPUT_AXIS_TILES,
-      CIM_OUTPUT_AXIS_TILES, CIM_A_PORT_TILES, CIM_B_PORT_TILES,
-      CIM_C_PORT_TILES, CIM_C_BEAT_LAYOUT, CIM_ARRAY_RESULT_SLOTS_PER_OUTPUT_LANE>;
+  using ActiveMatrixProcessor =
+      CIMProcessor<InputTypeList, WeightTypeList, SA_INPUT_TYPE, SA_WEIGHT_TYPE,
+                   ACCUM_DATATYPE, ACCUM_BUFFER_DATATYPE, SCALE_DATATYPE,
+                   IC_DIMENSION, OC_DIMENSION, ACCUM_BUFFER_SIZE, CIM_CH_IN,
+                   CIM_CH_OUT, CIM_B_SETS, CIM_BASE_A_WIDTH, CIM_BASE_B_WIDTH,
+                   CIM_BASE_C_WIDTH, CIM_WRITE_CH_IN, CIM_MAC_LATENCY, CIM_MODE,
+                   CIM_SIGNED, CIM_TILE_INPUT_AXIS_ELEMENTS,
+                   CIM_TILE_OUTPUT_AXIS_ELEMENTS, CIM_INPUT_AXIS_TILES,
+                   CIM_OUTPUT_AXIS_TILES, CIM_A_PORT_TILES, CIM_B_PORT_TILES,
+                   CIM_C_PORT_TILES, CIM_C_BEAT_LAYOUT,
+                   CIM_ARRAY_RESULT_SLOTS_PER_OUTPUT_LANE>;
   // Assemble complete rows before slicing them into physical B-port beats
   static constexpr int WEIGHT_BUFFER_WORD_WIDTH =
       ActiveMatrixProcessor::WEIGHT_ROW_WIDTH;
@@ -112,7 +114,8 @@ SC_MODULE(MatrixUnit) {
   Connections::Combinational<ac_int<WEIGHT_CHANNEL_WIDTH, false>> CCS_INIT_S1(
       weight_channel);
 #if MATRIX_BACKEND == MATRIX_BACKEND_CIM
-  Connections::Combinational<CIMWeightGroup> CCS_INIT_S1(weight_group_channel);
+  Connections::Combinational<CIMWeightDescriptor> CCS_INIT_S1(
+      weight_descriptor_channel);
 #endif
 #if MATRIX_BACKEND != MATRIX_BACKEND_CIM
   DoubleBuffer<WEIGHT_BUFFER_SIZE, WEIGHT_BUFFER_WIDTH> CCS_INIT_S1(
@@ -243,7 +246,7 @@ SC_MODULE(MatrixUnit) {
 
 #if MATRIX_BACKEND == MATRIX_BACKEND_CIM
     weight_controller.weight_channel(weight_channel);
-    weight_controller.weight_group_channel(weight_group_channel);
+    weight_controller.weight_descriptor_channel(weight_descriptor_channel);
 #else
     weight_buffer.clk(clk);
     weight_buffer.rstn(rstn);
@@ -281,7 +284,7 @@ SC_MODULE(MatrixUnit) {
     matrix_processor.input_channel(window_buffer_out);
     matrix_processor.weight_channel(weight_channel);
 #if MATRIX_BACKEND == MATRIX_BACKEND_CIM
-    matrix_processor.weight_group_channel(weight_group_channel);
+    matrix_processor.weight_descriptor_channel(weight_descriptor_channel);
 #endif
     matrix_processor.bias_channel(bias_data);
     matrix_processor.params_in(matrix_params[2]);

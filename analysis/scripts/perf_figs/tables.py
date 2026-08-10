@@ -193,7 +193,9 @@ def pd_workload_rows(study: Study) -> list[dict[str, str | int | float]]:
             "matrix_utilization": pd.results[layer].matrix_utilization,
             "result_slot_stall_pct": pd.results[layer].result_slot_stall_pct,
             "completion_storage_stall_pct": pd.results[layer].completion_storage_stall_pct,
-            "set_wait_pct": pd.results[layer].set_wait_pct,
+            "mac_wait_weight_set_load_pct": pd.results[
+                layer
+            ].mac_wait_weight_set_load_pct,
         }
         for layer in study.layers
     ]
@@ -212,14 +214,15 @@ def pd_workloads_csv(study: Study) -> str:
 # Render the exact PD workload comparison as Markdown
 def pd_workloads_markdown(study: Study) -> str:
     lines = [
-        "| Workload | SA cycles | PD r8 cycles | Speedup | Utilization | Slot stall | Set wait |",
+        "| Workload | SA cycles | PD r8 cycles | Speedup | Utilization | Slot stall | Weight-load wait |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in pd_workload_rows(study):
         lines.append(
             f"| {row['workload']} | {row['sa_runtime_cycles']:,} | {row['pd_runtime_cycles']:,} | "
             f"{row['speedup']:.3f}x | {row['matrix_utilization']:.1%} | "
-            f"{row['result_slot_stall_pct']:.1f}% | {row['set_wait_pct']:.1f}% |"
+            f"{row['result_slot_stall_pct']:.1f}% | "
+            f"{row['mac_wait_weight_set_load_pct']:.1f}% |"
         )
     return "\n".join(lines) + "\n"
 
@@ -229,7 +232,7 @@ def pd_workloads_latex(study: Study) -> str:
     lines = [
         r"\begin{tabular}{lrrrrrr}",
         r"\toprule",
-        r"Workload & SA cycles & PD cycles & Speedup & Util. & Slot stall & Set wait \\",
+        r"Workload & SA cycles & PD cycles & Speedup & Util. & Slot stall & Weight-load wait \\",
         r"\midrule",
     ]
     for row in pd_workload_rows(study):
@@ -238,7 +241,7 @@ def pd_workloads_latex(study: Study) -> str:
             f"{row['pd_runtime_cycles']:,} & {row['speedup']:.3f}$\\times$ & "
             f"{row['matrix_utilization'] * 100:.1f}\\% & "
             f"{row['result_slot_stall_pct']:.1f}\\% & "
-            f"{row['set_wait_pct']:.1f}\\% \\\\"
+            f"{row['mac_wait_weight_set_load_pct']:.1f}\\% \\\\"
         )
     lines.extend([r"\bottomrule", r"\end{tabular}", ""])
     return "\n".join(lines)

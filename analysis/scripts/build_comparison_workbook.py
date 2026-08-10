@@ -81,7 +81,7 @@ STALL_FIELDS = [
     ("accumulation_stall_cycles", "Accumulation stall"),
     ("output_fifo_full_cycles", "Output FIFO full"),
     ("output_backpressure_cycles", "Output backpressure"),
-    ("cim_set_wait_cycles", "MAC wait on B set"),
+    ("mac_wait_weight_set_load_cycles", "MAC wait for weight-set load"),
     ("cim_completion_storage_stall_cycles", "CIM completion storage"),
     ("cim_result_slot_stall_cycles", "CIM result slots"),
     ("cim_completion_descriptor_stall_cycles", "CIM descriptor queue"),
@@ -101,7 +101,7 @@ STALL_DEFINITIONS = {
         "CIM: issue_operations has accepted an input beat and presents a fully formed MAC request, but CIMArray has "
         "ready low. This is the union of completion-storage unavailability and at least one selected tile having MAC "
         "ready low. Waiting for a B-set-ready token happens before the input is accepted and is counted separately as "
-        "MAC wait on B set."
+        "MAC wait for weight-set load."
     ),
     "weight_unavailable_cycles": (
         "Counted when the processor's weight loader is ready for the next weight beat, but the upstream weight "
@@ -117,7 +117,8 @@ STALL_DEFINITIONS = {
         "SA receives this channel from the weight-buffer output. A common cause is push_weights holding a previously "
         "accepted row while the serialized weight skewer or PE next-weight FIFOs drain. CIM receives the channel "
         "directly from WeightController. It can block before accepting the next beat while waiting for resident-bank "
-        "reuse or while a previously accepted beat reaches CIMArray. MAC wait on B set instead measures compute-side "
+        "reuse or while a previously accepted beat reaches CIMArray. MAC wait for weight-set load instead measures "
+        "compute-side "
         "waiting for a resident set to finish loading."
     ),
     "result_backpressure_cycles": (
@@ -143,7 +144,7 @@ STALL_DEFINITIONS = {
         "OutputController serializes the value and either sends it to memory or pushes it to the vector unit. This "
         "differs from Output FIFO full, which is measured at the FIFO's enqueue side."
     ),
-    "cim_set_wait_cycles": (
+    "mac_wait_weight_set_load_cycles": (
         "CIM only. The MAC issue loop is ready to begin the next operation group but the required B-set-ready token "
         "is unavailable because the loader has not finished that resident set. This is compute-side waiting for a B "
         "set, not weight-channel backpressure. The loader may still be receiving weight beats or writing them into "

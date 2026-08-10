@@ -103,7 +103,7 @@ class LayerResult:
     result_slot_stall_pct: float
     completion_storage_stall_pct: float
     descriptor_stall_pct: float
-    set_wait_pct: float
+    mac_wait_weight_set_load_pct: float
 
 
 # Store one width-expanded hardware point and all eight RTL results
@@ -237,7 +237,9 @@ def load(
                 descriptor_stall_pct=float(
                     row.get("cim_completion_descriptor_stall_pct_of_processor") or 0
                 ),
-                set_wait_pct=float(row.get("cim_set_wait_pct_of_processor") or 0),
+                mac_wait_weight_set_load_pct=float(
+                    row.get("mac_wait_weight_set_load_pct_of_processor") or 0
+                ),
             )
             for row in rows
         }

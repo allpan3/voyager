@@ -610,13 +610,20 @@ void Harness::matrix_performance_monitor() {
 // Print one coherent hardware snapshot through the indexed RTL read port
 void Harness::print_matrix_performance() {
   static const char* names[MatrixPerformance::COUNTER_COUNT] = {
-      "snapshot_sequence",          "processor_active_cycles",
-      "array_resident_cycles",      "array_issue_cycles",
-      "input_unavailable_cycles",   "input_backpressure_cycles",
-      "weight_unavailable_cycles",  "weight_backpressure_cycles",
-      "result_backpressure_cycles", "accumulation_stall_cycles",
-      "output_backpressure_cycles", "output_fifo_full_cycles",
-      "cim_set_wait_cycles",        "cim_completion_storage_stall_cycles",
+      "snapshot_sequence",
+      "processor_active_cycles",
+      "array_resident_cycles",
+      "array_issue_cycles",
+      "input_unavailable_cycles",
+      "input_backpressure_cycles",
+      "weight_unavailable_cycles",
+      "weight_backpressure_cycles",
+      "result_backpressure_cycles",
+      "accumulation_stall_cycles",
+      "output_backpressure_cycles",
+      "output_fifo_full_cycles",
+      "mac_wait_weight_set_load_cycles",
+      "cim_completion_storage_stall_cycles",
       "cim_result_slot_stall_cycles",
       "cim_completion_descriptor_stall_cycles",
   };

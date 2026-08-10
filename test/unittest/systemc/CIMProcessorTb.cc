@@ -43,10 +43,9 @@
 #define CIM_PROCESSOR_TEST_STRICT_CADENCE 0
 #endif
 
-static_assert(
-    CIM_PROCESSOR_TEST_STRICT_CADENCE == 0 ||
-        CIM_PROCESSOR_TEST_STRICT_CADENCE == 1,
-    "CIM_PROCESSOR_TEST_STRICT_CADENCE must be 0 or 1");
+static_assert(CIM_PROCESSOR_TEST_STRICT_CADENCE == 0 ||
+                  CIM_PROCESSOR_TEST_STRICT_CADENCE == 1,
+              "CIM_PROCESSOR_TEST_STRICT_CADENCE must be 0 or 1");
 
 #ifndef CIM_PROCESSOR_TEST_B_SETS
 #define CIM_PROCESSOR_TEST_B_SETS 8
@@ -135,7 +134,7 @@ SC_MODULE(CIMProcessorTb) {
   Connections::Combinational<ac_int<INPUT_BUFFER_WIDTH, false>> input_channel;
   Connections::Combinational<ac_int<Processor::WEIGHT_WRITE_WIDTH, false>>
       weight_channel;
-  Connections::Combinational<CIMWeightGroup> weight_group_channel;
+  Connections::Combinational<CIMWeightDescriptor> weight_descriptor_channel;
   Connections::Combinational<BufferVector> bias_channel;
   Connections::Combinational<MatrixParams> params_channel;
   Connections::Combinational<BufferVector> output_channel;
@@ -167,12 +166,12 @@ SC_MODULE(CIMProcessorTb) {
 
   std::deque<ExpectedOutput> expected_outputs;
   std::deque<BufferVector> pending_biases;
-  std::deque<CIMWeightGroup> pending_weight_groups;
+  std::deque<CIMWeightDescriptor> pending_weight_descriptors;
   std::vector<unsigned long> throughput_input_cycles;
   std::vector<unsigned long> throughput_output_cycles;
   sc_event expected_output_event;
   sc_event bias_event;
-  sc_event weight_group_event;
+  sc_event weight_descriptor_event;
   int checked_outputs;
   bool test_failed;
 
@@ -195,7 +194,7 @@ SC_MODULE(CIMProcessorTb) {
     dut.rstn(rstn);
     dut.input_channel(input_channel);
     dut.weight_channel(weight_channel);
-    dut.weight_group_channel(weight_group_channel);
+    dut.weight_descriptor_channel(weight_descriptor_channel);
     dut.bias_channel(bias_channel);
     dut.params_in(params_channel);
     dut.output_channel(output_channel);
@@ -233,7 +232,7 @@ SC_MODULE(CIMProcessorTb) {
     SC_THREAD(drive_bias);
     sensitive << clk.posedge_event();
 
-    SC_THREAD(drive_weight_groups);
+    SC_THREAD(drive_weight_descriptors);
     sensitive << clk.posedge_event();
 
     SC_THREAD(check_outputs);
@@ -315,6 +314,32 @@ SC_MODULE(CIMProcessorTb) {
     return params;
   }
 
+  // Interleave two output addresses across two reduction contributions
+  MatrixParams make_interleaved_accumulation_params() const {
+    MatrixParams params = make_base_params();
+    params.reduction_loop_idx[1] = 4;
+    params.x_loop_idx[1] = 5;
+    params.loops[1][params.reduction_loop_idx[1]] = 2;
+    params.loops[1][params.x_loop_idx[1]] = 2;
+    params.has_bias = true;
+    return params;
+  }
+
+  // Exercise K/Y/X address carries when Y is the innermost output loop
+  MatrixParams make_strided_accumulation_params() const {
+    MatrixParams params = make_base_params();
+    params.weight_loop_idx[1] = 2;
+    params.x_loop_idx[1] = 3;
+    params.reduction_loop_idx[1] = 4;
+    params.y_loop_idx[1] = 5;
+    params.loops[1][params.weight_loop_idx[1]] = 2;
+    params.loops[1][params.x_loop_idx[1]] = 2;
+    params.loops[1][params.reduction_loop_idx[1]] = 2;
+    params.loops[1][params.y_loop_idx[1]] = 3;
+    params.has_bias = false;
+    return params;
+  }
+
   // Create output-X or output-Y traversal inside one resident-weight lifetime
   MatrixParams make_weight_reuse_params(bool traverse_x) const {
     MatrixParams params = make_base_params();
@@ -352,8 +377,8 @@ SC_MODULE(CIMProcessorTb) {
     return params;
   }
 
-  // Create four resident tiles replayed across two outer-X positions
-  MatrixParams make_multiset_reuse_params() const {
+  // Create a resident set sequence replayed across two outer-X positions
+  MatrixParams make_multiset_reuse_params(int set_count) const {
     MatrixParams params = make_base_params();
     params.weight_loop_idx[0] = 0;
     params.x_loop_idx[0] = 1;
@@ -361,7 +386,7 @@ SC_MODULE(CIMProcessorTb) {
     params.fy_loop_idx[0] = 3;
     params.reduction_loop_idx[0] = 4;
     params.loops[0][params.x_loop_idx[0]] = 2;
-    params.loops[1][params.weight_loop_idx[1]] = 4;
+    params.loops[1][params.weight_loop_idx[1]] = set_count;
     params.has_bias = false;
     return params;
   }
@@ -382,7 +407,9 @@ SC_MODULE(CIMProcessorTb) {
   // Return one deterministic signed weight from a logical B row
   int weight_value(int weight_pattern, int k, int n) const {
     const int output_axis_idx = n / TILE_N;
-    return weight_pattern + 1 + output_axis_idx + k;
+    const ac_int<B_WIDTH, true> value =
+        weight_pattern + 1 + output_axis_idx + k;
+    return value.to_int();
   }
 
   // Pack one complete signed A vector
@@ -408,6 +435,15 @@ SC_MODULE(CIMProcessorTb) {
       }
     }
     return beat;
+  }
+
+  // Push one complete row-major resident-set payload
+  void push_weight_set(int weight_pattern) {
+    for (int k = 0; k < K; k++) {
+      for (int span = 0; span < Processor::WEIGHT_BEATS_PER_ROW; span++) {
+        weight_channel.Push(make_weight_beat(weight_pattern, k, span));
+      }
+    }
   }
 
   // Compute one complete golden MAC result
@@ -443,33 +479,36 @@ SC_MODULE(CIMProcessorTb) {
     return bias;
   }
 
-  // Queue one physical-bank group for the independent metadata producer
-  CIMWeightGroup make_weight_group(int set_count, int replay_count) const {
-    CIMWeightGroup group;
-    group.set_count = set_count;
-    group.replay_count = replay_count;
-    return group;
+  // Create one tile descriptor for consecutive physical sets
+  CIMWeightDescriptor make_weight_descriptor(int set_count, int replay_count)
+      const {
+    CIMWeightDescriptor descriptor;
+    descriptor.set_count = set_count;
+    descriptor.replay_count = replay_count;
+    return descriptor;
   }
 
-  // Match WeightController's bank-fit decision for a simple tile sequence
-  std::vector<CIMWeightGroup> make_weight_groups(int set_count) const {
-    std::vector<CIMWeightGroup> groups;
-    if (set_count <= Processor::SETS_PER_BANK) {
-      groups.push_back(make_weight_group(set_count, 1));
+  // Match WeightController's resident-capacity decision for a tile sequence
+  std::vector<CIMWeightDescriptor> make_weight_descriptors(int set_count)
+      const {
+    std::vector<CIMWeightDescriptor> descriptors;
+    if (set_count <= Processor::RESIDENT_SET_COUNT) {
+      descriptors.push_back(make_weight_descriptor(set_count, 1));
     } else {
       for (int set = 0; set < set_count; set++) {
-        groups.push_back(make_weight_group(1, 1));
+        descriptors.push_back(make_weight_descriptor(1, 1));
       }
     }
-    return groups;
+    return descriptors;
   }
 
-  // Queue group metadata without blocking the weight-data producer
-  void queue_weight_groups(const std::vector<CIMWeightGroup> &groups) {
-    for (const CIMWeightGroup &group : groups) {
-      pending_weight_groups.push_back(group);
+  // Queue tile metadata without blocking the weight-data producer
+  void queue_weight_descriptors(
+      const std::vector<CIMWeightDescriptor> &descriptors) {
+    for (const CIMWeightDescriptor &descriptor : descriptors) {
+      pending_weight_descriptors.push_back(descriptor);
     }
-    weight_group_event.notify(SC_ZERO_TIME);
+    weight_descriptor_event.notify(SC_ZERO_TIME);
   }
 
   // Queue one expected output and its deliberate ready stall
@@ -480,53 +519,70 @@ SC_MODULE(CIMProcessorTb) {
   }
 
   // Send one mapper job with an exact resident-weight load schedule
-  void send_job(const MatrixParams &params,
-                const std::vector<int> &weight_patterns,
-                const std::vector<bool> &load_weights,
-                const std::vector<CIMWeightGroup> &groups, int input_pattern) {
+  void send_job(
+      const MatrixParams &params, const std::vector<int> &weight_patterns,
+      const std::vector<bool> &load_weights,
+      const std::vector<CIMWeightDescriptor> &descriptors, int input_pattern) {
     require(weight_patterns.size() == load_weights.size(),
             "test job vectors must have equal lengths");
-    queue_weight_groups(groups);
+    queue_weight_descriptors(descriptors);
     params_channel.Push(params);
     start_channel.SyncPop();
 
     for (std::size_t operation = 0; operation < weight_patterns.size();
          operation++) {
       if (load_weights[operation]) {
-        for (int k = 0; k < K; k++) {
-          for (int span = 0; span < Processor::WEIGHT_BEATS_PER_ROW; span++) {
-            weight_channel.Push(
-                make_weight_beat(weight_patterns[operation], k, span));
-          }
-        }
+        push_weight_set(weight_patterns[operation]);
       }
       input_channel.Push(make_inputs(input_pattern));
     }
   }
 
-  // Preload independent one-set groups before admitting their MAC inputs
-  void send_preloaded_groups_job(const MatrixParams &params,
-                                 const std::vector<int> &weight_patterns,
-                                 int input_pattern) {
-    std::vector<CIMWeightGroup> groups;
-    for (std::size_t group = 0; group < weight_patterns.size(); group++) {
-      groups.push_back(make_weight_group(1, 1));
+  // Preload resident tiles before admitting their MAC inputs
+  void send_preloaded_tiles_job(
+      const MatrixParams &params, const std::vector<int> &weight_patterns,
+      const std::vector<CIMWeightDescriptor> &descriptors, int input_pattern) {
+    std::size_t scheduled_set_count = 0;
+    for (const CIMWeightDescriptor &descriptor : descriptors) {
+      scheduled_set_count += descriptor.set_count.to_uint();
     }
-    queue_weight_groups(groups);
+    require(scheduled_set_count == weight_patterns.size(),
+            "preloaded tile sizes must match the weight sequence");
+    queue_weight_descriptors(descriptors);
     params_channel.Push(params);
     start_channel.SyncPop();
 
     for (const int weight_pattern : weight_patterns) {
-      for (int k = 0; k < K; k++) {
-        for (int span = 0; span < Processor::WEIGHT_BEATS_PER_ROW; span++) {
-          weight_channel.Push(make_weight_beat(weight_pattern, k, span));
-        }
-      }
+      push_weight_set(weight_pattern);
     }
     for (std::size_t operation = 0; operation < weight_patterns.size();
          operation++) {
       input_channel.Push(make_inputs(input_pattern));
     }
+  }
+
+  // Interleave final uses from a full tile with the next tile's ring refills
+  void send_progressive_release_job(int input_pattern, int weight_pattern) {
+    queue_weight_descriptors(
+        {make_weight_descriptor(B_SETS, 1), make_weight_descriptor(2, 1)});
+    params_channel.Push(make_weight_reload_params(B_SETS + 2));
+    start_channel.SyncPop();
+
+    for (int set = 0; set < B_SETS; set++) {
+      push_weight_set(weight_pattern + set);
+    }
+
+    // The next push cannot start until the first old set is released
+    input_channel.Push(make_inputs(input_pattern));
+    push_weight_set(weight_pattern + B_SETS);
+    input_channel.Push(make_inputs(input_pattern));
+    push_weight_set(weight_pattern + B_SETS + 1);
+
+    for (int set = 2; set < B_SETS; set++) {
+      input_channel.Push(make_inputs(input_pattern));
+    }
+    input_channel.Push(make_inputs(input_pattern));
+    input_channel.Push(make_inputs(input_pattern));
   }
 
   // Return the current clock index for ready/valid cadence measurements
@@ -537,15 +593,11 @@ SC_MODULE(CIMProcessorTb) {
   // Send a no-accumulation stream that reuses one resident weight set
   void send_throughput_job(int operations, int weight_pattern,
                            int input_pattern) {
-    queue_weight_groups({make_weight_group(1, 1)});
+    queue_weight_descriptors({make_weight_descriptor(1, 1)});
     params_channel.Push(make_throughput_params(operations));
     start_channel.SyncPop();
 
-    for (int k = 0; k < K; k++) {
-      for (int span = 0; span < Processor::WEIGHT_BEATS_PER_ROW; span++) {
-        weight_channel.Push(make_weight_beat(weight_pattern, k, span));
-      }
-    }
+    push_weight_set(weight_pattern);
 
     for (int operation = 0; operation < operations; operation++) {
       input_channel.Push(make_inputs(input_pattern));
@@ -610,7 +662,8 @@ SC_MODULE(CIMProcessorTb) {
         read_performance_counter(
             MatrixPerformance::CIM_COMPLETION_STORAGE_STALL_CYCLES);
     const MatrixPerformance::Counter result_slot_stall_cycles =
-        read_performance_counter(MatrixPerformance::CIM_RESULT_SLOT_STALL_CYCLES);
+        read_performance_counter(
+            MatrixPerformance::CIM_RESULT_SLOT_STALL_CYCLES);
     const MatrixPerformance::Counter completion_descriptor_stall_cycles =
         read_performance_counter(
             MatrixPerformance::CIM_COMPLETION_DESCRIPTOR_STALL_CYCLES);
@@ -648,22 +701,22 @@ SC_MODULE(CIMProcessorTb) {
     }
   }
 
-  // Drive resident-group metadata independently of the weight beat stream
-  void drive_weight_groups() {
-    weight_group_channel.ResetWrite();
+  // Drive resident-tile metadata independently of the weight beat stream
+  void drive_weight_descriptors() {
+    weight_descriptor_channel.ResetWrite();
     wait();
     while (!rstn.read()) {
       wait();
     }
 
     while (true) {
-      if (pending_weight_groups.empty()) {
-        wait(weight_group_event);
+      if (pending_weight_descriptors.empty()) {
+        wait(weight_descriptor_event);
         continue;
       }
-      const CIMWeightGroup group = pending_weight_groups.front();
-      pending_weight_groups.pop_front();
-      weight_group_channel.Push(group);
+      const CIMWeightDescriptor descriptor = pending_weight_descriptors.front();
+      pending_weight_descriptors.pop_front();
+      weight_descriptor_channel.Push(descriptor);
     }
   }
 
@@ -840,11 +893,10 @@ SC_MODULE(CIMProcessorTb) {
     report_throughput("input", throughput_input_cycles, kThroughputOperations,
                       0);
     const int expected_output_interval =
-        CIM_PROCESSOR_TEST_STRICT_CADENCE
-            ? Processor::Array::MAC_ISSUE_WINDOW
-            : 0;
-    report_throughput("output", throughput_output_cycles,
-                      kThroughputOperations, expected_output_interval);
+        CIM_PROCESSOR_TEST_STRICT_CADENCE ? Processor::Array::MAC_ISSUE_WINDOW
+                                          : 0;
+    report_throughput("output", throughput_output_cycles, kThroughputOperations,
+                      expected_output_interval);
 #if ENABLE_PERF_COUNTERS
     report_completion_storage_counters();
 #endif
@@ -859,7 +911,7 @@ SC_MODULE(CIMProcessorTb) {
     expect_output("nominal address 0", nominal_0, 0);
     expect_output("nominal address 1", nominal_1, 0);
     send_job(make_accumulation_params(true), {0, 1, 2, 3},
-             {true, true, true, true}, make_weight_groups(4), 0);
+             {true, true, true, true}, make_weight_descriptors(4), 0);
 
     const BufferVector reused_x = expected_partial(1, 20);
     for (int output_x = 0; output_x < 4; output_x++) {
@@ -868,7 +920,7 @@ SC_MODULE(CIMProcessorTb) {
       expect_output(label.str(), reused_x, 3);
     }
     send_job(make_weight_reuse_params(true), {20, 20, 20, 20},
-             {true, false, false, false}, {make_weight_group(1, 1)}, 1);
+             {true, false, false, false}, {make_weight_descriptor(1, 1)}, 1);
 
     const BufferVector reused_y = expected_partial(2, 30);
     for (int output_y = 0; output_y < 4; output_y++) {
@@ -877,7 +929,7 @@ SC_MODULE(CIMProcessorTb) {
       expect_output(label.str(), reused_y, 3);
     }
     send_job(make_weight_reuse_params(false), {30, 30, 30, 30},
-             {true, false, false, false}, {make_weight_group(1, 1)}, 2);
+             {true, false, false, false}, {make_weight_descriptor(1, 1)}, 2);
 
     const BufferVector backpressure_bias = queue_bias(100);
     BufferVector backpressured = backpressure_bias;
@@ -885,63 +937,161 @@ SC_MODULE(CIMProcessorTb) {
     add_vector(backpressured, expected_partial(3, 41));
     expect_output("backpressured temporal accumulation", backpressured, 25);
     send_job(make_backpressure_params(), {40, 41}, {true, true},
-             make_weight_groups(2), 3);
+             make_weight_descriptors(2), 3);
 
-    if constexpr (B_SETS >= 8) {
-      for (int replay = 0; replay < 2; replay++) {
-        for (int set = 0; set < 4; set++) {
-          std::ostringstream label;
-          label << "multiset replay " << replay << " set " << set;
-          expect_output(label.str(), expected_partial(8, 8 + set), 0);
+    const BufferVector interleaved_bias = queue_bias(200);
+    BufferVector interleaved_0 = interleaved_bias;
+    add_vector(interleaved_0, expected_partial(12, 120));
+    add_vector(interleaved_0, expected_partial(12, 122));
+    BufferVector interleaved_1 = interleaved_bias;
+    add_vector(interleaved_1, expected_partial(12, 121));
+    add_vector(interleaved_1, expected_partial(12, 123));
+    expect_output("interleaved accumulation address 0", interleaved_0, 0);
+    expect_output("interleaved accumulation address 1", interleaved_1, 0);
+    send_job(make_interleaved_accumulation_params(), {120, 121, 122, 123},
+             {true, true, true, true}, make_weight_descriptors(4), 12);
+
+    static constexpr int kStridedInputPattern = 13;
+    static constexpr int kStridedWeightBase = 130;
+    static constexpr int kStridedK = 2;
+    static constexpr int kStridedX = 2;
+    static constexpr int kStridedReduction = 2;
+    static constexpr int kStridedY = 3;
+    std::vector<int> strided_weight_patterns;
+    std::vector<bool> strided_weight_loads;
+    for (int k = 0; k < kStridedK; k++) {
+      for (int x = 0; x < kStridedX; x++) {
+        for (int reduction = 0; reduction < kStridedReduction; reduction++) {
+          for (int y = 0; y < kStridedY; y++) {
+            const int operation =
+                ((k * kStridedX + x) * kStridedReduction + reduction) *
+                    kStridedY +
+                y;
+            strided_weight_patterns.push_back(kStridedWeightBase + operation);
+            strided_weight_loads.push_back(true);
+          }
         }
       }
-      send_job(make_multiset_reuse_params(), {8, 9, 10, 11, 8, 9, 10, 11},
-               {true, true, true, true, false, false, false, false},
-               {make_weight_group(4, 2)}, 8);
-
-      for (int group = 0; group < 4; group++) {
-        std::ostringstream label;
-        label << "preloaded group " << group;
-        expect_output(label.str(), expected_partial(9, 44 + group), 0);
+    }
+    for (int k = 0; k < kStridedK; k++) {
+      for (int x = 0; x < kStridedX; x++) {
+        for (int y = 0; y < kStridedY; y++) {
+          const int first_operation =
+              ((k * kStridedX + x) * kStridedReduction) * kStridedY + y;
+          const int second_operation = first_operation + kStridedY;
+          BufferVector expected = expected_partial(
+              kStridedInputPattern, kStridedWeightBase + first_operation);
+          add_vector(expected,
+                     expected_partial(kStridedInputPattern,
+                                      kStridedWeightBase + second_operation));
+          std::ostringstream label;
+          label << "strided accumulation K " << k << " X " << x << " Y " << y;
+          expect_output(label.str(), expected, 0);
+        }
       }
-      send_preloaded_groups_job(make_weight_reload_params(4), {44, 45, 46, 47},
-                                9);
+    }
+    send_job(make_strided_accumulation_params(), strided_weight_patterns,
+             strided_weight_loads,
+             make_weight_descriptors(strided_weight_patterns.size()),
+             kStridedInputPattern);
+
+    if constexpr (B_SETS >= 2) {
+      std::vector<int> full_set_patterns;
+      std::vector<bool> full_set_loads;
+      for (int replay = 0; replay < 2; replay++) {
+        for (int set = 0; set < B_SETS; set++) {
+          std::ostringstream label;
+          label << "full-set replay " << replay << " set " << set;
+          expect_output(label.str(), expected_partial(8, 8 + set), 0);
+          full_set_patterns.push_back(8 + set);
+          full_set_loads.push_back(replay == 0);
+        }
+      }
+      send_job(make_multiset_reuse_params(B_SETS), full_set_patterns,
+               full_set_loads, {make_weight_descriptor(B_SETS, 2)}, 8);
+
+      std::vector<CIMWeightDescriptor> single_set_descriptors;
+      std::vector<int> individual_set_patterns;
+      for (int set = 0; set < B_SETS; set++) {
+        std::ostringstream label;
+        label << "individual-set preload " << set;
+        expect_output(label.str(), expected_partial(9, 44 + set), 0);
+        single_set_descriptors.push_back(make_weight_descriptor(1, 1));
+        individual_set_patterns.push_back(44 + set);
+      }
+      send_preloaded_tiles_job(make_weight_reload_params(B_SETS),
+                               individual_set_patterns, single_set_descriptors,
+                               9);
+
+      std::vector<int> variable_tile_patterns;
+      for (int set = 0; set < B_SETS; set++) {
+        std::ostringstream label;
+        label << "variable-tile preload set " << set;
+        expect_output(label.str(), expected_partial(10, 80 + set), 0);
+        variable_tile_patterns.push_back(80 + set);
+      }
+      send_preloaded_tiles_job(
+          make_weight_reload_params(B_SETS), variable_tile_patterns,
+          {make_weight_descriptor(1, 1), make_weight_descriptor(B_SETS - 1, 1)},
+          10);
+
+      static constexpr int kProgressivePatternBase = 100;
+      for (int set = 0; set < B_SETS + 2; set++) {
+        std::ostringstream label;
+        label << "progressive release set " << set;
+        expect_output(label.str(),
+                      expected_partial(11, kProgressivePatternBase + set), 0);
+      }
+      send_progressive_release_job(11, kProgressivePatternBase);
     }
 
-    const int expected_output_count =
-        11 + kThroughputOperations + (B_SETS >= 8 ? 12 : 0);
+    static constexpr int kStridedOutputCount =
+        kStridedK * kStridedX * kStridedY;
+    const int expected_output_count = 13 + kStridedOutputCount +
+                                      kThroughputOperations +
+                                      (B_SETS >= 2 ? 5 * B_SETS + 2 : 0);
     while (checked_outputs < expected_output_count) {
       tick();
     }
-    while (write_count[0] < 3 || read_count[0] < 3) {
-      tick();
-    }
-    require(write_count[0] == 3,
-            "expected three intermediate writes before double-buffered jobs");
-    require(read_count[0] == 3,
-            "expected three accumulation reads before double-buffered jobs");
+    static constexpr int kPreStridedPartialSumTransfers = 2 + 1 + 2;
+    static constexpr int kExpectedPartialSumTransfers =
+        kPreStridedPartialSumTransfers +
+        kStridedOutputCount * (kStridedReduction - 1);
+    require(write_count[0] == kExpectedPartialSumTransfers,
+            "unexpected partial-sum spill count before banked jobs");
+    require(read_count[0] == kExpectedPartialSumTransfers,
+            "unexpected partial-sum reload count before banked jobs");
 
 #if DOUBLE_BUFFERED_ACCUM_BUFFER
+    const int bank_0_writes_before_banked_jobs = write_count[0];
+    const int bank_1_writes_before_banked_jobs = write_count[1];
+    const int bank_0_done_before_banked_jobs = done_count[0];
+    const int bank_1_done_before_banked_jobs = done_count[1];
     const BufferVector bank_0_expected = expected_partial(4, 50);
     send_job(make_double_buffer_params(), {50}, {true},
-             {make_weight_group(1, 1)}, 4);
+             {make_weight_descriptor(1, 1)}, 4);
     const BufferVector bank_1_expected = expected_partial(5, 55);
     send_job(make_double_buffer_params(), {55}, {true},
-             {make_weight_group(1, 1)}, 5);
+             {make_weight_descriptor(1, 1)}, 5);
 
-    while (done_count[0] < 1 || done_count[1] < 1 || write_count[0] < 4 ||
-           write_count[1] < 1) {
+    while (done_count[0] < bank_0_done_before_banked_jobs + 1 ||
+           done_count[1] < bank_1_done_before_banked_jobs + 1 ||
+           write_count[0] < bank_0_writes_before_banked_jobs + 1 ||
+           write_count[1] < bank_1_writes_before_banked_jobs + 1) {
       tick();
     }
     std::ostringstream bank_0_write_message;
-    bank_0_write_message
-        << "expected four writes into accumulation bank 0, got "
-        << write_count[0];
-    require(write_count[0] == 4, bank_0_write_message.str());
+    bank_0_write_message << "expected one additional write into accumulation "
+                            "bank 0, got "
+                         << write_count[0] - bank_0_writes_before_banked_jobs;
+    require(write_count[0] == bank_0_writes_before_banked_jobs + 1,
+            bank_0_write_message.str());
     std::ostringstream bank_1_write_message;
-    bank_1_write_message << "expected one write into accumulation bank 1, got "
-                         << write_count[1];
-    require(write_count[1] == 1, bank_1_write_message.str());
+    bank_1_write_message << "expected one additional write into accumulation "
+                            "bank 1, got "
+                         << write_count[1] - bank_1_writes_before_banked_jobs;
+    require(write_count[1] == bank_1_writes_before_banked_jobs + 1,
+            bank_1_write_message.str());
     for (int n = 0; n < N; n++) {
       std::ostringstream bank_0_data_message;
       bank_0_data_message << "bank 0 n " << n << " expected "
@@ -964,8 +1114,8 @@ SC_MODULE(CIMProcessorTb) {
     const BufferVector direct_resume_expected = expected_partial(7, 70);
     expect_output("direct output after double buffering",
                   direct_resume_expected, 0);
-    send_job(make_throughput_params(1), {70}, {true}, {make_weight_group(1, 1)},
-             7);
+    send_job(make_throughput_params(1), {70}, {true},
+             {make_weight_descriptor(1, 1)}, 7);
     while (checked_outputs == outputs_before_direct_resume) {
       tick();
     }
@@ -978,13 +1128,16 @@ SC_MODULE(CIMProcessorTb) {
         std::cout << "[PASS] cim_processor_result_stream" << std::endl;
       }
       std::cout << "[PASS] cim_processor_nominal_accumulation" << std::endl;
+      std::cout << "[PASS] cim_processor_local_accumulation" << std::endl;
+      std::cout << "[PASS] cim_processor_strided_accumulation" << std::endl;
       std::cout << "[PASS] cim_processor_weight_reuse" << std::endl;
       std::cout << "[PASS] cim_processor_backpressure" << std::endl;
       std::cout << "[PASS] cim_processor_heterogeneous_jobs" << std::endl;
-      if constexpr (B_SETS >= 8) {
-        std::cout << "[PASS] cim_processor_multiset_replay" << std::endl;
-        std::cout << "[PASS] cim_processor_sequential_group_preload"
-                  << std::endl;
+      if constexpr (B_SETS >= 2) {
+        std::cout << "[PASS] cim_processor_full_set_replay" << std::endl;
+        std::cout << "[PASS] cim_processor_individual_set_preload" << std::endl;
+        std::cout << "[PASS] cim_processor_variable_tile_preload" << std::endl;
+        std::cout << "[PASS] cim_processor_progressive_release" << std::endl;
       }
 #if DOUBLE_BUFFERED_ACCUM_BUFFER
       std::cout << "[PASS] cim_processor_double_buffered_accumulation"

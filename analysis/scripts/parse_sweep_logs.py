@@ -22,12 +22,12 @@ PERF_COUNTERS = [
     "weight_unavailable_cycles", "weight_backpressure_cycles",
     "result_backpressure_cycles", "accumulation_stall_cycles",
     "output_backpressure_cycles", "output_fifo_full_cycles",
-    "cim_set_wait_cycles", "cim_completion_storage_stall_cycles",
+    "mac_wait_weight_set_load_cycles", "cim_completion_storage_stall_cycles",
     "cim_result_slot_stall_cycles",
     "cim_completion_descriptor_stall_cycles",
 ]
 CIM_STALL_COUNTERS = [
-    "cim_set_wait_cycles",
+    "mac_wait_weight_set_load_cycles",
     "cim_completion_storage_stall_cycles",
     "cim_result_slot_stall_cycles",
     "cim_completion_descriptor_stall_cycles",

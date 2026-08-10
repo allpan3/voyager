@@ -5,7 +5,6 @@
 
 #include "AccelTypes.h"
 #include "ArchitectureParams.h"
-#include "CIMWeightSchedule.h"
 
 template <typename WeightTypeTuple, typename Bias, int rows, int cols,
           int port_width, int buffer_width,
@@ -22,7 +21,6 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
   // Derive one scalar value's width from a cols-wide resident weight row
   static constexpr int DATA_WIDTH = buffer_width / cols;
 #if MATRIX_BACKEND == MATRIX_BACKEND_CIM
-  static constexpr int SETS_PER_BANK = B_SETS / 2;
   // A transposed source row holds *rows* scalars and becomes one resident
   // column
   static constexpr int SOURCE_ROW_WIDTH = rows * DATA_WIDTH;
@@ -32,10 +30,10 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
                 "WeightController rows must match the CIM array K dimension");
   static_assert(cols == CIM_ARRAY_N_DIMENSION,
                 "WeightController cols must match the CIM array N dimension");
-  static_assert(B_SETS >= 2 && B_SETS % 2 == 0,
-                "CIM resident sets must split into two equal banks");
-  static_assert(SETS_PER_BANK <= 0xFFFF,
-                "CIM resident bank size exceeds schedule metadata");
+  static_assert(B_SETS > 0,
+                "WeightController requires a CIM resident weight set");
+  static_assert(B_SETS <= 0xFFFF,
+                "CIM resident set count exceeds schedule metadata");
   static_assert(buffer_width % weight_channel_width == 0,
                 "One logical weight row must split into whole channel beats");
 #else
@@ -63,7 +61,7 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
   // Stream one physical weight-port beat using the weight_channel protocol
   Connections::Out<ac_int<weight_channel_width, false>> CCS_INIT_S1(
       weight_channel);
-  Connections::Out<CIMWeightGroup> CCS_INIT_S1(weight_group_channel);
+  Connections::Out<CIMWeightDescriptor> CCS_INIT_S1(weight_descriptor_channel);
 #else
   Connections::Out<BufferWriteRequest<ac_int<buffer_width, false>>>
       write_request[2];
@@ -108,7 +106,7 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
   Connections::Fifo<ac_int<4, false>, 3> CCS_INIT_S1(packing_indices_fifo);
   Connections::Combinational<ac_int<4, false>> CCS_INIT_S1(packing_indices_enq);
   Connections::Combinational<ac_int<4, false>> CCS_INIT_S1(packing_indices_deq);
-  sc_fifo<bool> reader_tile_valid;
+  sc_fifo<bool> reader_set_stream_active;
 #endif
 
   SC_CTOR(WeightController) {
@@ -185,9 +183,9 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
 
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
-      while (reader_tile_valid.read()) {
+      while (reader_set_stream_active.read()) {
         for (int row = 0; row < rows; row++) {
-          // Every resident set receives a complete rows-by-cols weight tile
+          // Every resident set receives a complete rows-by-cols weight matrix
           ac_int<buffer_width, false> data = 0;
           if (params.weight_transpose || row < C0) {
             const ac_int<buffer_width, false> fetched = transpose_out.Pop();
@@ -459,7 +457,7 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
 #if MATRIX_BACKEND == MATRIX_BACKEND_CIM
     weight_req.Reset();
     packing_indices_enq.ResetWrite();
-    weight_group_channel.Reset();
+    weight_descriptor_channel.Reset();
 #else
     read_request[0].Reset();
     read_request[1].Reset();
@@ -539,13 +537,13 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
       for (int loop = 0; loop < 6; loop++) {
         const ac_int<32, false> next_set_count =
             resident_set_count * loop_bounds[1][loop];
-        resident_set_count = next_set_count > SETS_PER_BANK
-                                 ? ac_int<32, false>(SETS_PER_BANK + 1)
+        resident_set_count = next_set_count > B_SETS
+                                 ? ac_int<32, false>(B_SETS + 1)
                                  : next_set_count;
       }
-      const bool retain_group = resident_set_count <= SETS_PER_BANK;
+      const bool retain_tile = resident_set_count <= B_SETS;
       const ac_int<LOOP_WIDTH, false> fetch_reuse_bound =
-          retain_group ? ac_int<LOOP_WIDTH, false>(1) : spatial_reuse_bound;
+          retain_tile ? ac_int<LOOP_WIDTH, false>(1) : spatial_reuse_bound;
 
       const ac_int<LOOP_WIDTH, false> weight_K2 =
           params.weight_addr_loops[0][params.weight_addr_weight_loop_idx[0]];
@@ -604,16 +602,17 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
                                     loop_counters[1][3] == 0 &&
                                     loop_counters[1][4] == 0 &&
                                     loop_counters[1][5] == 0;
-                                if (!retain_group || first_resident_set) {
-                                  CIMWeightGroup group;
-                                  if (retain_group) {
-                                    group.set_count = resident_set_count;
-                                    group.replay_count = spatial_reuse_bound;
+                                if (!retain_tile || first_resident_set) {
+                                  CIMWeightDescriptor descriptor;
+                                  if (retain_tile) {
+                                    descriptor.set_count = resident_set_count;
+                                    descriptor.replay_count =
+                                        spatial_reuse_bound;
                                   } else {
-                                    group.set_count = 1;
-                                    group.replay_count = 1;
+                                    descriptor.set_count = 1;
+                                    descriptor.replay_count = 1;
                                   }
-                                  weight_group_channel.Push(group);
+                                  weight_descriptor_channel.Push(descriptor);
                                 }
 
                                 const ac_int<LOOP_WIDTH, false> k2 =
@@ -638,7 +637,7 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
                                     k1 - (packed_k1
                                           << params.weight_pack_factor_lg2);
 
-                                reader_tile_valid.write(true);
+                                reader_set_stream_active.write(true);
                                 // Fetch one source row per resident weight row
                                 // Transposition instead fetches one per column
                                 for (int row = 0;
@@ -838,7 +837,7 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
         if (loop_counters[0][0] == loop_bounds[0][0] - 1) break;
       }
 #if MATRIX_BACKEND == MATRIX_BACKEND_CIM
-      reader_tile_valid.write(false);
+      reader_set_stream_active.write(false);
       fetcher_done.write(true);
       fetcher_done_2.write(true);
 #endif
@@ -899,19 +898,19 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
 #endif
 
       if (params.weight_transpose && rows < 64 && cols < 64) {
-        // Each source row becomes one column of the resident weight tile
+        // Each source row becomes one column of the resident weight set
         ac_int<DATA_WIDTH, false> transpose_buffer[rows][cols];
 
-        // Keep the blocking gather and emit phases in one sequential tile
-        // transaction
+        // Keep the blocking gather and emit phases in one sequential set
+        // transfer
         while (!fetcher_done_2.read()) {
           for (int source_col = 0; source_col < cols; source_col++) {
             if (source_col != 0) {
-              const bool tile_done = fetcher_done_2.read();
+              const bool set_done = fetcher_done_2.read();
 #ifndef __SYNTHESIS__
-              if (tile_done) {
+              if (set_done) {
                 SC_REPORT_FATAL("WeightController",
-                                "incomplete CIM transposed weight tile");
+                                "incomplete CIM transposed weight set");
               }
 #endif
             }

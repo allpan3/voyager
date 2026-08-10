@@ -296,7 +296,7 @@ HLS_PROCESSOR_DEPS := \
 	$(THIS_DIR)/Makefile \
 	$(HLS_DRIVER) \
 	$(REPO_ROOT)/src/CIMProcessor.h \
-	$(REPO_ROOT)/src/CIMWeightSchedule.h \
+	$(REPO_ROOT)/src/AccelTypes.h \
 	$(REPO_ROOT)/src/ConnectionsSignal.h \
 	$(REPO_ROOT)/src/CIMArray.h \
 	$(REPO_ROOT)/src/CIMTile.h \
@@ -415,15 +415,15 @@ $(SYSTEMC_BUILD)/CIMArrayTb.o: $(THIS_DIR)/systemc/CIMArrayTb.cc $(REPO_ROOT)/sr
 	mkdir -p $(SYSTEMC_BUILD)
 	$(SYSTEMC_CC) $(SYSTEMC_CXXFLAGS) -c -o $@ $<
 
-$(CIM_PROCESSOR_SYSTEMC_BUILD)/CIMProcessorTb.o: $(THIS_DIR)/systemc/CIMProcessorTb.cc $(REPO_ROOT)/src/CIMProcessor.h $(REPO_ROOT)/src/CIMWeightSchedule.h $(REPO_ROOT)/src/CIMArray.h $(REPO_ROOT)/src/ConnectionsSignal.h $(REPO_ROOT)/src/CIMTile.h $(REPO_ROOT)/src/CIMElement.h $(REPO_ROOT)/src/ArchitectureParams.h $(REPO_ROOT)/src/TypeToBits.h $(REPO_ROOT)/src/Utils.h | check-systemc-env
+$(CIM_PROCESSOR_SYSTEMC_BUILD)/CIMProcessorTb.o: $(THIS_DIR)/systemc/CIMProcessorTb.cc $(REPO_ROOT)/src/CIMProcessor.h $(REPO_ROOT)/src/AccelTypes.h $(REPO_ROOT)/src/CIMArray.h $(REPO_ROOT)/src/ConnectionsSignal.h $(REPO_ROOT)/src/CIMTile.h $(REPO_ROOT)/src/CIMElement.h $(REPO_ROOT)/src/ArchitectureParams.h $(REPO_ROOT)/src/TypeToBits.h $(REPO_ROOT)/src/Utils.h | check-systemc-env
 	mkdir -p $(CIM_PROCESSOR_SYSTEMC_BUILD)
 	$(SYSTEMC_CC) $(SYSTEMC_CXXFLAGS) $(CIM_MATRIX_UNIT_CXXFLAGS) -DDOUBLE_BUFFERED_ACCUM_BUFFER=false -c -o $@ $<
 
-$(CIM_PROCESSOR_DB_SYSTEMC_BUILD)/CIMProcessorTb.o: $(THIS_DIR)/systemc/CIMProcessorTb.cc $(REPO_ROOT)/src/CIMProcessor.h $(REPO_ROOT)/src/CIMWeightSchedule.h $(REPO_ROOT)/src/CIMArray.h $(REPO_ROOT)/src/ConnectionsSignal.h $(REPO_ROOT)/src/CIMTile.h $(REPO_ROOT)/src/CIMElement.h $(REPO_ROOT)/src/ArchitectureParams.h $(REPO_ROOT)/src/TypeToBits.h $(REPO_ROOT)/src/Utils.h | check-systemc-env
+$(CIM_PROCESSOR_DB_SYSTEMC_BUILD)/CIMProcessorTb.o: $(THIS_DIR)/systemc/CIMProcessorTb.cc $(REPO_ROOT)/src/CIMProcessor.h $(REPO_ROOT)/src/AccelTypes.h $(REPO_ROOT)/src/CIMArray.h $(REPO_ROOT)/src/ConnectionsSignal.h $(REPO_ROOT)/src/CIMTile.h $(REPO_ROOT)/src/CIMElement.h $(REPO_ROOT)/src/ArchitectureParams.h $(REPO_ROOT)/src/TypeToBits.h $(REPO_ROOT)/src/Utils.h | check-systemc-env
 	mkdir -p $(CIM_PROCESSOR_DB_SYSTEMC_BUILD)
 	$(SYSTEMC_CC) $(SYSTEMC_CXXFLAGS) $(CIM_MATRIX_UNIT_CXXFLAGS) -DDOUBLE_BUFFERED_ACCUM_BUFFER=true -c -o $@ $<
 
-$(CIM_PROCESSOR_LARGE_SYSTEMC_BUILD)/CIMProcessorTb.o: $(THIS_DIR)/systemc/CIMProcessorTb.cc $(REPO_ROOT)/src/CIMProcessor.h $(REPO_ROOT)/src/CIMWeightSchedule.h $(REPO_ROOT)/src/CIMArray.h $(REPO_ROOT)/src/ConnectionsSignal.h $(REPO_ROOT)/src/CIMTile.h $(REPO_ROOT)/src/CIMElement.h $(REPO_ROOT)/src/ArchitectureParams.h $(REPO_ROOT)/src/TypeToBits.h $(REPO_ROOT)/src/Utils.h | check-systemc-env
+$(CIM_PROCESSOR_LARGE_SYSTEMC_BUILD)/CIMProcessorTb.o: $(THIS_DIR)/systemc/CIMProcessorTb.cc $(REPO_ROOT)/src/CIMProcessor.h $(REPO_ROOT)/src/AccelTypes.h $(REPO_ROOT)/src/CIMArray.h $(REPO_ROOT)/src/ConnectionsSignal.h $(REPO_ROOT)/src/CIMTile.h $(REPO_ROOT)/src/CIMElement.h $(REPO_ROOT)/src/ArchitectureParams.h $(REPO_ROOT)/src/TypeToBits.h $(REPO_ROOT)/src/Utils.h | check-systemc-env
 	mkdir -p $(CIM_PROCESSOR_LARGE_SYSTEMC_BUILD)
 	$(SYSTEMC_CC) $(SYSTEMC_CXXFLAGS) $(CIM_PROCESSOR_LARGE_CXXFLAGS) -DDOUBLE_BUFFERED_ACCUM_BUFFER=false -DCIM_PROCESSOR_LARGE_TEST=1 -c -o $@ $<
 
@@ -436,7 +436,7 @@ $(CIM_MATRIX_UNIT_SYSTEMC_BUILD)/MatrixUnitTb.o: \
 	$(REPO_ROOT)/src/CIMElement.h \
 	$(REPO_ROOT)/src/InputController.h \
 	$(REPO_ROOT)/src/WeightController.h \
-	$(REPO_ROOT)/src/CIMWeightSchedule.h \
+	$(REPO_ROOT)/src/AccelTypes.h \
 	$(REPO_ROOT)/src/OutputController.h \
 	$(REPO_ROOT)/src/ParamsDeserializer.h \
 	$(REPO_ROOT)/src/DoubleBuffer.h \
