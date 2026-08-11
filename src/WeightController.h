@@ -510,25 +510,32 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
       bool reuse_weights =
           FY1 == 1 && C2 == 1 && FY0 == 1 && FX == 1 && C1 == 1 && K1 == 1;
 
-      // extra loop for exploiting L1 buffer reuse.
-      // this loop is used when OX and OY are the innermost L2 loops. when
-      // this occurs, we can move OX and/or OY into the buffer reuse L1 loop
-      ac_int<LOOP_WIDTH, false> spatial_reuse_bound = 1;
-      if (C2 == 1) {
-        // OX loop can be absorbed
-        if (params.weight_loop_idx[0] < params.x_loop_idx[0]) {
-          if (!reuse_weights) {
-            spatial_reuse_bound = loop_bounds[0][params.x_loop_idx[0]];
-          }
-          loop_bounds[0][params.x_loop_idx[0]] = 1;
+      // Absorb an outer spatial loop only when every varying outer weight loop
+      // precedes it, preserving the compute order in the descriptor replay
+      const bool absorb_x =
+          (!reuse_weights ||
+           params.weight_loop_idx[0] < params.x_loop_idx[0]) &&
+          (K2 == 1 || params.weight_loop_idx[0] < params.x_loop_idx[0]) &&
+          (C2 == 1 || params.reduction_loop_idx[0] < params.x_loop_idx[0]) &&
+          (FY1 == 1 || params.fy_loop_idx[0] < params.x_loop_idx[0]);
+      const bool absorb_y =
+          (!reuse_weights ||
+           params.weight_loop_idx[0] < params.y_loop_idx[0]) &&
+          (K2 == 1 || params.weight_loop_idx[0] < params.y_loop_idx[0]) &&
+          (C2 == 1 || params.reduction_loop_idx[0] < params.y_loop_idx[0]) &&
+          (FY1 == 1 || params.fy_loop_idx[0] < params.y_loop_idx[0]);
+      ac_int<16, false> spatial_reuse_bound = 1;
+      if (absorb_x) {
+        if (!reuse_weights) {
+          spatial_reuse_bound = loop_bounds[0][params.x_loop_idx[0]];
         }
-        // OY loop can be absorbed
-        if (params.weight_loop_idx[0] < params.y_loop_idx[0]) {
-          if (!reuse_weights) {
-            spatial_reuse_bound *= loop_bounds[0][params.y_loop_idx[0]];
-          }
-          loop_bounds[0][params.y_loop_idx[0]] = 1;
+        loop_bounds[0][params.x_loop_idx[0]] = 1;
+      }
+      if (absorb_y) {
+        if (!reuse_weights) {
+          spatial_reuse_bound *= loop_bounds[0][params.y_loop_idx[0]];
         }
+        loop_bounds[0][params.y_loop_idx[0]] = 1;
       }
 
 #if MATRIX_BACKEND == MATRIX_BACKEND_CIM
@@ -542,8 +549,8 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
                                  : next_set_count;
       }
       const bool retain_tile = resident_set_count <= B_SETS;
-      const ac_int<LOOP_WIDTH, false> fetch_reuse_bound =
-          retain_tile ? ac_int<LOOP_WIDTH, false>(1) : spatial_reuse_bound;
+      const ac_int<16, false> fetch_reuse_bound =
+          retain_tile ? ac_int<16, false>(1) : spatial_reuse_bound;
 
       const ac_int<LOOP_WIDTH, false> weight_K2 =
           params.weight_addr_loops[0][params.weight_addr_weight_loop_idx[0]];
@@ -580,7 +587,7 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
           for (loop_counters[0][2] = 0;; loop_counters[0][2]++) {
             for (loop_counters[0][3] = 0;; loop_counters[0][3]++) {
               for (loop_counters[0][4] = 0;; loop_counters[0][4]++) {
-                for (ac_int<LOOP_WIDTH, false> spatial_reuse_idx = 0;;
+                for (ac_int<16, false> spatial_reuse_idx = 0;;
                      spatial_reuse_idx++) {
                   for (int transpose_reuse_idx = 0;
                        transpose_reuse_idx < transpose_reuse_bound;
@@ -1106,7 +1113,9 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
         }
       }
 
-      // set irrelevant loop bounds to 1
+      // Collapse reduction and filter loops while retaining output traversal
+      loop_bounds[0][params.reduction_loop_idx[0]] = 0;
+      loop_bounds[0][params.fy_loop_idx[0]] = 0;
       loop_bounds[1][params.weight_reuse_idx[0]] = 0;
       loop_bounds[1][params.weight_reuse_idx[1]] = 0;
       loop_bounds[1][params.fx_loop_idx] = 0;
@@ -1121,36 +1130,44 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
       for (loop_counters[0][0] = 0;; loop_counters[0][0]++) {
         for (loop_counters[0][1] = 0;; loop_counters[0][1]++) {
           for (loop_counters[0][2] = 0;; loop_counters[0][2]++) {
-            for (loop_counters[1][0] = 0;; loop_counters[1][0]++) {
-              for (loop_counters[1][1] = 0;; loop_counters[1][1]++) {
-                for (loop_counters[1][2] = 0;; loop_counters[1][2]++) {
-                  for (loop_counters[1][3] = 0;; loop_counters[1][3]++) {
-                    for (loop_counters[1][4] = 0;; loop_counters[1][4]++) {
-                      for (loop_counters[1][5] = 0;; loop_counters[1][5]++) {
-                        ac_int<LOOP_WIDTH, false> k2 =
-                            loop_counters[0][params.weight_loop_idx[0]];
-                        ac_int<LOOP_WIDTH, false> k1 =
-                            loop_counters[1][params.weight_loop_idx[1]];
+            for (loop_counters[0][3] = 0;; loop_counters[0][3]++) {
+              for (loop_counters[0][4] = 0;; loop_counters[0][4]++) {
+                for (loop_counters[1][0] = 0;; loop_counters[1][0]++) {
+                  for (loop_counters[1][1] = 0;; loop_counters[1][1]++) {
+                    for (loop_counters[1][2] = 0;; loop_counters[1][2]++) {
+                      for (loop_counters[1][3] = 0;; loop_counters[1][3]++) {
+                        for (loop_counters[1][4] = 0;; loop_counters[1][4]++) {
+                          for (loop_counters[1][5] = 0;;
+                               loop_counters[1][5]++) {
+                            ac_int<LOOP_WIDTH, false> k2 =
+                                loop_counters[0][params.weight_loop_idx[0]];
+                            ac_int<LOOP_WIDTH, false> k1 =
+                                loop_counters[1][params.weight_loop_idx[1]];
 
-                        ac_int<16, false> address = k2 * K1 * cols + k1 * cols;
+                            ac_int<16, false> address =
+                                k2 * K1 * cols + k1 * cols;
 
-                        MemoryRequest request = {
-                            params.bias_offset + address * Bias::width / 8,
-                            cols * Bias::width / 8};
+                            MemoryRequest request = {
+                                params.bias_offset + address * Bias::width / 8,
+                                cols * Bias::width / 8};
 
-                        bias_req.Push(request);
+                            bias_req.Push(request);
 
-                        if (loop_counters[1][5] == loop_bounds[1][5]) break;
+                            if (loop_counters[1][5] == loop_bounds[1][5]) break;
+                          }
+                          if (loop_counters[1][4] == loop_bounds[1][4]) break;
+                        }
+                        if (loop_counters[1][3] == loop_bounds[1][3]) break;
                       }
-                      if (loop_counters[1][4] == loop_bounds[1][4]) break;
+                      if (loop_counters[1][2] == loop_bounds[1][2]) break;
                     }
-                    if (loop_counters[1][3] == loop_bounds[1][3]) break;
+                    if (loop_counters[1][1] == loop_bounds[1][1]) break;
                   }
-                  if (loop_counters[1][2] == loop_bounds[1][2]) break;
+                  if (loop_counters[1][0] == loop_bounds[1][0]) break;
                 }
-                if (loop_counters[1][1] == loop_bounds[1][1]) break;
+                if (loop_counters[0][4] == loop_bounds[0][4]) break;
               }
-              if (loop_counters[1][0] == loop_bounds[1][0]) break;
+              if (loop_counters[0][3] == loop_bounds[0][3]) break;
             }
             if (loop_counters[0][2] == loop_bounds[0][2]) break;
           }
@@ -1182,7 +1199,9 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
         }
       }
 
-      // set irrelevant loop bounds to 1
+      // Collapse reduction and filter loops while retaining output traversal
+      loop_bounds[0][params.reduction_loop_idx[0]] = 0;
+      loop_bounds[0][params.fy_loop_idx[0]] = 0;
       loop_bounds[1][params.weight_reuse_idx[0]] = 0;
       loop_bounds[1][params.weight_reuse_idx[1]] = 0;
       loop_bounds[1][params.fx_loop_idx] = 0;
@@ -1194,33 +1213,41 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
       for (loop_counters[0][0] = 0;; loop_counters[0][0]++) {
         for (loop_counters[0][1] = 0;; loop_counters[0][1]++) {
           for (loop_counters[0][2] = 0;; loop_counters[0][2]++) {
-            for (loop_counters[1][0] = 0;; loop_counters[1][0]++) {
-              for (loop_counters[1][1] = 0;; loop_counters[1][1]++) {
-                for (loop_counters[1][2] = 0;; loop_counters[1][2]++) {
-                  for (loop_counters[1][3] = 0;; loop_counters[1][3]++) {
-                    for (loop_counters[1][4] = 0;; loop_counters[1][4]++) {
-                      for (loop_counters[1][5] = 0;; loop_counters[1][5]++) {
-                        ac_int<Bias::width * cols, false> bits;
+            for (loop_counters[0][3] = 0;; loop_counters[0][3]++) {
+              for (loop_counters[0][4] = 0;; loop_counters[0][4]++) {
+                for (loop_counters[1][0] = 0;; loop_counters[1][0]++) {
+                  for (loop_counters[1][1] = 0;; loop_counters[1][1]++) {
+                    for (loop_counters[1][2] = 0;; loop_counters[1][2]++) {
+                      for (loop_counters[1][3] = 0;; loop_counters[1][3]++) {
+                        for (loop_counters[1][4] = 0;; loop_counters[1][4]++) {
+                          for (loop_counters[1][5] = 0;;
+                               loop_counters[1][5]++) {
+                            ac_int<Bias::width * cols, false> bits;
 
-                        process_matrix_input<Bias, cols, port_width,
-                                             Bias::width * cols>(bias_resp,
-                                                                 bits);
+                            process_matrix_input<Bias, cols, port_width,
+                                                 Bias::width * cols>(bias_resp,
+                                                                     bits);
 
-                        Pack1D<Bias, cols> biases =
-                            BitsToType<Pack1D<Bias, cols>>(TypeToBits(bits));
+                            Pack1D<Bias, cols> biases =
+                                BitsToType<Pack1D<Bias, cols>>(
+                                    TypeToBits(bits));
 
-                        bias_data.Push(biases);
-                        if (loop_counters[1][5] == loop_bounds[1][5]) break;
+                            bias_data.Push(biases);
+                            if (loop_counters[1][5] == loop_bounds[1][5]) break;
+                          }
+                          if (loop_counters[1][4] == loop_bounds[1][4]) break;
+                        }
+                        if (loop_counters[1][3] == loop_bounds[1][3]) break;
                       }
-                      if (loop_counters[1][4] == loop_bounds[1][4]) break;
+                      if (loop_counters[1][2] == loop_bounds[1][2]) break;
                     }
-                    if (loop_counters[1][3] == loop_bounds[1][3]) break;
+                    if (loop_counters[1][1] == loop_bounds[1][1]) break;
                   }
-                  if (loop_counters[1][2] == loop_bounds[1][2]) break;
+                  if (loop_counters[1][0] == loop_bounds[1][0]) break;
                 }
-                if (loop_counters[1][1] == loop_bounds[1][1]) break;
+                if (loop_counters[0][4] == loop_bounds[0][4]) break;
               }
-              if (loop_counters[1][0] == loop_bounds[1][0]) break;
+              if (loop_counters[0][3] == loop_bounds[0][3]) break;
             }
             if (loop_counters[0][2] == loop_bounds[0][2]) break;
           }

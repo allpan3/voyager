@@ -487,6 +487,28 @@ SC_MODULE(CIMProcessor) {
     return step == 0 || (inner && (!reuse_weights || outer));
   }
 
+  // Return whether an outer loop is nested inside a live reduction
+  static bool outer_loop_is_inside_reduction(const MatrixParams &params,
+                                             ac_int<3, false> loop_idx) {
+    const auto c2 = params.loops[0][params.reduction_loop_idx[0]];
+    const auto fy1 = params.loops[0][params.fy_loop_idx[0]];
+    return (c2 > 1 && params.reduction_loop_idx[0] < loop_idx) ||
+           (fy1 > 1 && params.fy_loop_idx[0] < loop_idx);
+  }
+
+  // Return the accumulation entries needed by all simultaneously live outputs
+  static ac_int<32, false> accumulation_footprint(const MatrixParams &params) {
+    const bool include_x1 =
+        outer_loop_is_inside_reduction(params, params.x_loop_idx[0]);
+    const bool include_y1 =
+        outer_loop_is_inside_reduction(params, params.y_loop_idx[0]);
+    ac_int<32, false> x_extent = params.loops[1][params.x_loop_idx[1]];
+    ac_int<32, false> y_extent = params.loops[1][params.y_loop_idx[1]];
+    if (include_x1) x_extent *= params.loops[0][params.x_loop_idx[0]];
+    if (include_y1) y_extent *= params.loops[0][params.y_loop_idx[0]];
+    return params.loops[1][params.weight_loop_idx[1]] * y_extent * x_extent;
+  }
+
   // Commit one ordered weight-channel beat to the selected resident set
   // WEIGHT CHANNEL CONTRACT. Width is checked, but stream and lane order are
   // conventions shared with WeightController and must change on both sides
@@ -718,6 +740,27 @@ SC_MODULE(CIMProcessor) {
         SC_REPORT_FATAL("CIMProcessor",
                         "currently does not support MX or replicated operands");
       }
+      const bool outer_k_context =
+          params.loops[0][params.weight_loop_idx[0]] > 1 &&
+          outer_loop_is_inside_reduction(params, params.weight_loop_idx[0]);
+      if (outer_k_context) {
+        SC_REPORT_FATAL("CIMProcessor",
+                        "outer output-column partial contexts are unsupported");
+      }
+#if DOUBLE_BUFFERED_ACCUM_BUFFER
+      const bool outer_spatial_context =
+          outer_loop_is_inside_reduction(params, params.x_loop_idx[0]) ||
+          outer_loop_is_inside_reduction(params, params.y_loop_idx[0]);
+      if (outer_spatial_context && params.write_output_to_accum_buffer) {
+        SC_REPORT_FATAL(
+            "CIMProcessor",
+            "outer partial contexts cannot use banked accumulation output");
+      }
+#endif
+      if (accumulation_footprint(params) > buffer_size) {
+        SC_REPORT_FATAL("CIMProcessor",
+                        "live partial outputs exceed accumulation capacity");
+      }
 #endif
 
       ac_int<LOOP_WIDTH, false> loop_counters[2][6];
@@ -825,12 +868,26 @@ SC_MODULE(CIMProcessor) {
   static ac_int<16, false> accumulation_address(
       const MatrixParams &params,
       const ac_int<LOOP_WIDTH, false> loop_counters[2][6]) {
-    const ac_int<LOOP_WIDTH, false> y0 = params.loops[1][params.y_loop_idx[1]];
-    const ac_int<LOOP_WIDTH, false> x0 = params.loops[1][params.x_loop_idx[1]];
-    const ac_int<16, false> k_stride = y0 * x0;
-    return loop_counters[1][params.weight_loop_idx[1]] * k_stride +
-           loop_counters[1][params.y_loop_idx[1]] * x0 +
-           loop_counters[1][params.x_loop_idx[1]];
+    const bool include_x1 =
+        outer_loop_is_inside_reduction(params, params.x_loop_idx[0]);
+    const bool include_y1 =
+        outer_loop_is_inside_reduction(params, params.y_loop_idx[0]);
+    const ac_int<16, false> x0_extent = params.loops[1][params.x_loop_idx[1]];
+    const ac_int<16, false> y0_extent = params.loops[1][params.y_loop_idx[1]];
+    ac_int<16, false> x_extent = x0_extent;
+    ac_int<16, false> y_extent = y0_extent;
+    ac_int<16, false> x = loop_counters[1][params.x_loop_idx[1]];
+    ac_int<16, false> y = loop_counters[1][params.y_loop_idx[1]];
+    if (include_x1) {
+      x_extent *= params.loops[0][params.x_loop_idx[0]];
+      x += loop_counters[0][params.x_loop_idx[0]] * x0_extent;
+    }
+    if (include_y1) {
+      y_extent *= params.loops[0][params.y_loop_idx[0]];
+      y += loop_counters[0][params.y_loop_idx[0]] * y0_extent;
+    }
+    return loop_counters[1][params.weight_loop_idx[1]] * y_extent * x_extent +
+           y * x_extent + x;
   }
 
   // Match MatrixProcessor::process_accumulation is_non_accumulating_tile
@@ -873,7 +930,16 @@ SC_MODULE(CIMProcessor) {
   static bool finishes_output_tile(
       const MatrixParams &params,
       const ac_int<LOOP_WIDTH, false> loop_counters[2][6]) {
-    return finishes_accumulation(params, loop_counters) &&
+    const bool finishes_x_context =
+        !outer_loop_is_inside_reduction(params, params.x_loop_idx[0]) ||
+        loop_counters[0][params.x_loop_idx[0]] ==
+            params.loops[0][params.x_loop_idx[0]] - 1;
+    const bool finishes_y_context =
+        !outer_loop_is_inside_reduction(params, params.y_loop_idx[0]) ||
+        loop_counters[0][params.y_loop_idx[0]] ==
+            params.loops[0][params.y_loop_idx[0]] - 1;
+    return finishes_accumulation(params, loop_counters) && finishes_x_context &&
+           finishes_y_context &&
            loop_counters[1][params.weight_loop_idx[1]] ==
                params.loops[1][params.weight_loop_idx[1]] - 1 &&
            loop_counters[1][params.x_loop_idx[1]] ==

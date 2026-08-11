@@ -162,6 +162,8 @@ SC_MODULE(CIMProcessorTb) {
   int read_count[Processor::ACCUM_BUFFER_BANKS];
   int write_count[Processor::ACCUM_BUFFER_BANKS];
   int done_count[Processor::ACCUM_BUFFER_BANKS];
+  std::vector<int> read_addresses[Processor::ACCUM_BUFFER_BANKS];
+  std::vector<int> write_addresses[Processor::ACCUM_BUFFER_BANKS];
   unsigned long buffer_cycle;
 
   std::deque<ExpectedOutput> expected_outputs;
@@ -322,6 +324,20 @@ SC_MODULE(CIMProcessorTb) {
     params.loops[1][params.reduction_loop_idx[1]] = 2;
     params.loops[1][params.x_loop_idx[1]] = 2;
     params.has_bias = true;
+    return params;
+  }
+
+  // Replay each outer-reduction set across two live outer-X contexts
+  MatrixParams make_set_major_replay_params() const {
+    MatrixParams params = make_base_params();
+    params.reduction_loop_idx[0] = 0;
+    params.x_loop_idx[0] = 1;
+    params.y_loop_idx[0] = 2;
+    params.weight_loop_idx[0] = 3;
+    params.fy_loop_idx[0] = 4;
+    params.loops[0][params.reduction_loop_idx[0]] = 2;
+    params.loops[0][params.x_loop_idx[0]] = 2;
+    params.has_bias = false;
     return params;
   }
 
@@ -518,12 +534,14 @@ SC_MODULE(CIMProcessorTb) {
     expected_output_event.notify(SC_ZERO_TIME);
   }
 
-  // Send one mapper job with an exact resident-weight load schedule
-  void send_job(
-      const MatrixParams &params, const std::vector<int> &weight_patterns,
-      const std::vector<bool> &load_weights,
-      const std::vector<CIMWeightDescriptor> &descriptors, int input_pattern) {
-    require(weight_patterns.size() == load_weights.size(),
+  // Send one mapper job whose operations may use distinct input patterns
+  void send_job(const MatrixParams &params,
+                const std::vector<int> &weight_patterns,
+                const std::vector<bool> &load_weights,
+                const std::vector<CIMWeightDescriptor> &descriptors,
+                const std::vector<int> &input_patterns) {
+    require(weight_patterns.size() == load_weights.size() &&
+                weight_patterns.size() == input_patterns.size(),
             "test job vectors must have equal lengths");
     queue_weight_descriptors(descriptors);
     params_channel.Push(params);
@@ -534,7 +552,36 @@ SC_MODULE(CIMProcessorTb) {
       if (load_weights[operation]) {
         push_weight_set(weight_patterns[operation]);
       }
-      input_channel.Push(make_inputs(input_pattern));
+      input_channel.Push(make_inputs(input_patterns[operation]));
+    }
+  }
+
+  // Send one mapper job with a shared input pattern
+  void send_job(
+      const MatrixParams &params, const std::vector<int> &weight_patterns,
+      const std::vector<bool> &load_weights,
+      const std::vector<CIMWeightDescriptor> &descriptors, int input_pattern) {
+    send_job(params, weight_patterns, load_weights, descriptors,
+             std::vector<int>(weight_patterns.size(), input_pattern));
+  }
+
+  // Check one job's exact accumulation-buffer address subsequence
+  void require_address_sequence(
+      const std::string &label, const std::vector<int> &addresses,
+      std::size_t begin, const std::vector<int> &expected) {
+    std::ostringstream count_message;
+    count_message << label << " expected " << expected.size()
+                  << " addresses got " << addresses.size() - begin;
+    require(addresses.size() == begin + expected.size(), count_message.str());
+    if (addresses.size() < begin + expected.size()) {
+      return;
+    }
+    for (std::size_t index = 0; index < expected.size(); index++) {
+      std::ostringstream address_message;
+      address_message << label << " index " << index << " expected "
+                      << expected[index] << " got " << addresses[begin + index];
+      require(addresses[begin + index] == expected[index],
+              address_message.str());
     }
   }
 
@@ -771,12 +818,14 @@ SC_MODULE(CIMProcessorTb) {
       pending_read[0] = true;
       pending_read_address[0] = address;
       pending_read_ready_cycle[0] = buffer_cycle + 2;
+      read_addresses[0].push_back(address.to_int());
       read_count[0]++;
     }
 
     WriteRequest write;
     if (buffer_cycle % 4 == 0 && accumulation_write_request_0.PopNB(write)) {
       accumulation_memory[0][write.address.to_int()] = write.data;
+      write_addresses[0].push_back(write.address.to_int());
       write_count[0]++;
     }
   }
@@ -796,12 +845,14 @@ SC_MODULE(CIMProcessorTb) {
       pending_read[1] = true;
       pending_read_address[1] = address;
       pending_read_ready_cycle[1] = buffer_cycle + 2;
+      read_addresses[1].push_back(address.to_int());
       read_count[1]++;
     }
 
     WriteRequest write;
     if (buffer_cycle % 4 == 1 && accumulation_write_request_1.PopNB(write)) {
       accumulation_memory[1][write.address.to_int()] = write.data;
+      write_addresses[1].push_back(write.address.to_int());
       write_count[1]++;
     }
   }
@@ -951,6 +1002,43 @@ SC_MODULE(CIMProcessorTb) {
     send_job(make_interleaved_accumulation_params(), {120, 121, 122, 123},
              {true, true, true, true}, make_weight_descriptors(4), 12);
 
+    while (checked_outputs < kThroughputOperations + 13) {
+      tick();
+    }
+
+    static constexpr int kSetMajorFirstInput = 14;
+    static constexpr int kSetMajorSecondInput = 15;
+    static constexpr int kSetMajorFirstWeight = 160;
+    static constexpr int kSetMajorSecondWeight = 161;
+    BufferVector set_major_0 =
+        expected_partial(kSetMajorFirstInput, kSetMajorFirstWeight);
+    add_vector(set_major_0,
+               expected_partial(kSetMajorFirstInput, kSetMajorSecondWeight));
+    BufferVector set_major_1 =
+        expected_partial(kSetMajorSecondInput, kSetMajorFirstWeight);
+    add_vector(set_major_1,
+               expected_partial(kSetMajorSecondInput, kSetMajorSecondWeight));
+    const int set_major_outputs_before = checked_outputs;
+    const std::size_t set_major_writes_begin = write_addresses[0].size();
+    const std::size_t set_major_reads_begin = read_addresses[0].size();
+    expect_output("set-major replay outer X 0", set_major_0, 0);
+    expect_output("set-major replay outer X 1", set_major_1, 0);
+    send_job(make_set_major_replay_params(),
+             {kSetMajorFirstWeight, kSetMajorFirstWeight, kSetMajorSecondWeight,
+              kSetMajorSecondWeight},
+             {true, false, true, false},
+             {make_weight_descriptor(1, 2), make_weight_descriptor(1, 2)},
+             {kSetMajorFirstInput, kSetMajorSecondInput, kSetMajorFirstInput,
+              kSetMajorSecondInput});
+    while (checked_outputs < set_major_outputs_before + 2) {
+      tick();
+    }
+    require_address_sequence("set-major accumulation writes",
+                             write_addresses[0], set_major_writes_begin,
+                             {0, 1});
+    require_address_sequence("set-major accumulation reads", read_addresses[0],
+                             set_major_reads_begin, {0, 1});
+
     static constexpr int kStridedInputPattern = 13;
     static constexpr int kStridedWeightBase = 130;
     static constexpr int kStridedK = 2;
@@ -1047,13 +1135,13 @@ SC_MODULE(CIMProcessorTb) {
 
     static constexpr int kStridedOutputCount =
         kStridedK * kStridedX * kStridedY;
-    const int expected_output_count = 13 + kStridedOutputCount +
+    const int expected_output_count = 15 + kStridedOutputCount +
                                       kThroughputOperations +
                                       (B_SETS >= 2 ? 5 * B_SETS + 2 : 0);
     while (checked_outputs < expected_output_count) {
       tick();
     }
-    static constexpr int kPreStridedPartialSumTransfers = 2 + 1 + 2;
+    static constexpr int kPreStridedPartialSumTransfers = 2 + 1 + 2 + 2;
     static constexpr int kExpectedPartialSumTransfers =
         kPreStridedPartialSumTransfers +
         kStridedOutputCount * (kStridedReduction - 1);
@@ -1130,6 +1218,7 @@ SC_MODULE(CIMProcessorTb) {
       std::cout << "[PASS] cim_processor_nominal_accumulation" << std::endl;
       std::cout << "[PASS] cim_processor_local_accumulation" << std::endl;
       std::cout << "[PASS] cim_processor_strided_accumulation" << std::endl;
+      std::cout << "[PASS] cim_processor_set_major_replay" << std::endl;
       std::cout << "[PASS] cim_processor_weight_reuse" << std::endl;
       std::cout << "[PASS] cim_processor_backpressure" << std::endl;
       std::cout << "[PASS] cim_processor_heterogeneous_jobs" << std::endl;
