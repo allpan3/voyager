@@ -141,6 +141,24 @@ SC_MODULE(MatrixUnitTb) {
     test_failed = true;
   }
 
+  // Check the source-row projection shared by input fetch and write validity
+  void check_outer_fy_input_projection() {
+    for (int fy1 = 0; fy1 < 3; fy1++) {
+      for (int y0 = 0; y0 < 4; y0++) {
+        const auto projected =
+            project_input_y0<10>(ac_int<10, false>(y0), ac_int<10, false>(fy1),
+                                 ac_int<4, false>(1), ac_int<8, false>(2));
+        require(projected == 2 * y0 + fy1,
+                "outer FY must shift the source row after stride");
+      }
+    }
+
+    const auto inner_fy =
+        project_input_y0<10>(ac_int<10, false>(3), ac_int<10, false>(0),
+                             ac_int<4, false>(3), ac_int<8, false>(2));
+    require(inner_fy == 3, "inner FY must preserve the local input-buffer row");
+  }
+
   // Stop a serialized-parameter, memory, or completion deadlock
   void watchdog() {
     wait(500, SC_US);
@@ -739,6 +757,8 @@ SC_MODULE(MatrixUnitTb) {
     output_addr_channel.ResetRead();
     start_channel.ResetRead();
     done_channel.ResetRead();
+
+    check_outer_fy_input_projection();
 
     append_expected_requests(MATRIX_REUSE);
     append_expected_requests(MATRIX_RELOAD);

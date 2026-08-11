@@ -7,6 +7,17 @@
 #include "ArchitectureParams.h"
 #include "Utils.h"
 
+// Project one local input row through stride and an outer FY coordinate
+template <int loop_width>
+ac_int<loop_width, false> project_input_y0(ac_int<loop_width, false> y0,
+                                           ac_int<loop_width, false> fy1,
+                                           ac_int<4, false> fy0_extent,
+                                           ac_int<8, false> stride) {
+  ac_int<loop_width, false> input_y0 = y0;
+  if (fy0_extent == 1) input_y0 = y0 * stride + fy1;
+  return input_y0;
+}
+
 template <typename InputTypeTuple, int rows, int port_width, int buffer_width>
 struct InputController;
 
@@ -204,7 +215,7 @@ struct InputController<std::tuple<InputTypes...>, rows, port_width,
                                 loop_counters[0][matrix_loop_position(
                                     params, MatrixLoopLevel::L2,
                                     MatrixLoopParam::IC)];
-                            ac_int<LOOP_WIDTH, false> y0 =
+                            const ac_int<LOOP_WIDTH, false> y0 =
                                 loop_counters[1][matrix_loop_position(
                                     params, MatrixLoopLevel::L1,
                                     MatrixLoopParam::OY)];
@@ -216,17 +227,17 @@ struct InputController<std::tuple<InputTypes...>, rows, port_width,
                                 loop_counters[1][matrix_loop_position(
                                     params, MatrixLoopLevel::L1,
                                     MatrixLoopParam::IC)];
-                            ac_int<LOOP_WIDTH, false> fy1 =
+                            const ac_int<LOOP_WIDTH, false> fy1 =
                                 loop_counters[0][matrix_loop_position(
                                     params, MatrixLoopLevel::L2,
                                     MatrixLoopParam::FY)];
+                            const ac_int<LOOP_WIDTH, false> input_y0 =
+                                project_input_y0<LOOP_WIDTH>(y0, fy1, FY0,
+                                                             STRIDE);
 
                             // adjust address for stride
                             if (FX == 1) {
                               x0 = x0 * STRIDE;
-                            }
-                            if (FY0 == 1) {
-                              y0 = y0 * STRIDE + fy1;
                             }
 
                             if (params.is_resnet_replication) {
@@ -240,7 +251,8 @@ struct InputController<std::tuple<InputTypes...>, rows, port_width,
                               x0 = x0 << params.fx_unrolling_lg2;
                             }
 
-                            ac_int<16, true> y = y1 * IY0 + y0 - params.padding;
+                            ac_int<16, true> y =
+                                y1 * IY0 + input_y0 - params.padding;
                             ac_int<16, true> x = x1 * IX0 + x0 - params.padding;
                             ac_int<16, false> c = (c2 * C1 + c1) * c_stride;
 
@@ -432,7 +444,7 @@ struct InputController<std::tuple<InputTypes...>, rows, port_width,
                                   loop_counters[0][matrix_loop_position(
                                       params, MatrixLoopLevel::L2,
                                       MatrixLoopParam::OX)];
-                              ac_int<LOOP_WIDTH, true> y0 =
+                              const ac_int<LOOP_WIDTH, false> y0 =
                                   loop_counters[1][matrix_loop_position(
                                       params, MatrixLoopLevel::L1,
                                       MatrixLoopParam::OY)];
@@ -444,6 +456,13 @@ struct InputController<std::tuple<InputTypes...>, rows, port_width,
                                   loop_counters[1][matrix_loop_position(
                                       params, MatrixLoopLevel::L1,
                                       MatrixLoopParam::IC)];
+                              const ac_int<LOOP_WIDTH, false> fy1 =
+                                  loop_counters[0][matrix_loop_position(
+                                      params, MatrixLoopLevel::L2,
+                                      MatrixLoopParam::FY)];
+                              const ac_int<LOOP_WIDTH, false> input_y0 =
+                                  project_input_y0<LOOP_WIDTH>(y0, fy1, FY0,
+                                                               STRIDE);
 
                               if (params.is_resnet_replication && x0 != 0) {
                                 x0 = (x0 - boundary_words) * packing_factor +
@@ -453,7 +472,7 @@ struct InputController<std::tuple<InputTypes...>, rows, port_width,
                               ac_int<16, true> x =
                                   x1 * IX0 + x0 - params.padding;
                               ac_int<16, true> y =
-                                  y1 * IY0 + y0 - params.padding;
+                                  y1 * IY0 + input_y0 - params.padding;
 
                               ac_int<buffer_width, false> data;
                               if (x < 0 || y < 0 || x >= X || y >= Y) {
