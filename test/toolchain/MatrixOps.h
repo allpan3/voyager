@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdexcept>
+
 #include "spdlog/spdlog.h"
 #include "src/AccelTypes.h"
 #include "src/Params.h"
@@ -14,6 +16,66 @@
 #if SUPPORT_SPMM
 #include "test/toolchain/SpMM.h"
 #endif
+
+// Project distinct outer semantics while preserving the legacy DWC alias
+template <typename MatrixLoopParams>
+void project_matrix_outer_output_loops(
+    const MatrixLoopParams& params,
+    ac_int<VectorParams::LOOP_WIDTH, false> (&output_loops)[3],
+    ac_int<3, false>& output_x_loop_idx,
+    ac_int<3, false>& output_y_loop_idx,
+    ac_int<3, false>& output_k_loop_idx) {
+  const int source_x_loop_idx = params.x_loop_idx[0];
+  const int source_y_loop_idx = params.y_loop_idx[0];
+  const int source_k_loop_idx = params.weight_loop_idx[0];
+
+  // DWC historically aliases all semantics to slot zero but uses three bounds
+  if (source_x_loop_idx == 0 && source_y_loop_idx == 0 &&
+      source_k_loop_idx == 0) {
+    for (int i = 0; i < 3; i++) {
+      output_loops[i] = params.loops[0][i];
+    }
+    output_x_loop_idx = 0;
+    output_y_loop_idx = 0;
+    output_k_loop_idx = 0;
+    return;
+  }
+
+  if (source_x_loop_idx < 0 || source_x_loop_idx >= 5 ||
+      source_y_loop_idx < 0 || source_y_loop_idx >= 5 ||
+      source_k_loop_idx < 0 || source_k_loop_idx >= 5) {
+    throw std::invalid_argument(
+        "matrix outer semantic loop index is outside the five-slot nest");
+  }
+  if (source_x_loop_idx == source_y_loop_idx ||
+      source_x_loop_idx == source_k_loop_idx ||
+      source_y_loop_idx == source_k_loop_idx) {
+    throw std::invalid_argument(
+        "matrix outer semantic loop indices must be distinct");
+  }
+
+  int output_loop_idx = 0;
+  for (int i = 0; i < 5; i++) {
+    if (i != source_k_loop_idx && i != source_x_loop_idx &&
+        i != source_y_loop_idx) {
+      continue;
+    }
+    output_loops[output_loop_idx] = params.loops[0][i];
+    if (i == source_x_loop_idx) {
+      output_x_loop_idx = output_loop_idx;
+    }
+    if (i == source_y_loop_idx) {
+      output_y_loop_idx = output_loop_idx;
+    }
+    if (i == source_k_loop_idx) {
+      output_k_loop_idx = output_loop_idx;
+    }
+    output_loop_idx++;
+  }
+  if (output_loop_idx != 3) {
+    throw std::logic_error("matrix outer loop projection is incomplete");
+  }
+}
 
 void set_vector_fetch_1(const codegen::Tensor& tensor, const Tiling& tiling,
                         VectorParams* vector_params) {
@@ -38,13 +100,11 @@ void set_vector_fetch_1(const codegen::Tensor& tensor, const Tiling& tiling,
   vector_params->vector_fetch_1_packing_factor =
       OC_DIMENSION / VECTOR_UNIT_WIDTH;
 
-  // copy loop values and indices
-  for (int i = 0; i < 3; i++) {
-    vector_params->vector_fetch_1_loops[0][i] = tiling.loops[0][i];
-  }
-  vector_params->vector_fetch_1_x_loop_idx[0] = tiling.x_loop_idx[0];
-  vector_params->vector_fetch_1_y_loop_idx[0] = tiling.y_loop_idx[0];
-  vector_params->vector_fetch_1_k_loop_idx[0] = tiling.weight_loop_idx[0];
+  project_matrix_outer_output_loops(
+      tiling, vector_params->vector_fetch_1_loops[0],
+      vector_params->vector_fetch_1_x_loop_idx[0],
+      vector_params->vector_fetch_1_y_loop_idx[0],
+      vector_params->vector_fetch_1_k_loop_idx[0]);
 
   int loop_index = 0;
   for (int i = 0; i < 6; i++) {
@@ -89,13 +149,11 @@ void set_vector_fetch_2(const codegen::Tensor& tensor, const Tiling& tiling,
   vector_params->vector_fetch_2_packing_factor =
       OC_DIMENSION / VECTOR_UNIT_WIDTH;
 
-  // copy loop values and indices
-  for (int i = 0; i < 3; i++) {
-    vector_params->vector_fetch_2_loops[0][i] = tiling.loops[0][i];
-  }
-  vector_params->vector_fetch_2_x_loop_idx[0] = tiling.x_loop_idx[0];
-  vector_params->vector_fetch_2_y_loop_idx[0] = tiling.y_loop_idx[0];
-  vector_params->vector_fetch_2_k_loop_idx[0] = tiling.weight_loop_idx[0];
+  project_matrix_outer_output_loops(
+      tiling, vector_params->vector_fetch_2_loops[0],
+      vector_params->vector_fetch_2_x_loop_idx[0],
+      vector_params->vector_fetch_2_y_loop_idx[0],
+      vector_params->vector_fetch_2_k_loop_idx[0]);
 
   int loop_index = 0;
   for (int i = 0; i < 6; i++) {
@@ -735,13 +793,11 @@ void map_matrix_operation(const Operation& operation,
 
   vector_params->vector_output_offset = get_address(output);
 
-  // Set outer loops
-  for (int i = 0; i < 3; i++) {
-    vector_params->output_loops[0][i] = tiling.loops[0][i];
-  }
-  vector_params->output_y_loop_idx[0] = tiling.y_loop_idx[0];
-  vector_params->output_x_loop_idx[0] = tiling.x_loop_idx[0];
-  vector_params->output_k_loop_idx[0] = tiling.weight_loop_idx[0];
+  project_matrix_outer_output_loops(
+      tiling, vector_params->output_loops[0],
+      vector_params->output_x_loop_idx[0],
+      vector_params->output_y_loop_idx[0],
+      vector_params->output_k_loop_idx[0]);
 
   // Set inner loops
   int output_loop_idx = 0;
