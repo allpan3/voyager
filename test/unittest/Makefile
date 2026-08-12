@@ -104,6 +104,39 @@ SYSTEMC_LDFLAGS := \
 	-lsystemc \
 	-lpthread
 
+TILING_LOWERING_BUILD := $(SYSTEMC_BUILD)/tiling_lowering
+TILING_LOWERING_GENERATED := $(TILING_LOWERING_BUILD)/generated
+TILING_LOWERING_PROTO_DIR := $(TILING_LOWERING_GENERATED)/test/compiler/proto
+TILING_LOWERING_PARAM_PROTO := $(REPO_ROOT)/voyager-compiler/src/voyager_compiler/codegen/param.proto
+TILING_LOWERING_TILING_PROTO := $(REPO_ROOT)/test/compiler/proto/tiling.proto
+TILING_LOWERING_PARAM_PB := $(TILING_LOWERING_PROTO_DIR)/param.pb.cc
+TILING_LOWERING_TILING_PB := $(TILING_LOWERING_PROTO_DIR)/tiling.pb.cc
+ifneq ($(wildcard $(CONDA_ENV)/bin/protoc),)
+TILING_LOWERING_PROTOC ?= $(CONDA_ENV)/bin/protoc
+else
+TILING_LOWERING_PROTOC ?= protoc
+endif
+TILING_LOWERING_CXXFLAGS := \
+	-I$(TILING_LOWERING_GENERATED) \
+	-I$(CONDA_ENV)/include \
+	-I$(REPO_ROOT)/lib/spdlog/include \
+	$(SYSTEMC_CXXFLAGS)
+TILING_LOWERING_LDFLAGS := \
+	-L$(CONDA_ENV)/lib \
+	-lstdc++fs \
+	-labsl_hash \
+	-labsl_log_internal_check_op \
+	-labsl_log_internal_message \
+	-labsl_log_internal_nullguard \
+	-lprotobuf \
+	-lpthread \
+	-Wl,-rpath=$(CONDA_ENV)/lib
+TILING_LOWERING_OBJS := \
+	$(TILING_LOWERING_BUILD)/TilingLoweringTb.o \
+	$(TILING_LOWERING_BUILD)/Tiling.o \
+	$(TILING_LOWERING_BUILD)/param.pb.o \
+	$(TILING_LOWERING_BUILD)/tiling.pb.o
+
 CIM_MATRIX_UNIT_CXXFLAGS := \
 	-I$(CONDA_ENV)/include \
 	-I$(REPO_ROOT)/lib/spdlog/include \
@@ -331,7 +364,11 @@ HLS_ENV = \
 
 .PHONY: test test-macro test-element build-systemc build-systemc-element build-systemc-tile build-systemc-array build-systemc-processor build-systemc-processor-double-buffered build-systemc-processor-large build-systemc-matrix-unit test-systemc-element test-systemc-tile test-systemc-array test-systemc-processor test-systemc-processor-standard test-systemc-processor-cadence test-systemc-processor-double-buffered test-systemc-processor-large test-systemc-matrix-unit check-systemc-env check-verilator-env clean hls hls-tile hls-array hls-processor hls-processor-double-buffered hls-processor-run scverify-array scverify-array-run scverify-processor scverify-processor-cadence scverify-processor-double-buffered scverify-processor-run check-catapult-root check-catapult-env FORCE
 
-test: test-macro test-element test-systemc-element test-systemc-tile test-systemc-array test-systemc-processor test-systemc-matrix-unit
+.PHONY: test-tiling-lowering
+test-tiling-lowering: check-catapult-root $(TILING_LOWERING_BUILD)/TilingLoweringTb
+	$(TILING_LOWERING_BUILD)/TilingLoweringTb
+
+test: test-tiling-lowering test-macro test-element test-systemc-element test-systemc-tile test-systemc-array test-systemc-processor test-systemc-matrix-unit
 
 test-macro:
 	$(PYTHON) $(THIS_DIR)/verilog/test_cim_macro.py $(JOBS_ARG) $(WAVEFORM_ARG) $(TEST_ARGS) $(MODEL_TEST_ARGS)
@@ -382,6 +419,33 @@ test-systemc-processor-large: check-systemc-env
 
 test-systemc-matrix-unit: check-systemc-env
 	@$(PYTHON) $(SYSTEMC_RUNNER) --suite matrix_unit_cim_systemc --build-target build-systemc-matrix-unit --binary $(CIM_MATRIX_UNIT_SYSTEMC_BUILD)/MatrixUnitTb --log-dir $(CIM_MATRIX_UNIT_SYSTEMC_BUILD)/logs/matrix_unit --makefile $(THIS_DIR)/Makefile --datatype INT8 --ic-dimension $(CIM_PROCESSOR_IC_DIMENSION) --oc-dimension $(CIM_PROCESSOR_OC_DIMENSION)
+
+$(TILING_LOWERING_BUILD)/TilingLoweringTb: $(TILING_LOWERING_OBJS)
+	$(SYSTEMC_CC) -o $@ $^ $(TILING_LOWERING_LDFLAGS)
+
+$(TILING_LOWERING_BUILD)/TilingLoweringTb.o: $(THIS_DIR)/TilingLoweringTb.cc $(REPO_ROOT)/test/common/Tiling.h $(TILING_LOWERING_PARAM_PB) $(TILING_LOWERING_TILING_PB)
+	mkdir -p $(@D)
+	$(SYSTEMC_CC) $(TILING_LOWERING_CXXFLAGS) -c -o $@ $<
+
+$(TILING_LOWERING_BUILD)/Tiling.o: $(REPO_ROOT)/test/common/Tiling.cc $(REPO_ROOT)/test/common/Tiling.h $(REPO_ROOT)/test/common/Utils.h $(TILING_LOWERING_PARAM_PB) $(TILING_LOWERING_TILING_PB)
+	mkdir -p $(@D)
+	$(SYSTEMC_CC) $(TILING_LOWERING_CXXFLAGS) -c -o $@ $<
+
+$(TILING_LOWERING_BUILD)/param.pb.o: $(TILING_LOWERING_PARAM_PB)
+	mkdir -p $(@D)
+	$(SYSTEMC_CC) $(TILING_LOWERING_CXXFLAGS) -c -o $@ $<
+
+$(TILING_LOWERING_BUILD)/tiling.pb.o: $(TILING_LOWERING_TILING_PB)
+	mkdir -p $(@D)
+	$(SYSTEMC_CC) $(TILING_LOWERING_CXXFLAGS) -c -o $@ $<
+
+$(TILING_LOWERING_PARAM_PB): $(TILING_LOWERING_PARAM_PROTO)
+	mkdir -p $(@D)
+	$(TILING_LOWERING_PROTOC) -I=$(dir $<) --cpp_out=$(@D) $<
+
+$(TILING_LOWERING_TILING_PB): $(TILING_LOWERING_TILING_PROTO)
+	mkdir -p $(@D)
+	$(TILING_LOWERING_PROTOC) -I=$(dir $<) --cpp_out=$(@D) $<
 
 $(SYSTEMC_BUILD)/CIMElementTb: $(SYSTEMC_BUILD)/CIMElementTb.o $(CIM_ELEMENT_VERILATED_LIBS)
 	$(SYSTEMC_CC) -o $@ $< $(CIM_ELEMENT_VERILATED_LIBS) $(CIM_ELEMENT_VERILATED_RUNTIME_LIB) $(SYSTEMC_LDFLAGS)

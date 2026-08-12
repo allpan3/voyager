@@ -1,28 +1,289 @@
 #include "test/common/Tiling.h"
 
+#include <array>
+#include <stdexcept>
+#include <string>
+
 #include "spdlog/spdlog.h"
 #include "test/common/Utils.h"
 
+namespace {
+
+constexpr int kL2Level = 0;
+constexpr int kL1Level = 1;
+
+constexpr std::array<SemanticLoop, kSemanticLoopCount> kCanonicalLoopOrder = {
+    SemanticLoop::OX, SemanticLoop::OY, SemanticLoop::IC,
+    SemanticLoop::OC, SemanticLoop::FX, SemanticLoop::FY};
+
+// Return a stable semantic loop name
+const char* semantic_loop_name(SemanticLoop loop) {
+  switch (loop) {
+    case SemanticLoop::OX:
+      return "OX";
+    case SemanticLoop::OY:
+      return "OY";
+    case SemanticLoop::IC:
+      return "IC";
+    case SemanticLoop::OC:
+      return "OC";
+    case SemanticLoop::FX:
+      return "FX";
+    case SemanticLoop::FY:
+      return "FY";
+  }
+  return "unknown";
+}
+
+// Translate one protobuf dimension into the semantic enum
+SemanticLoop semantic_loop_from_proto(voyager::Loop loop) {
+  switch (loop) {
+    case voyager::Loop::OX:
+      return SemanticLoop::OX;
+    case voyager::Loop::OY:
+      return SemanticLoop::OY;
+    case voyager::Loop::IC:
+      return SemanticLoop::IC;
+    case voyager::Loop::OC:
+      return SemanticLoop::OC;
+    case voyager::Loop::FX:
+      return SemanticLoop::FX;
+    case voyager::Loop::FY:
+      return SemanticLoop::FY;
+    case voyager::Loop::ON:
+      break;
+    default:
+      break;
+  }
+  throw std::invalid_argument(
+      "tiling supports only OX, OY, IC, OC, FX, and FY");
+}
+
+// Return a readable temporal-level name
+const char* semantic_level_name(std::size_t level) {
+  return level == kSemanticL1Level ? "L1" : "L2";
+}
+
+// Enforce normalization invariants for directly constructed semantic schedules
+void validate_semantic_level(const SemanticTilingLevel& level,
+                             std::size_t level_index) {
+  if (level.specified_loop_count > kSemanticLoopCount) {
+    throw std::invalid_argument(
+        "semantic tiling specified-loop count exceeds six");
+  }
+
+  std::array<bool, kSemanticLoopCount> seen{};
+  for (SemanticLoop loop : level.order) {
+    const auto index = static_cast<std::size_t>(loop);
+    if (index >= kSemanticLoopCount || seen[index]) {
+      throw std::invalid_argument("semantic tiling order is not a permutation");
+    }
+    seen[index] = true;
+  }
+
+  for (std::size_t i = 0; i < kSemanticLoopCount; i++) {
+    if (level.bounds[i] <= 0) {
+      throw std::invalid_argument(
+          std::string(semantic_level_name(level_index)) +
+          " semantic tiling bound must be positive");
+    }
+  }
+
+  for (std::size_t i = level.specified_loop_count; i < kSemanticLoopCount;
+       i++) {
+    if (level.bound(level.order[i]) != 1) {
+      throw std::invalid_argument(
+          std::string(semantic_level_name(level_index)) +
+          " source-omitted loop factors must be one");
+    }
+  }
+}
+
+// Initialize a compiler schedule with unit loop bounds
+Tiling initialize_tiling() {
+  Tiling tiling{};
+  tiling.fx_loop_idx = -1;
+  for (int level = 0; level < 2; level++) {
+    for (int loop = 0; loop < 6; loop++) {
+      tiling.loops[level][loop] = 1;
+    }
+    tiling.x_loop_idx[level] = -1;
+    tiling.y_loop_idx[level] = -1;
+    tiling.reduction_loop_idx[level] = -1;
+    tiling.weight_loop_idx[level] = -1;
+    tiling.fy_loop_idx[level] = -1;
+  }
+  tiling.weight_reuse_idx[0] = 0;
+  tiling.weight_reuse_idx[1] = 0;
+  tiling.stride = 1;
+  tiling.resnet_replication = false;
+  tiling.generic_replication = false;
+  tiling.fx_unrolling = 1;
+  return tiling;
+}
+
+// Assign one semantic dimension to one compiler loop position
+void assign_loop(Tiling& tiling, std::size_t semantic_level,
+                 const SemanticTilingLevel& level, SemanticLoop loop,
+                 int slot) {
+  const int storage_level = semantic_level == kSemanticL1Level ? 1 : 0;
+  tiling.loops[storage_level][slot] = level.bound(loop);
+  switch (loop) {
+    case SemanticLoop::OX:
+      tiling.x_loop_idx[storage_level] = slot;
+      return;
+    case SemanticLoop::OY:
+      tiling.y_loop_idx[storage_level] = slot;
+      return;
+    case SemanticLoop::IC:
+      tiling.reduction_loop_idx[storage_level] = slot;
+      return;
+    case SemanticLoop::OC:
+      tiling.weight_loop_idx[storage_level] = slot;
+      return;
+    case SemanticLoop::FX:
+      if (semantic_level == kSemanticL1Level) {
+        tiling.fx_loop_idx = slot;
+      }
+      return;
+    case SemanticLoop::FY:
+      tiling.fy_loop_idx[storage_level] = slot;
+      return;
+  }
+  throw std::logic_error("unreachable semantic loop");
+}
+
+// Preserve the legacy pair of innermost L1 spatial reuse slots
+void set_legacy_weight_reuse_indices(Tiling& tiling) {
+  if (tiling.x_loop_idx[kL1Level] == 5 ||
+      tiling.y_loop_idx[kL1Level] == 5) {
+    tiling.weight_reuse_idx[0] = 5;
+    tiling.weight_reuse_idx[1] = 5;
+  }
+  if (tiling.x_loop_idx[kL1Level] == 4 ||
+      tiling.y_loop_idx[kL1Level] == 4) {
+    tiling.weight_reuse_idx[0] = 4;
+  }
+}
+
+// Pack L1 fully and omit fixed-unit L2 FX from the five-slot legacy schedule
+Tiling lower_tiling(const SemanticTiling& semantic_tiling) {
+  Tiling tiling = initialize_tiling();
+  for (std::size_t level_index = 0; level_index < kSemanticLevelCount;
+       level_index++) {
+    const auto& level = semantic_tiling.levels[level_index];
+    int slot = level_index == kSemanticL1Level ? 5 : 4;
+    for (std::size_t order_index = 0; order_index < kSemanticLoopCount;
+         order_index++) {
+      const SemanticLoop loop = level.order[order_index];
+      if (level_index == kSemanticL2Level && loop == SemanticLoop::FX) {
+        continue;
+      }
+      assign_loop(tiling, level_index, level, loop, slot--);
+    }
+    if (slot != -1) throw std::logic_error("legacy tiling row is incomplete");
+  }
+
+  set_legacy_weight_reuse_indices(tiling);
+  return tiling;
+}
+
+// Return the semantic dimension assigned to one compiler-schedule slot
+const char* tiling_loop_name(const Tiling& tiling, int level, int slot) {
+  if (tiling.x_loop_idx[level] == slot) return "OX";
+  if (tiling.y_loop_idx[level] == slot) return "OY";
+  if (tiling.reduction_loop_idx[level] == slot) return "IC";
+  if (tiling.weight_loop_idx[level] == slot) return "OC";
+  if ((level == kL1Level && tiling.fx_loop_idx == slot) ||
+      (level == kL2Level && slot == 5)) return "FX";
+  if (tiling.fy_loop_idx[level] == slot) return "FY";
+  return "?";
+}
+
+}  // namespace
+
+// Preserve each source prefix and append every omitted dimension at unit bound
+SemanticTiling normalize_tiling(const voyager::Tiling& tiling) {
+  if (tiling.level_tilings_size() != static_cast<int>(kSemanticLevelCount)) {
+    throw std::invalid_argument(
+        "tiling must contain exactly two temporal levels");
+  }
+
+  SemanticTiling normalized{};
+  for (std::size_t level_index = 0; level_index < kSemanticLevelCount;
+       level_index++) {
+    const auto& source = tiling.level_tilings(static_cast<int>(level_index));
+    if (source.loop_bounds_size() > static_cast<int>(kSemanticLoopCount)) {
+      throw std::invalid_argument(
+          std::string(semantic_level_name(level_index)) +
+          " tiling contains more than six loops");
+    }
+
+    auto& level = normalized.levels[level_index];
+    level.bounds.fill(1);
+    level.specified_loop_count =
+        static_cast<std::size_t>(source.loop_bounds_size());
+    std::array<bool, kSemanticLoopCount> seen{};
+
+    for (int i = 0; i < source.loop_bounds_size(); i++) {
+      const auto& source_loop = source.loop_bounds(i);
+      const SemanticLoop loop = semantic_loop_from_proto(source_loop.loop());
+      const auto loop_index = static_cast<std::size_t>(loop);
+      if (seen[loop_index]) {
+        throw std::invalid_argument(
+            std::string(semantic_level_name(level_index)) +
+            " tiling contains duplicate " + semantic_loop_name(loop));
+      }
+      if (source_loop.bound() <= 0) {
+        throw std::invalid_argument(
+            std::string(semantic_level_name(level_index)) + " " +
+            semantic_loop_name(loop) + " bound must be positive");
+      }
+
+      seen[loop_index] = true;
+      level.bounds[loop_index] = source_loop.bound();
+      level.order[static_cast<std::size_t>(i)] = loop;
+    }
+
+    std::size_t order_index = level.specified_loop_count;
+    for (SemanticLoop loop : kCanonicalLoopOrder) {
+      if (!seen[static_cast<std::size_t>(loop)]) {
+        level.order[order_index++] = loop;
+      }
+    }
+    if (order_index != kSemanticLoopCount) {
+      throw std::logic_error("normalized semantic order is incomplete");
+    }
+  }
+  return normalized;
+}
+
+// Reject unsupported outer FX before packing the legacy compiler schedule
+Tiling lower_semantic_tiling(const SemanticTiling& semantic_tiling) {
+  validate_semantic_level(semantic_tiling.levels[kSemanticL1Level],
+                          kSemanticL1Level);
+  validate_semantic_level(semantic_tiling.levels[kSemanticL2Level],
+                          kSemanticL2Level);
+
+  if (semantic_tiling.levels[kSemanticL2Level].bound(SemanticLoop::FX) != 1) {
+    throw std::invalid_argument("L2 FX bound must be one");
+  }
+
+  return lower_tiling(semantic_tiling);
+}
+
 std::ostream& operator<<(std::ostream& os, const Tiling& tiling) {
-  os << "Loops: " << std::endl;
-  for (int i = 0; i < 2; i++) {
-    os << "  " << i << ": ";
-    for (int j = 0; j < 6; j++) {
-      os << tiling.loops[i][j] << " ";
+  os << "Schedule:" << std::endl;
+  for (int level = 0; level < 2; level++) {
+    os << (level == kL2Level ? "  L2 outer -> inner: "
+                            : "  L1 outer -> inner: ");
+    for (int slot = 0; slot < 6; slot++) {
+      if (slot != 0) os << ", ";
+      os << tiling_loop_name(tiling, level, slot) << "="
+         << tiling.loops[level][slot];
     }
     os << std::endl;
   }
-  os << "X Loop Index: " << tiling.x_loop_idx[0] << " " << tiling.x_loop_idx[1]
-     << std::endl;
-  os << "Y Loop Index: " << tiling.y_loop_idx[0] << " " << tiling.y_loop_idx[1]
-     << std::endl;
-  os << "Reduction Loop Index: " << tiling.reduction_loop_idx[0] << " "
-     << tiling.reduction_loop_idx[1] << std::endl;
-  os << "Weight Loop Index: " << tiling.weight_loop_idx[0] << " "
-     << tiling.weight_loop_idx[1] << std::endl;
-  os << "FX Index: " << tiling.fx_loop_idx << std::endl;
-  os << "FY Index: " << tiling.fy_loop_idx[0] << " " << tiling.fy_loop_idx[1]
-     << std::endl;
   os << "Weight Reuse Index: " << tiling.weight_reuse_idx[0] << " "
      << tiling.weight_reuse_idx[1] << std::endl;
   os << "Stride: " << tiling.stride << std::endl;
@@ -85,158 +346,9 @@ Tiling get_tiling(const Operation& operation) {
   return tiling;
 }
 
+// Complete omitted mapper dimensions before compiler-slot packing
 Tiling get_interstellar_tiling(const voyager::Tiling& tiling) {
-  Tiling accelerator_tiling;
-
-  // Interstellar does not emit tilings with replication
-  accelerator_tiling.resnet_replication = false;
-  accelerator_tiling.generic_replication = false;
-  accelerator_tiling.fx_unrolling = 1;
-
-  for (int i = 0; i < 2; i++) {
-    for (int j = 0; j < 6; j++) {
-      accelerator_tiling.loops[i][j] = 1;
-    }
-  }
-
-  accelerator_tiling.fx_loop_idx = -1;
-  for (int i = 0; i < 2; i++) {
-    accelerator_tiling.fy_loop_idx[i] = -1;
-    accelerator_tiling.x_loop_idx[i] = -1;
-    accelerator_tiling.y_loop_idx[i] = -1;
-    accelerator_tiling.reduction_loop_idx[i] = -1;
-    accelerator_tiling.weight_loop_idx[i] = -1;
-  }
-
-  int loop_index = 5;
-  // L1 level
-  for (int i = 0; i < tiling.level_tilings(0).loop_bounds_size(); i++) {
-    if (tiling.level_tilings(0).loop_bounds(i).loop() == voyager::Loop::IC) {
-      // set this later
-      accelerator_tiling.loops[1][0] =
-          tiling.level_tilings(0).loop_bounds(i).bound();
-      accelerator_tiling.reduction_loop_idx[1] = 0;
-    } else {
-      // all other loops need to be set in reverse order
-      accelerator_tiling.loops[1][loop_index] =
-          tiling.level_tilings(0).loop_bounds(i).bound();
-      if (tiling.level_tilings(0).loop_bounds(i).loop() == voyager::Loop::FX) {
-        accelerator_tiling.fx_loop_idx = loop_index;
-      } else if (tiling.level_tilings(0).loop_bounds(i).loop() ==
-                 voyager::Loop::FY) {
-        accelerator_tiling.fy_loop_idx[1] = loop_index;
-      } else if (tiling.level_tilings(0).loop_bounds(i).loop() ==
-                 voyager::Loop::OC) {
-        accelerator_tiling.weight_loop_idx[1] = loop_index;
-      } else if (tiling.level_tilings(0).loop_bounds(i).loop() ==
-                 voyager::Loop::OX) {
-        accelerator_tiling.x_loop_idx[1] = loop_index;
-      } else if (tiling.level_tilings(0).loop_bounds(i).loop() ==
-                 voyager::Loop::OY) {
-        accelerator_tiling.y_loop_idx[1] = loop_index;
-      }
-
-      loop_index--;
-    }
-  }
-
-  // set any unset loop indices
-  while (loop_index >= 1) {
-    if (accelerator_tiling.fx_loop_idx == -1) {
-      accelerator_tiling.fx_loop_idx = loop_index;
-    } else if (accelerator_tiling.fy_loop_idx[1] == -1) {
-      accelerator_tiling.fy_loop_idx[1] = loop_index;
-    } else if (accelerator_tiling.weight_loop_idx[1] == -1) {
-      accelerator_tiling.weight_loop_idx[1] = loop_index;
-    } else if (accelerator_tiling.x_loop_idx[1] == -1) {
-      accelerator_tiling.x_loop_idx[1] = loop_index;
-    } else if (accelerator_tiling.y_loop_idx[1] == -1) {
-      accelerator_tiling.y_loop_idx[1] = loop_index;
-    }
-    loop_index--;
-  }
-
-  // if reduction loop is not set, set it to 0
-  if (accelerator_tiling.reduction_loop_idx[1] == -1) {
-    accelerator_tiling.reduction_loop_idx[1] = 0;
-  }
-
-  for (int i = loop_index; i < 6; i++) {
-    if (accelerator_tiling.fx_loop_idx == -1) {
-      accelerator_tiling.fx_loop_idx = 5 - i;
-    } else if (accelerator_tiling.fy_loop_idx[1] == -1) {
-      accelerator_tiling.fy_loop_idx[1] = 5 - i;
-    } else if (accelerator_tiling.weight_loop_idx[1] == -1) {
-      accelerator_tiling.weight_loop_idx[1] = 5 - i;
-    } else if (accelerator_tiling.x_loop_idx[1] == -1) {
-      accelerator_tiling.x_loop_idx[1] = 5 - i;
-    } else if (accelerator_tiling.y_loop_idx[1] == -1) {
-      accelerator_tiling.y_loop_idx[1] = 5 - i;
-    } else if (accelerator_tiling.reduction_loop_idx[1] == -1) {
-      accelerator_tiling.reduction_loop_idx[1] = 5 - i;
-    }
-  }
-
-  // set weight reuse loop index depending on if x or y are the innermost loops
-  if (accelerator_tiling.x_loop_idx[1] == 5 ||
-      accelerator_tiling.y_loop_idx[1] == 5) {
-    accelerator_tiling.weight_reuse_idx[1] = 5;
-    accelerator_tiling.weight_reuse_idx[0] = 5;
-  }
-  if (accelerator_tiling.x_loop_idx[1] == 4 ||
-      accelerator_tiling.y_loop_idx[1] == 4) {
-    accelerator_tiling.weight_reuse_idx[0] = 4;
-  }
-
-  // L2 level
-  accelerator_tiling.loops[0][4] = 1;
-  accelerator_tiling.fy_loop_idx[0] = 4;
-
-  int offset = 1;
-  if (tiling.level_tilings(1).loop_bounds_size() > 0 &&
-      tiling.level_tilings(1).loop_bounds(0).loop() != voyager::Loop::IC) {
-    // if the first loop is not IC, then we need to manually set the IC loop to
-    // 1
-    accelerator_tiling.loops[0][3] = 1;
-    accelerator_tiling.reduction_loop_idx[0] = 3;
-    offset++;
-  }
-
-  for (int i = 0; i < tiling.level_tilings(1).loop_bounds_size(); i++) {
-    accelerator_tiling.loops[0][4 - offset - i] =
-        tiling.level_tilings(1).loop_bounds(i).bound();
-    if (tiling.level_tilings(1).loop_bounds(i).loop() == voyager::Loop::OC) {
-      accelerator_tiling.weight_loop_idx[0] = 4 - offset - i;
-    } else if (tiling.level_tilings(1).loop_bounds(i).loop() ==
-               voyager::Loop::OX) {
-      accelerator_tiling.x_loop_idx[0] = 4 - offset - i;
-    } else if (tiling.level_tilings(1).loop_bounds(i).loop() ==
-               voyager::Loop::OY) {
-      accelerator_tiling.y_loop_idx[0] = 4 - offset - i;
-    } else if (tiling.level_tilings(1).loop_bounds(i).loop() ==
-               voyager::Loop::IC) {
-      accelerator_tiling.reduction_loop_idx[0] = 4 - offset - i;
-    }
-  }
-
-  // set any unset loop indices
-  for (int i = tiling.level_tilings(1).loop_bounds_size() - 1; i < 4 - offset;
-       i++) {
-    accelerator_tiling.loops[0][3 - i - offset] = 1;
-    if (accelerator_tiling.weight_loop_idx[0] == -1) {
-      accelerator_tiling.weight_loop_idx[0] = 3 - i - offset;
-    } else if (accelerator_tiling.x_loop_idx[0] == -1) {
-      accelerator_tiling.x_loop_idx[0] = 3 - i - offset;
-    } else if (accelerator_tiling.y_loop_idx[0] == -1) {
-      accelerator_tiling.y_loop_idx[0] = 3 - i - offset;
-    } else if (accelerator_tiling.reduction_loop_idx[0] == -1) {
-      accelerator_tiling.reduction_loop_idx[0] = 3 - i - offset;
-    } else if (accelerator_tiling.fy_loop_idx[0] == -1) {
-      accelerator_tiling.fy_loop_idx[0] = 3 - i - offset;
-    }
-  }
-
-  return accelerator_tiling;
+  return lower_semantic_tiling(normalize_tiling(tiling));
 }
 
 Tiling get_conv2d_tiling(const codegen::OpOverload param) {
