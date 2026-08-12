@@ -350,15 +350,22 @@ struct SpMMUnit<std::tuple<WeightTypes...>, Input, Weight, Meta, Output, Scale,
       for (int i = 0; i < 2; i++) {
 #pragma hls_unroll yes
         for (int j = 0; j < 2; j++) {
-          loop_bounds[i][j] = params.loops[i][j] - 1;
+          loop_bounds[i][j] =
+              matrix_loop_slot_bound(
+                  params, matrix_loop_level_from_outer_first_index(i), j) -
+              1;
         }
       }
 
-      loop_t K1 = params.loops[0][params.weight_loop_idx[0]];
-      loop_t K0 = params.loops[1][params.weight_loop_idx[1]];
+      loop_t K1 = matrix_loop_bound(params, MatrixLoopLevel::L2,
+                                    MatrixLoopDimension::OC);
+      loop_t K0 = matrix_loop_bound(params, MatrixLoopLevel::L1,
+                                    MatrixLoopDimension::OC);
 
-      loop_t X0 = params.loops[1][params.x_loop_idx[1]];
-      loop_t X1 = params.loops[0][params.x_loop_idx[0]];
+      loop_t X0 = matrix_loop_bound(params, MatrixLoopLevel::L1,
+                                    MatrixLoopDimension::OX);
+      loop_t X1 = matrix_loop_bound(params, MatrixLoopLevel::L2,
+                                    MatrixLoopDimension::OX);
 
       // varable to keep track of the range of x covered by the current indptr
       // fetch
@@ -371,8 +378,10 @@ struct SpMMUnit<std::tuple<WeightTypes...>, Input, Weight, Meta, Output, Scale,
         for (loop_counters[0][1] = 0;; loop_counters[0][1]++) {
           for (loop_counters[1][0] = 0;; loop_counters[1][0]++) {
             for (loop_counters[1][1] = 0;; loop_counters[1][1]++) {
-              loop_t x1 = loop_counters[0][params.x_loop_idx[0]];
-              loop_t x0 = loop_counters[1][params.x_loop_idx[1]];
+              loop_t x1 = loop_counters[0][matrix_loop_position(
+                  params, MatrixLoopLevel::L2, MatrixLoopDimension::OX)];
+              loop_t x0 = loop_counters[1][matrix_loop_position(
+                  params, MatrixLoopLevel::L1, MatrixLoopDimension::OX)];
               loop_t x = x1 * X0 + x0;
               if (x > current_max_x || x < current_min_x || x == 0) {
                 send_input_request<Meta, NUM_META>(params.spmm_indptr_offset, x,
@@ -431,15 +440,22 @@ struct SpMMUnit<std::tuple<WeightTypes...>, Input, Weight, Meta, Output, Scale,
       for (int i = 0; i < 2; i++) {
 #pragma hls_unroll yes
         for (int j = 0; j < 2; j++) {
-          loop_bounds[i][j] = params.loops[i][j] - 1;
+          loop_bounds[i][j] =
+              matrix_loop_slot_bound(
+                  params, matrix_loop_level_from_outer_first_index(i), j) -
+              1;
         }
       }
 
-      loop_t K1 = params.loops[0][params.weight_loop_idx[0]];
-      loop_t K0 = params.loops[1][params.weight_loop_idx[1]];
+      loop_t K1 = matrix_loop_bound(params, MatrixLoopLevel::L2,
+                                    MatrixLoopDimension::OC);
+      loop_t K0 = matrix_loop_bound(params, MatrixLoopLevel::L1,
+                                    MatrixLoopDimension::OC);
 
-      loop_t X0 = params.loops[1][params.x_loop_idx[1]];
-      loop_t X1 = params.loops[0][params.x_loop_idx[0]];
+      loop_t X0 = matrix_loop_bound(params, MatrixLoopLevel::L1,
+                                    MatrixLoopDimension::OX);
+      loop_t X1 = matrix_loop_bound(params, MatrixLoopLevel::L2,
+                                    MatrixLoopDimension::OX);
 
       // varable to keep track of the range of x covered by the current indptr
       // fetch
@@ -456,8 +472,10 @@ struct SpMMUnit<std::tuple<WeightTypes...>, Input, Weight, Meta, Output, Scale,
         for (loop_counters[0][1] = 0;; loop_counters[0][1]++) {
           for (loop_counters[1][0] = 0;; loop_counters[1][0]++) {
             for (loop_counters[1][1] = 0;; loop_counters[1][1]++) {
-              loop_t x1 = loop_counters[0][params.x_loop_idx[0]];
-              loop_t x0 = loop_counters[1][params.x_loop_idx[1]];
+              loop_t x1 = loop_counters[0][matrix_loop_position(
+                  params, MatrixLoopLevel::L2, MatrixLoopDimension::OX)];
+              loop_t x0 = loop_counters[1][matrix_loop_position(
+                  params, MatrixLoopLevel::L1, MatrixLoopDimension::OX)];
               loop_t x = x1 * X0 + x0;
               if (x > current_max_x || x < current_min_x || x == 0) {
                 indptrs = input_indptr_pack.Pop();
@@ -524,7 +542,10 @@ struct SpMMUnit<std::tuple<WeightTypes...>, Input, Weight, Meta, Output, Scale,
       for (int i = 0; i < 2; i++) {
 #pragma hls_unroll yes
         for (int j = 0; j < 2; j++) {
-          loop_bounds[i][j] = params.loops[i][j] - 1;
+          loop_bounds[i][j] =
+              matrix_loop_slot_bound(
+                  params, matrix_loop_level_from_outer_first_index(i), j) -
+              1;
         }
       }
 
@@ -618,7 +639,10 @@ struct SpMMUnit<std::tuple<WeightTypes...>, Input, Weight, Meta, Output, Scale,
       for (int i = 0; i < 2; i++) {
 #pragma hls_unroll yes
         for (int j = 0; j < 2; j++) {
-          loop_bounds[i][j] = params.loops[i][j] - 1;
+          loop_bounds[i][j] =
+              matrix_loop_slot_bound(
+                  params, matrix_loop_level_from_outer_first_index(i), j) -
+              1;
         }
       }
 
@@ -712,16 +736,23 @@ struct SpMMUnit<std::tuple<WeightTypes...>, Input, Weight, Meta, Output, Scale,
       for (int i = 0; i < 2; i++) {
 #pragma hls_unroll yes
         for (int j = 0; j < 2; j++) {
-          loop_bounds[i][j] = params.loops[i][j] - 1;
+          loop_bounds[i][j] =
+              matrix_loop_slot_bound(
+                  params, matrix_loop_level_from_outer_first_index(i), j) -
+              1;
         }
       }
 
-      loop_t K1 = params.loops[0][params.weight_loop_idx[0]];
-      loop_t K0 = params.loops[1][params.weight_loop_idx[1]];
+      loop_t K1 = matrix_loop_bound(params, MatrixLoopLevel::L2,
+                                    MatrixLoopDimension::OC);
+      loop_t K0 = matrix_loop_bound(params, MatrixLoopLevel::L1,
+                                    MatrixLoopDimension::OC);
       loop_t K = K1 * K0 * width;
 
-      loop_t X0 = params.loops[1][params.x_loop_idx[1]];
-      loop_t X1 = params.loops[0][params.x_loop_idx[0]];
+      loop_t X0 = matrix_loop_bound(params, MatrixLoopLevel::L1,
+                                    MatrixLoopDimension::OX);
+      loop_t X1 = matrix_loop_bound(params, MatrixLoopLevel::L2,
+                                    MatrixLoopDimension::OX);
 
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
@@ -729,8 +760,10 @@ struct SpMMUnit<std::tuple<WeightTypes...>, Input, Weight, Meta, Output, Scale,
         for (loop_counters[0][1] = 0;; loop_counters[0][1]++) {
           for (loop_counters[1][0] = 0;; loop_counters[1][0]++) {
             for (loop_counters[1][1] = 0;; loop_counters[1][1]++) {
-              loop_t k1 = loop_counters[0][params.weight_loop_idx[0]];
-              loop_t k0 = loop_counters[1][params.weight_loop_idx[1]];
+              loop_t k1 = loop_counters[0][matrix_loop_position(
+                  params, MatrixLoopLevel::L2, MatrixLoopDimension::OC)];
+              loop_t k0 = loop_counters[1][matrix_loop_position(
+                  params, MatrixLoopLevel::L1, MatrixLoopDimension::OC)];
               loop_t k = k1 * K0 * width + k0 * width;
 
               Meta nnz = fetch_weight_nnz_deq.Pop();
@@ -783,7 +816,10 @@ struct SpMMUnit<std::tuple<WeightTypes...>, Input, Weight, Meta, Output, Scale,
       for (int i = 0; i < 2; i++) {
 #pragma hls_unroll yes
         for (int j = 0; j < 2; j++) {
-          loop_bounds[i][j] = params.loops[i][j] - 1;
+          loop_bounds[i][j] =
+              matrix_loop_slot_bound(
+                  params, matrix_loop_level_from_outer_first_index(i), j) -
+              1;
         }
       }
 
@@ -850,24 +886,32 @@ struct SpMMUnit<std::tuple<WeightTypes...>, Input, Weight, Meta, Output, Scale,
       for (int i = 0; i < 2; i++) {
 #pragma hls_unroll yes
         for (int j = 0; j < 2; j++) {
-          loop_bounds[i][j] = params.loops[i][j] - 1;
+          loop_bounds[i][j] =
+              matrix_loop_slot_bound(
+                  params, matrix_loop_level_from_outer_first_index(i), j) -
+              1;
         }
       }
 
-      loop_t K1 = params.loops[0][params.weight_loop_idx[0]];
-      loop_t K0 = params.loops[1][params.weight_loop_idx[1]];
+      loop_t K1 = matrix_loop_bound(params, MatrixLoopLevel::L2,
+                                    MatrixLoopDimension::OC);
+      loop_t K0 = matrix_loop_bound(params, MatrixLoopLevel::L1,
+                                    MatrixLoopDimension::OC);
       loop_t K = K1 * K0;
       loop_t k1_offset = K0 * width;
 
-      loop_t X0 = params.loops[1][params.x_loop_idx[1]];
-      loop_t X1 = params.loops[0][params.x_loop_idx[0]];
+      loop_t X0 = matrix_loop_bound(params, MatrixLoopLevel::L1,
+                                    MatrixLoopDimension::OX);
+      loop_t X1 = matrix_loop_bound(params, MatrixLoopLevel::L2,
+                                    MatrixLoopDimension::OX);
 
       // we are fetching scales for all C in the weight matrix in each fill
       loop_t c_offset = K * width;
       loop_t C =
           params.weight_addr_loops[0][params.weight_addr_reduction_loop_idx[0]];
       // replacing inner x loop with C loop for fetching weight scales
-      loop_bounds[1][params.x_loop_idx[1]] = C - 1;
+      loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
+                                          MatrixLoopDimension::OX)] = C - 1;
 
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
@@ -875,9 +919,12 @@ struct SpMMUnit<std::tuple<WeightTypes...>, Input, Weight, Meta, Output, Scale,
         for (loop_counters[0][1] = 0;; loop_counters[0][1]++) {
           for (loop_counters[1][0] = 0;; loop_counters[1][0]++) {
             for (loop_counters[1][1] = 0;; loop_counters[1][1]++) {
-              loop_t c = loop_counters[1][params.x_loop_idx[1]];
-              loop_t k1 = loop_counters[0][params.weight_loop_idx[0]];
-              loop_t k0 = loop_counters[1][params.weight_loop_idx[1]];
+              loop_t c = loop_counters[1][matrix_loop_position(
+                  params, MatrixLoopLevel::L1, MatrixLoopDimension::OX)];
+              loop_t k1 = loop_counters[0][matrix_loop_position(
+                  params, MatrixLoopLevel::L2, MatrixLoopDimension::OC)];
+              loop_t k0 = loop_counters[1][matrix_loop_position(
+                  params, MatrixLoopLevel::L1, MatrixLoopDimension::OC)];
               ac_int<32, false> address =
                   c * c_offset + k1 * k1_offset + k0 * width;
               send_input_request<Scale, width>(params.weight_scale_offset,
@@ -914,21 +961,29 @@ struct SpMMUnit<std::tuple<WeightTypes...>, Input, Weight, Meta, Output, Scale,
       for (int i = 0; i < 2; i++) {
 #pragma hls_unroll yes
         for (int j = 0; j < 2; j++) {
-          loop_bounds[i][j] = params.loops[i][j] - 1;
+          loop_bounds[i][j] =
+              matrix_loop_slot_bound(
+                  params, matrix_loop_level_from_outer_first_index(i), j) -
+              1;
         }
       }
 
-      loop_t K1 = params.loops[0][params.weight_loop_idx[0]];
-      loop_t K0 = params.loops[1][params.weight_loop_idx[1]];
+      loop_t K1 = matrix_loop_bound(params, MatrixLoopLevel::L2,
+                                    MatrixLoopDimension::OC);
+      loop_t K0 = matrix_loop_bound(params, MatrixLoopLevel::L1,
+                                    MatrixLoopDimension::OC);
 
-      loop_t X0 = params.loops[1][params.x_loop_idx[1]];
-      loop_t X1 = params.loops[0][params.x_loop_idx[0]];
+      loop_t X0 = matrix_loop_bound(params, MatrixLoopLevel::L1,
+                                    MatrixLoopDimension::OX);
+      loop_t X1 = matrix_loop_bound(params, MatrixLoopLevel::L2,
+                                    MatrixLoopDimension::OX);
 
       // we are fetching scales for all C in the weight matrix in each fill
       loop_t C =
           params.weight_addr_loops[0][params.weight_addr_reduction_loop_idx[0]];
       // replacing inner x loop with C loop for fetching weight scales
-      loop_bounds[1][params.x_loop_idx[1]] = C - 1;
+      loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
+                                          MatrixLoopDimension::OX)] = C - 1;
 
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
@@ -936,8 +991,10 @@ struct SpMMUnit<std::tuple<WeightTypes...>, Input, Weight, Meta, Output, Scale,
         for (loop_counters[0][1] = 0;; loop_counters[0][1]++) {
           for (loop_counters[1][0] = 0;; loop_counters[1][0]++) {
             for (loop_counters[1][1] = 0;; loop_counters[1][1]++) {
-              loop_t c = loop_counters[1][params.x_loop_idx[1]];
-              loop_t k0 = loop_counters[1][params.weight_loop_idx[1]];
+              loop_t c = loop_counters[1][matrix_loop_position(
+                  params, MatrixLoopLevel::L1, MatrixLoopDimension::OX)];
+              loop_t k0 = loop_counters[1][matrix_loop_position(
+                  params, MatrixLoopLevel::L1, MatrixLoopDimension::OC)];
               ac_int<32, false> address = c * K0 + k0;
               ac_int<Scale::width * width, false> data;
               process_matrix_input<Scale, width, port_width,
@@ -947,8 +1004,12 @@ struct SpMMUnit<std::tuple<WeightTypes...>, Input, Weight, Meta, Output, Scale,
               BufferWriteRequest<SCALE_PORT_TYPE> req;
               req.address = address;
               req.data = data;
-              req.last = k0 == loop_bounds[1][params.weight_loop_idx[1]] &&
-                         c == loop_bounds[1][params.x_loop_idx[1]];
+              req.last = k0 == loop_bounds[1][matrix_loop_position(
+                                   params, MatrixLoopLevel::L1,
+                                   MatrixLoopDimension::OC)] &&
+                         c == loop_bounds[1][matrix_loop_position(
+                                  params, MatrixLoopLevel::L1,
+                                  MatrixLoopDimension::OX)];
               weight_scale_write_req[bank_sel].Push(req);
               if (loop_counters[1][1] == loop_bounds[1][1]) break;
             }
@@ -984,19 +1045,28 @@ struct SpMMUnit<std::tuple<WeightTypes...>, Input, Weight, Meta, Output, Scale,
       for (int i = 0; i < 2; i++) {
 #pragma hls_unroll yes
         for (int j = 0; j < 2; j++) {
-          loop_bounds[i][j] = params.loops[i][j] - 1;
+          loop_bounds[i][j] =
+              matrix_loop_slot_bound(
+                  params, matrix_loop_level_from_outer_first_index(i), j) -
+              1;
         }
       }
 
-      loop_t k0_bound = loop_bounds[1][params.weight_loop_idx[1]];
-      loop_t x0_bound = loop_bounds[1][params.x_loop_idx[1]];
+      loop_t k0_bound = loop_bounds[1][matrix_loop_position(
+          params, MatrixLoopLevel::L1, MatrixLoopDimension::OC)];
+      loop_t x0_bound = loop_bounds[1][matrix_loop_position(
+          params, MatrixLoopLevel::L1, MatrixLoopDimension::OX)];
 
-      loop_t K1 = params.loops[0][params.weight_loop_idx[0]];
-      loop_t K0 = params.loops[1][params.weight_loop_idx[1]];
+      loop_t K1 = matrix_loop_bound(params, MatrixLoopLevel::L2,
+                                    MatrixLoopDimension::OC);
+      loop_t K0 = matrix_loop_bound(params, MatrixLoopLevel::L1,
+                                    MatrixLoopDimension::OC);
       loop_t K = K1 * K0 * width;
 
-      loop_t X0 = params.loops[1][params.x_loop_idx[1]];
-      loop_t X1 = params.loops[0][params.x_loop_idx[0]];
+      loop_t X0 = matrix_loop_bound(params, MatrixLoopLevel::L1,
+                                    MatrixLoopDimension::OX);
+      loop_t X1 = matrix_loop_bound(params, MatrixLoopLevel::L2,
+                                    MatrixLoopDimension::OX);
 
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
@@ -1004,9 +1074,12 @@ struct SpMMUnit<std::tuple<WeightTypes...>, Input, Weight, Meta, Output, Scale,
         for (loop_counters[0][1] = 0;; loop_counters[0][1]++) {
           for (loop_counters[1][0] = 0;; loop_counters[1][0]++) {
             for (loop_counters[1][1] = 0;; loop_counters[1][1]++) {
-              loop_t k1 = loop_counters[0][params.weight_loop_idx[0]];
-              loop_t k0 = loop_counters[1][params.weight_loop_idx[1]];
-              loop_t x0 = loop_counters[1][params.x_loop_idx[1]];
+              loop_t k1 = loop_counters[0][matrix_loop_position(
+                  params, MatrixLoopLevel::L2, MatrixLoopDimension::OC)];
+              loop_t k0 = loop_counters[1][matrix_loop_position(
+                  params, MatrixLoopLevel::L1, MatrixLoopDimension::OC)];
+              loop_t x0 = loop_counters[1][matrix_loop_position(
+                  params, MatrixLoopLevel::L1, MatrixLoopDimension::OX)];
               loop_t k = k1 * K0 * width + k0 * width;
 
               Meta nnz = read_weight_scale_nnz_deq.Pop();
@@ -1074,7 +1147,10 @@ struct SpMMUnit<std::tuple<WeightTypes...>, Input, Weight, Meta, Output, Scale,
       for (int i = 0; i < 2; i++) {
 #pragma hls_unroll yes
         for (int j = 0; j < 2; j++) {
-          loop_bounds[i][j] = params.loops[i][j] - 1;
+          loop_bounds[i][j] =
+              matrix_loop_slot_bound(
+                  params, matrix_loop_level_from_outer_first_index(i), j) -
+              1;
         }
       }
 
@@ -1176,7 +1252,10 @@ struct SpMMUnit<std::tuple<WeightTypes...>, Input, Weight, Meta, Output, Scale,
       for (int i = 0; i < 2; i++) {
 #pragma hls_unroll yes
         for (int j = 0; j < 2; j++) {
-          loop_bounds[i][j] = params.loops[i][j] - 1;
+          loop_bounds[i][j] =
+              matrix_loop_slot_bound(
+                  params, matrix_loop_level_from_outer_first_index(i), j) -
+              1;
         }
       }
 

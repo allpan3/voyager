@@ -477,7 +477,8 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
       for (int i = 0; i < 2; i++) {
 #pragma hls_unroll yes
         for (int j = 0; j < 6; j++) {
-          loop_bounds[i][j] = params.loops[i][j];
+          loop_bounds[i][j] = matrix_loop_slot_bound(
+              params, matrix_loop_level_from_outer_first_index(i), j);
         }
       }
 
@@ -485,15 +486,20 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
       loop_bounds[1][params.weight_reuse_idx[0]] = 1;
       loop_bounds[1][params.weight_reuse_idx[1]] = 1;
 
-      ac_int<LOOP_WIDTH, false> K2 = params.loops[0][params.weight_loop_idx[0]];
-      ac_int<LOOP_WIDTH, false> FY1 = params.loops[0][params.fy_loop_idx[0]];
-      ac_int<LOOP_WIDTH, false> C2 =
-          params.loops[0][params.reduction_loop_idx[0]];
-      ac_int<LOOP_WIDTH, false> FY0 = params.loops[1][params.fy_loop_idx[1]];
-      ac_int<LOOP_WIDTH, false> FX = params.loops[1][params.fx_loop_idx];
-      ac_int<LOOP_WIDTH, false> C1 =
-          params.loops[1][params.reduction_loop_idx[1]];
-      ac_int<LOOP_WIDTH, false> K1 = params.loops[1][params.weight_loop_idx[1]];
+      ac_int<LOOP_WIDTH, false> K2 = matrix_loop_bound(
+          params, MatrixLoopLevel::L2, MatrixLoopDimension::OC);
+      ac_int<LOOP_WIDTH, false> FY1 = matrix_loop_bound(
+          params, MatrixLoopLevel::L2, MatrixLoopDimension::FY);
+      ac_int<LOOP_WIDTH, false> C2 = matrix_loop_bound(
+          params, MatrixLoopLevel::L2, MatrixLoopDimension::IC);
+      ac_int<LOOP_WIDTH, false> FY0 = matrix_loop_bound(
+          params, MatrixLoopLevel::L1, MatrixLoopDimension::FY);
+      ac_int<LOOP_WIDTH, false> FX = matrix_loop_bound(
+          params, MatrixLoopLevel::L1, MatrixLoopDimension::FX);
+      ac_int<LOOP_WIDTH, false> C1 = matrix_loop_bound(
+          params, MatrixLoopLevel::L1, MatrixLoopDimension::IC);
+      ac_int<LOOP_WIDTH, false> K1 = matrix_loop_bound(
+          params, MatrixLoopLevel::L1, MatrixLoopDimension::OC);
 
       // extra loop to control reuse which only occurs during transpose and
       // when cols > rows
@@ -502,7 +508,8 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
       constexpr int ratio = cols > rows ? cols / rows : 1;
       if (ratio > 1 && params.weight_transpose && C2 >= ratio) {
         // we can reuse the weights already in the buffer
-        loop_bounds[0][params.reduction_loop_idx[0]] = C2 / ratio;
+        loop_bounds[0][matrix_loop_position(
+            params, MatrixLoopLevel::L2, MatrixLoopDimension::IC)] = C2 / ratio;
         transpose_reuse_bound = ratio;
       }
 #endif
@@ -514,28 +521,56 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
       // precedes it, preserving the compute order in the descriptor replay
       const bool absorb_x =
           (!reuse_weights ||
-           params.weight_loop_idx[0] < params.x_loop_idx[0]) &&
-          (K2 == 1 || params.weight_loop_idx[0] < params.x_loop_idx[0]) &&
-          (C2 == 1 || params.reduction_loop_idx[0] < params.x_loop_idx[0]) &&
-          (FY1 == 1 || params.fy_loop_idx[0] < params.x_loop_idx[0]);
+           matrix_loop_position(params, MatrixLoopLevel::L2,
+                                MatrixLoopDimension::OC) <
+               matrix_loop_position(params, MatrixLoopLevel::L2,
+                                    MatrixLoopDimension::OX)) &&
+          (K2 == 1 || matrix_loop_position(params, MatrixLoopLevel::L2,
+                                           MatrixLoopDimension::OC) <
+                          matrix_loop_position(params, MatrixLoopLevel::L2,
+                                               MatrixLoopDimension::OX)) &&
+          (C2 == 1 || matrix_loop_position(params, MatrixLoopLevel::L2,
+                                           MatrixLoopDimension::IC) <
+                          matrix_loop_position(params, MatrixLoopLevel::L2,
+                                               MatrixLoopDimension::OX)) &&
+          (FY1 == 1 || matrix_loop_position(params, MatrixLoopLevel::L2,
+                                            MatrixLoopDimension::FY) <
+                           matrix_loop_position(params, MatrixLoopLevel::L2,
+                                                MatrixLoopDimension::OX));
       const bool absorb_y =
           (!reuse_weights ||
-           params.weight_loop_idx[0] < params.y_loop_idx[0]) &&
-          (K2 == 1 || params.weight_loop_idx[0] < params.y_loop_idx[0]) &&
-          (C2 == 1 || params.reduction_loop_idx[0] < params.y_loop_idx[0]) &&
-          (FY1 == 1 || params.fy_loop_idx[0] < params.y_loop_idx[0]);
+           matrix_loop_position(params, MatrixLoopLevel::L2,
+                                MatrixLoopDimension::OC) <
+               matrix_loop_position(params, MatrixLoopLevel::L2,
+                                    MatrixLoopDimension::OY)) &&
+          (K2 == 1 || matrix_loop_position(params, MatrixLoopLevel::L2,
+                                           MatrixLoopDimension::OC) <
+                          matrix_loop_position(params, MatrixLoopLevel::L2,
+                                               MatrixLoopDimension::OY)) &&
+          (C2 == 1 || matrix_loop_position(params, MatrixLoopLevel::L2,
+                                           MatrixLoopDimension::IC) <
+                          matrix_loop_position(params, MatrixLoopLevel::L2,
+                                               MatrixLoopDimension::OY)) &&
+          (FY1 == 1 || matrix_loop_position(params, MatrixLoopLevel::L2,
+                                            MatrixLoopDimension::FY) <
+                           matrix_loop_position(params, MatrixLoopLevel::L2,
+                                                MatrixLoopDimension::OY));
       ac_int<16, false> spatial_reuse_bound = 1;
       if (absorb_x) {
         if (!reuse_weights) {
-          spatial_reuse_bound = loop_bounds[0][params.x_loop_idx[0]];
+          spatial_reuse_bound = loop_bounds[0][matrix_loop_position(
+              params, MatrixLoopLevel::L2, MatrixLoopDimension::OX)];
         }
-        loop_bounds[0][params.x_loop_idx[0]] = 1;
+        loop_bounds[0][matrix_loop_position(params, MatrixLoopLevel::L2,
+                                            MatrixLoopDimension::OX)] = 1;
       }
       if (absorb_y) {
         if (!reuse_weights) {
-          spatial_reuse_bound *= loop_bounds[0][params.y_loop_idx[0]];
+          spatial_reuse_bound *= loop_bounds[0][matrix_loop_position(
+              params, MatrixLoopLevel::L2, MatrixLoopDimension::OY)];
         }
-        loop_bounds[0][params.y_loop_idx[0]] = 1;
+        loop_bounds[0][matrix_loop_position(params, MatrixLoopLevel::L2,
+                                            MatrixLoopDimension::OY)] = 1;
       }
 
 #if MATRIX_BACKEND == MATRIX_BACKEND_CIM
@@ -623,21 +658,33 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
                                 }
 
                                 const ac_int<LOOP_WIDTH, false> k2 =
-                                    loop_counters[0][params.weight_loop_idx[0]];
+                                    loop_counters[0][matrix_loop_position(
+                                        params, MatrixLoopLevel::L2,
+                                        MatrixLoopDimension::OC)];
                                 const ac_int<LOOP_WIDTH, false> c2 =
-                                    loop_counters[0]
-                                                 [params.reduction_loop_idx[0]];
+                                    loop_counters[0][matrix_loop_position(
+                                        params, MatrixLoopLevel::L2,
+                                        MatrixLoopDimension::IC)];
                                 const ac_int<LOOP_WIDTH, false> c1 =
-                                    loop_counters[1]
-                                                 [params.reduction_loop_idx[1]];
+                                    loop_counters[1][matrix_loop_position(
+                                        params, MatrixLoopLevel::L1,
+                                        MatrixLoopDimension::IC)];
                                 const ac_int<LOOP_WIDTH, false> fx =
-                                    loop_counters[1][params.fx_loop_idx];
+                                    loop_counters[1][matrix_loop_position(
+                                        params, MatrixLoopLevel::L1,
+                                        MatrixLoopDimension::FX)];
                                 const ac_int<LOOP_WIDTH, false> fy0 =
-                                    loop_counters[1][params.fy_loop_idx[1]];
+                                    loop_counters[1][matrix_loop_position(
+                                        params, MatrixLoopLevel::L1,
+                                        MatrixLoopDimension::FY)];
                                 const ac_int<LOOP_WIDTH, false> fy1 =
-                                    loop_counters[0][params.fy_loop_idx[0]];
+                                    loop_counters[0][matrix_loop_position(
+                                        params, MatrixLoopLevel::L2,
+                                        MatrixLoopDimension::FY)];
                                 const ac_int<LOOP_WIDTH, false> k1 =
-                                    loop_counters[1][params.weight_loop_idx[1]];
+                                    loop_counters[1][matrix_loop_position(
+                                        params, MatrixLoopLevel::L1,
+                                        MatrixLoopDimension::OC)];
                                 const ac_int<LOOP_WIDTH, false> packed_k1 =
                                     k1 >> params.weight_pack_factor_lg2;
                                 const ac_int<4, false> packing_index =
@@ -685,14 +732,21 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
                                 }
 #else
                                 ac_int<LOOP_WIDTH, false> c1 =
-                                    loop_counters[1]
-                                                 [params.reduction_loop_idx[1]];
+                                    loop_counters[1][matrix_loop_position(
+                                        params, MatrixLoopLevel::L1,
+                                        MatrixLoopDimension::IC)];
                                 ac_int<LOOP_WIDTH, false> fy0 =
-                                    loop_counters[1][params.fy_loop_idx[1]];
+                                    loop_counters[1][matrix_loop_position(
+                                        params, MatrixLoopLevel::L1,
+                                        MatrixLoopDimension::FY)];
                                 ac_int<LOOP_WIDTH, false> fx =
-                                    loop_counters[1][params.fx_loop_idx];
+                                    loop_counters[1][matrix_loop_position(
+                                        params, MatrixLoopLevel::L1,
+                                        MatrixLoopDimension::FX)];
                                 ac_int<LOOP_WIDTH, false> k1 =
-                                    loop_counters[1][params.weight_loop_idx[1]];
+                                    loop_counters[1][matrix_loop_position(
+                                        params, MatrixLoopLevel::L1,
+                                        MatrixLoopDimension::OC)];
 
                                 /*
                                  * If we have replication, then need to zero
@@ -745,7 +799,9 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
                                     } else {
                                       C = params.num_channels;
                                       C0 = params.num_channels;
-                                      FX = params.loops[1][params.fx_loop_idx] *
+                                      FX = matrix_loop_bound(
+                                               params, MatrixLoopLevel::L1,
+                                               MatrixLoopDimension::FX) *
                                            replication_bound;
                                       cur_fx = fx * replication_bound + fx_repl;
                                     }
@@ -1109,21 +1165,31 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
       for (int i = 0; i < 2; i++) {
 #pragma hls_unroll yes
         for (int j = 0; j < 6; j++) {
-          loop_bounds[i][j] = params.loops[i][j] - 1;
+          loop_bounds[i][j] =
+              matrix_loop_slot_bound(
+                  params, matrix_loop_level_from_outer_first_index(i), j) -
+              1;
         }
       }
 
       // Collapse reduction and filter loops while retaining output traversal
-      loop_bounds[0][params.reduction_loop_idx[0]] = 0;
-      loop_bounds[0][params.fy_loop_idx[0]] = 0;
+      loop_bounds[0][matrix_loop_position(params, MatrixLoopLevel::L2,
+                                          MatrixLoopDimension::IC)] = 0;
+      loop_bounds[0][matrix_loop_position(params, MatrixLoopLevel::L2,
+                                          MatrixLoopDimension::FY)] = 0;
       loop_bounds[1][params.weight_reuse_idx[0]] = 0;
       loop_bounds[1][params.weight_reuse_idx[1]] = 0;
-      loop_bounds[1][params.fx_loop_idx] = 0;
-      loop_bounds[1][params.fy_loop_idx[1]] = 0;
-      loop_bounds[1][params.reduction_loop_idx[1]] = 0;
+      loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
+                                          MatrixLoopDimension::FX)] = 0;
+      loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
+                                          MatrixLoopDimension::FY)] = 0;
+      loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
+                                          MatrixLoopDimension::IC)] = 0;
 
-      ac_int<LOOP_WIDTH, false> K2 = params.loops[0][params.weight_loop_idx[0]];
-      ac_int<LOOP_WIDTH, false> K1 = params.loops[1][params.weight_loop_idx[1]];
+      ac_int<LOOP_WIDTH, false> K2 = matrix_loop_bound(
+          params, MatrixLoopLevel::L2, MatrixLoopDimension::OC);
+      ac_int<LOOP_WIDTH, false> K1 = matrix_loop_bound(
+          params, MatrixLoopLevel::L1, MatrixLoopDimension::OC);
 
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
@@ -1140,9 +1206,13 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
                           for (loop_counters[1][5] = 0;;
                                loop_counters[1][5]++) {
                             ac_int<LOOP_WIDTH, false> k2 =
-                                loop_counters[0][params.weight_loop_idx[0]];
+                                loop_counters[0][matrix_loop_position(
+                                    params, MatrixLoopLevel::L2,
+                                    MatrixLoopDimension::OC)];
                             ac_int<LOOP_WIDTH, false> k1 =
-                                loop_counters[1][params.weight_loop_idx[1]];
+                                loop_counters[1][matrix_loop_position(
+                                    params, MatrixLoopLevel::L1,
+                                    MatrixLoopDimension::OC)];
 
                             ac_int<16, false> address =
                                 k2 * K1 * cols + k1 * cols;
@@ -1195,18 +1265,26 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
       for (int i = 0; i < 2; i++) {
 #pragma hls_unroll yes
         for (int j = 0; j < 6; j++) {
-          loop_bounds[i][j] = params.loops[i][j] - 1;
+          loop_bounds[i][j] =
+              matrix_loop_slot_bound(
+                  params, matrix_loop_level_from_outer_first_index(i), j) -
+              1;
         }
       }
 
       // Collapse reduction and filter loops while retaining output traversal
-      loop_bounds[0][params.reduction_loop_idx[0]] = 0;
-      loop_bounds[0][params.fy_loop_idx[0]] = 0;
+      loop_bounds[0][matrix_loop_position(params, MatrixLoopLevel::L2,
+                                          MatrixLoopDimension::IC)] = 0;
+      loop_bounds[0][matrix_loop_position(params, MatrixLoopLevel::L2,
+                                          MatrixLoopDimension::FY)] = 0;
       loop_bounds[1][params.weight_reuse_idx[0]] = 0;
       loop_bounds[1][params.weight_reuse_idx[1]] = 0;
-      loop_bounds[1][params.fx_loop_idx] = 0;
-      loop_bounds[1][params.fy_loop_idx[1]] = 0;
-      loop_bounds[1][params.reduction_loop_idx[1]] = 0;
+      loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
+                                          MatrixLoopDimension::FX)] = 0;
+      loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
+                                          MatrixLoopDimension::FY)] = 0;
+      loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
+                                          MatrixLoopDimension::IC)] = 0;
 
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush

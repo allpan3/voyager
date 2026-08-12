@@ -75,32 +75,46 @@ SC_MODULE(InputScaleController) {
       for (int i = 0; i < 2; i++) {
 #pragma hls_unroll yes
         for (int j = 0; j < 6; j++) {
-          loop_bounds[i][j] = params.loops[i][j];
+          loop_bounds[i][j] = matrix_loop_slot_bound(
+              params, matrix_loop_level_from_outer_first_index(i), j);
         }
       }
 
       // set irrelevant loop bounds to 1
-      loop_bounds[1][params.weight_loop_idx[1]] = 1;
-      loop_bounds[1][params.fx_loop_idx] = 1;
-      loop_bounds[1][params.fy_loop_idx[1]] = 1;
+      loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
+                                          MatrixLoopDimension::OC)] = 1;
+      loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
+                                          MatrixLoopDimension::FX)] = 1;
+      loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
+                                          MatrixLoopDimension::FY)] = 1;
 
-      ac_int<LOOP_WIDTH, false> Y1 = params.loops[0][params.y_loop_idx[0]];
-      ac_int<LOOP_WIDTH, false> X1 = params.loops[0][params.x_loop_idx[0]];
-      ac_int<LOOP_WIDTH, false> C2 =
-          params.loops[0][params.reduction_loop_idx[0]];
-      ac_int<LOOP_WIDTH, false> C1 =
-          params.loops[1][params.reduction_loop_idx[1]];
-      ac_int<16, false> Y0 = params.loops[1][params.y_loop_idx[1]];
-      ac_int<16, false> X0 = params.loops[1][params.x_loop_idx[1]];
-      ac_int<4, false> FX = params.loops[1][params.fx_loop_idx];
-      ac_int<4, false> FY0 = params.loops[1][params.fy_loop_idx[1]];
+      ac_int<LOOP_WIDTH, false> Y1 = matrix_loop_bound(
+          params, MatrixLoopLevel::L2, MatrixLoopDimension::OY);
+      ac_int<LOOP_WIDTH, false> X1 = matrix_loop_bound(
+          params, MatrixLoopLevel::L2, MatrixLoopDimension::OX);
+      ac_int<LOOP_WIDTH, false> C2 = matrix_loop_bound(
+          params, MatrixLoopLevel::L2, MatrixLoopDimension::IC);
+      ac_int<LOOP_WIDTH, false> C1 = matrix_loop_bound(
+          params, MatrixLoopLevel::L1, MatrixLoopDimension::IC);
+      ac_int<16, false> Y0 = matrix_loop_bound(params, MatrixLoopLevel::L1,
+                                               MatrixLoopDimension::OY);
+      ac_int<16, false> X0 = matrix_loop_bound(params, MatrixLoopLevel::L1,
+                                               MatrixLoopDimension::OX);
+      ac_int<4, false> FX = matrix_loop_bound(params, MatrixLoopLevel::L1,
+                                              MatrixLoopDimension::FX);
+      ac_int<4, false> FY0 = matrix_loop_bound(params, MatrixLoopLevel::L1,
+                                               MatrixLoopDimension::FY);
       ac_int<8, false> STRIDE = params.stride;
 
       ac_int<16, false> IX0 = X0 * STRIDE;
       ac_int<16, false> IY0 = Y0 * STRIDE;
 
-      loop_bounds[1][params.y_loop_idx[1]] = (FY0 == 1 ? Y0 : IY0) + FY0 - 1;
-      loop_bounds[1][params.x_loop_idx[1]] = (FX == 1 ? X0 : IX0) + FX - 1;
+      loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
+                                          MatrixLoopDimension::OY)] =
+          (FY0 == 1 ? Y0 : IY0) + FY0 - 1;
+      loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
+                                          MatrixLoopDimension::OX)] =
+          (FX == 1 ? X0 : IX0) + FX - 1;
 
       ac_int<16, false> Y = params.input_y;
       ac_int<16, false> X = params.input_x;
@@ -121,17 +135,29 @@ SC_MODULE(InputScaleController) {
                           for (loop_counters[1][5] = 0;;
                                loop_counters[1][5]++) {
                             ac_int<LOOP_WIDTH, false> y1 =
-                                loop_counters[0][params.y_loop_idx[0]];
+                                loop_counters[0][matrix_loop_position(
+                                    params, MatrixLoopLevel::L2,
+                                    MatrixLoopDimension::OY)];
                             ac_int<LOOP_WIDTH, false> x1 =
-                                loop_counters[0][params.x_loop_idx[0]];
+                                loop_counters[0][matrix_loop_position(
+                                    params, MatrixLoopLevel::L2,
+                                    MatrixLoopDimension::OX)];
                             ac_int<LOOP_WIDTH, false> c2 =
-                                loop_counters[0][params.reduction_loop_idx[0]];
+                                loop_counters[0][matrix_loop_position(
+                                    params, MatrixLoopLevel::L2,
+                                    MatrixLoopDimension::IC)];
                             ac_int<LOOP_WIDTH, false> y0 =
-                                loop_counters[1][params.y_loop_idx[1]];
+                                loop_counters[1][matrix_loop_position(
+                                    params, MatrixLoopLevel::L1,
+                                    MatrixLoopDimension::OY)];
                             ac_int<LOOP_WIDTH, false> x0 =
-                                loop_counters[1][params.x_loop_idx[1]];
+                                loop_counters[1][matrix_loop_position(
+                                    params, MatrixLoopLevel::L1,
+                                    MatrixLoopDimension::OX)];
                             ac_int<LOOP_WIDTH, false> c1 =
-                                loop_counters[1][params.reduction_loop_idx[1]];
+                                loop_counters[1][matrix_loop_position(
+                                    params, MatrixLoopLevel::L1,
+                                    MatrixLoopDimension::IC)];
 
                             // adjust address for stride
                             if (FX == 1) {
@@ -215,23 +241,33 @@ SC_MODULE(InputScaleController) {
       for (int i = 0; i < 2; i++) {
 #pragma hls_unroll yes
         for (int j = 0; j < 6; j++) {
-          loop_bounds[i][j] = params.loops[i][j];
+          loop_bounds[i][j] = matrix_loop_slot_bound(
+              params, matrix_loop_level_from_outer_first_index(i), j);
         }
       }
 
       // set irrelevant loop bounds to 1
-      loop_bounds[1][params.weight_loop_idx[1]] = 1;
-      loop_bounds[1][params.fx_loop_idx] = 1;
-      loop_bounds[1][params.fy_loop_idx[1]] = 1;
+      loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
+                                          MatrixLoopDimension::OC)] = 1;
+      loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
+                                          MatrixLoopDimension::FX)] = 1;
+      loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
+                                          MatrixLoopDimension::FY)] = 1;
 
-      ac_int<LOOP_WIDTH, false> Y1 = params.loops[0][params.y_loop_idx[0]];
-      ac_int<LOOP_WIDTH, false> X1 = params.loops[0][params.x_loop_idx[0]];
-      ac_int<LOOP_WIDTH, false> C1 =
-          params.loops[1][params.reduction_loop_idx[1]];
-      ac_int<16, false> Y0 = params.loops[1][params.y_loop_idx[1]];
-      ac_int<16, false> X0 = params.loops[1][params.x_loop_idx[1]];
-      ac_int<4, false> FX = params.loops[1][params.fx_loop_idx];
-      ac_int<4, false> FY0 = params.loops[1][params.fy_loop_idx[1]];
+      ac_int<LOOP_WIDTH, false> Y1 = matrix_loop_bound(
+          params, MatrixLoopLevel::L2, MatrixLoopDimension::OY);
+      ac_int<LOOP_WIDTH, false> X1 = matrix_loop_bound(
+          params, MatrixLoopLevel::L2, MatrixLoopDimension::OX);
+      ac_int<LOOP_WIDTH, false> C1 = matrix_loop_bound(
+          params, MatrixLoopLevel::L1, MatrixLoopDimension::IC);
+      ac_int<16, false> Y0 = matrix_loop_bound(params, MatrixLoopLevel::L1,
+                                               MatrixLoopDimension::OY);
+      ac_int<16, false> X0 = matrix_loop_bound(params, MatrixLoopLevel::L1,
+                                               MatrixLoopDimension::OX);
+      ac_int<4, false> FX = matrix_loop_bound(params, MatrixLoopLevel::L1,
+                                              MatrixLoopDimension::FX);
+      ac_int<4, false> FY0 = matrix_loop_bound(params, MatrixLoopLevel::L1,
+                                               MatrixLoopDimension::FY);
       ac_int<8, false> STRIDE = params.stride;
 
       ac_int<16, false> IX0 = X0;
@@ -245,12 +281,18 @@ SC_MODULE(InputScaleController) {
         IY0 = Y0 * STRIDE;
       }
 
-      loop_bounds[1][params.y_loop_idx[1]] = IY0 + FY0 - 1;
-      loop_bounds[1][params.x_loop_idx[1]] = IX0 + FX - 1;
+      loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
+                                          MatrixLoopDimension::OY)] =
+          IY0 + FY0 - 1;
+      loop_bounds[1][matrix_loop_position(
+          params, MatrixLoopLevel::L1, MatrixLoopDimension::OX)] = IX0 + FX - 1;
 
       ac_int<16, false> Y = params.input_y;
       ac_int<16, false> X = params.input_x;
-      ac_int<16, false> y_stride = loop_bounds[1][params.x_loop_idx[1]] * C1;
+      ac_int<16, false> y_stride =
+          loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
+                                              MatrixLoopDimension::OX)] *
+          C1;
 
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
@@ -267,15 +309,25 @@ SC_MODULE(InputScaleController) {
                           for (loop_counters[1][5] = 0;;
                                loop_counters[1][5]++) {
                             ac_int<LOOP_WIDTH, true> x0 =
-                                loop_counters[1][params.x_loop_idx[1]];
+                                loop_counters[1][matrix_loop_position(
+                                    params, MatrixLoopLevel::L1,
+                                    MatrixLoopDimension::OX)];
                             ac_int<LOOP_WIDTH, true> x1 =
-                                loop_counters[0][params.x_loop_idx[0]];
+                                loop_counters[0][matrix_loop_position(
+                                    params, MatrixLoopLevel::L2,
+                                    MatrixLoopDimension::OX)];
                             ac_int<LOOP_WIDTH, true> y0 =
-                                loop_counters[1][params.y_loop_idx[1]];
+                                loop_counters[1][matrix_loop_position(
+                                    params, MatrixLoopLevel::L1,
+                                    MatrixLoopDimension::OY)];
                             ac_int<LOOP_WIDTH, true> y1 =
-                                loop_counters[0][params.y_loop_idx[0]];
+                                loop_counters[0][matrix_loop_position(
+                                    params, MatrixLoopLevel::L2,
+                                    MatrixLoopDimension::OY)];
                             ac_int<LOOP_WIDTH, true> c1 =
-                                loop_counters[1][params.reduction_loop_idx[1]];
+                                loop_counters[1][matrix_loop_position(
+                                    params, MatrixLoopLevel::L1,
+                                    MatrixLoopDimension::IC)];
 
                             ac_int<16, true> x = x1 * IX0 + x0 - params.padding;
                             ac_int<16, true> y = y1 * IY0 + y0 - params.padding;
@@ -288,7 +340,9 @@ SC_MODULE(InputScaleController) {
                             }
 
                             ac_int<LOOP_WIDTH> orig_x0 =
-                                loop_counters[1][params.x_loop_idx[1]];
+                                loop_counters[1][matrix_loop_position(
+                                    params, MatrixLoopLevel::L1,
+                                    MatrixLoopDimension::OX)];
                             ac_int<16, false> address =
                                 y0 * y_stride + orig_x0 * C1 + c1;
 
@@ -355,16 +409,21 @@ SC_MODULE(InputScaleController) {
       for (int i = 0; i < 2; i++) {
 #pragma hls_unroll yes
         for (int j = 0; j < 6; j++) {
-          loop_bounds[i][j] = params.loops[i][j];
+          loop_bounds[i][j] = matrix_loop_slot_bound(
+              params, matrix_loop_level_from_outer_first_index(i), j);
         }
       }
 
-      ac_int<LOOP_WIDTH, false> X0 = params.loops[1][params.x_loop_idx[1]];
-      ac_int<LOOP_WIDTH, false> Y0 = params.loops[1][params.y_loop_idx[1]];
-      ac_int<LOOP_WIDTH, false> C1 =
-          params.loops[1][params.reduction_loop_idx[1]];
-      ac_int<4, false> FX = params.loops[1][params.fx_loop_idx];
-      ac_int<4, false> FY0 = params.loops[1][params.fy_loop_idx[1]];
+      ac_int<LOOP_WIDTH, false> X0 = matrix_loop_bound(
+          params, MatrixLoopLevel::L1, MatrixLoopDimension::OX);
+      ac_int<LOOP_WIDTH, false> Y0 = matrix_loop_bound(
+          params, MatrixLoopLevel::L1, MatrixLoopDimension::OY);
+      ac_int<LOOP_WIDTH, false> C1 = matrix_loop_bound(
+          params, MatrixLoopLevel::L1, MatrixLoopDimension::IC);
+      ac_int<4, false> FX = matrix_loop_bound(params, MatrixLoopLevel::L1,
+                                              MatrixLoopDimension::FX);
+      ac_int<4, false> FY0 = matrix_loop_bound(params, MatrixLoopLevel::L1,
+                                               MatrixLoopDimension::FY);
       ac_int<8, false> STRIDE = params.stride;
 
       bool is_downsample = FX == 1 && FY0 == 1;
@@ -391,15 +450,25 @@ SC_MODULE(InputScaleController) {
                           for (loop_counters[1][5] = 0;;
                                loop_counters[1][5]++) {
                             ac_int<LOOP_WIDTH, false> x0 =
-                                loop_counters[1][params.x_loop_idx[1]];
+                                loop_counters[1][matrix_loop_position(
+                                    params, MatrixLoopLevel::L1,
+                                    MatrixLoopDimension::OX)];
                             ac_int<LOOP_WIDTH, false> y0 =
-                                loop_counters[1][params.y_loop_idx[1]];
+                                loop_counters[1][matrix_loop_position(
+                                    params, MatrixLoopLevel::L1,
+                                    MatrixLoopDimension::OY)];
                             ac_int<LOOP_WIDTH, false> fx =
-                                loop_counters[1][params.fx_loop_idx];
+                                loop_counters[1][matrix_loop_position(
+                                    params, MatrixLoopLevel::L1,
+                                    MatrixLoopDimension::FX)];
                             ac_int<LOOP_WIDTH, false> fy =
-                                loop_counters[1][params.fy_loop_idx[1]];
+                                loop_counters[1][matrix_loop_position(
+                                    params, MatrixLoopLevel::L1,
+                                    MatrixLoopDimension::FY)];
                             ac_int<LOOP_WIDTH, false> c1 =
-                                loop_counters[1][params.reduction_loop_idx[1]];
+                                loop_counters[1][matrix_loop_position(
+                                    params, MatrixLoopLevel::L1,
+                                    MatrixLoopDimension::IC)];
 
                             ac_int<16, false> x = STRIDE * x0 + fx;
                             ac_int<16, false> y = STRIDE * y0 + fy;

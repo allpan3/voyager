@@ -90,9 +90,12 @@ SC_MODULE(MatrixUnitOutputController) {
     while (true) {
       MatrixParams params = read_accum_buffer_params.Pop();
 
-      auto Y0 = params.loops[1][params.y_loop_idx[1]];
-      auto X0 = params.loops[1][params.x_loop_idx[1]];
-      auto K1 = params.loops[1][params.weight_loop_idx[1]];
+      auto Y0 = matrix_loop_bound(params, MatrixLoopLevel::L1,
+                                  MatrixLoopDimension::OY);
+      auto X0 = matrix_loop_bound(params, MatrixLoopLevel::L1,
+                                  MatrixLoopDimension::OX);
+      auto K1 = matrix_loop_bound(params, MatrixLoopLevel::L1,
+                                  MatrixLoopDimension::OC);
 
       ac_int<LOOP_WIDTH, false> loop_counters[2][6];
       ac_int<LOOP_WIDTH, false> loop_bounds[2][6];
@@ -101,16 +104,24 @@ SC_MODULE(MatrixUnitOutputController) {
       for (int i = 0; i < 2; i++) {
 #pragma hls_unroll yes
         for (int j = 0; j < 6; j++) {
-          loop_bounds[i][j] = params.loops[i][j] - 1;
+          loop_bounds[i][j] =
+              matrix_loop_slot_bound(
+                  params, matrix_loop_level_from_outer_first_index(i), j) -
+              1;
         }
       }
 
       // set irrelevant loop bounds to 0
-      loop_bounds[0][params.reduction_loop_idx[0]] = 0;
-      loop_bounds[0][params.fy_loop_idx[0]] = 0;
-      loop_bounds[1][params.reduction_loop_idx[1]] = 0;
-      loop_bounds[1][params.fy_loop_idx[1]] = 0;
-      loop_bounds[1][params.fx_loop_idx] = 0;
+      loop_bounds[0][matrix_loop_position(params, MatrixLoopLevel::L2,
+                                          MatrixLoopDimension::IC)] = 0;
+      loop_bounds[0][matrix_loop_position(params, MatrixLoopLevel::L2,
+                                          MatrixLoopDimension::FY)] = 0;
+      loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
+                                          MatrixLoopDimension::IC)] = 0;
+      loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
+                                          MatrixLoopDimension::FY)] = 0;
+      loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
+                                          MatrixLoopDimension::FX)] = 0;
 
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
@@ -127,11 +138,17 @@ SC_MODULE(MatrixUnitOutputController) {
                           for (loop_counters[1][5] = 0;;
                                loop_counters[1][5]++) {
                             ac_int<LOOP_WIDTH, false> y0 =
-                                loop_counters[1][params.y_loop_idx[1]];
+                                loop_counters[1][matrix_loop_position(
+                                    params, MatrixLoopLevel::L1,
+                                    MatrixLoopDimension::OY)];
                             ac_int<LOOP_WIDTH, false> x0 =
-                                loop_counters[1][params.x_loop_idx[1]];
+                                loop_counters[1][matrix_loop_position(
+                                    params, MatrixLoopLevel::L1,
+                                    MatrixLoopDimension::OX)];
                             ac_int<LOOP_WIDTH, false> k0 =
-                                loop_counters[1][params.weight_loop_idx[1]];
+                                loop_counters[1][matrix_loop_position(
+                                    params, MatrixLoopLevel::L1,
+                                    MatrixLoopDimension::OC)];
 
                             ac_int<32, false> address =
                                 k0 * Y0 * X0 + y0 * X0 + x0;
@@ -196,12 +213,19 @@ SC_MODULE(MatrixUnitOutputController) {
         read_accum_buffer_params.Push(params);
       }
 #endif
-      auto Y1 = params.loops[0][params.y_loop_idx[0]];
-      auto X1 = params.loops[0][params.x_loop_idx[0]];
-      auto K2 = params.loops[0][params.weight_loop_idx[0]];
-      auto Y0 = params.loops[1][params.y_loop_idx[1]];
-      auto X0 = params.loops[1][params.x_loop_idx[1]];
-      auto K1 = params.loops[1][params.weight_loop_idx[1]] * width;
+      auto Y1 = matrix_loop_bound(params, MatrixLoopLevel::L2,
+                                  MatrixLoopDimension::OY);
+      auto X1 = matrix_loop_bound(params, MatrixLoopLevel::L2,
+                                  MatrixLoopDimension::OX);
+      auto K2 = matrix_loop_bound(params, MatrixLoopLevel::L2,
+                                  MatrixLoopDimension::OC);
+      auto Y0 = matrix_loop_bound(params, MatrixLoopLevel::L1,
+                                  MatrixLoopDimension::OY);
+      auto X0 = matrix_loop_bound(params, MatrixLoopLevel::L1,
+                                  MatrixLoopDimension::OX);
+      auto K1 = matrix_loop_bound(params, MatrixLoopLevel::L1,
+                                  MatrixLoopDimension::OC) *
+                width;
 
       ac_int<16, false> X = X0 * X1;
       ac_int<16, false> K = K2 * K1;
@@ -213,21 +237,31 @@ SC_MODULE(MatrixUnitOutputController) {
       for (int i = 0; i < 2; i++) {
 #pragma hls_unroll yes
         for (int j = 0; j < 6; j++) {
-          loop_bounds[i][j] = params.loops[i][j] - 1;
+          loop_bounds[i][j] =
+              matrix_loop_slot_bound(
+                  params, matrix_loop_level_from_outer_first_index(i), j) -
+              1;
         }
       }
 
       // set irrelevant loop bounds to 0
-      loop_bounds[0][params.reduction_loop_idx[0]] = 0;
-      loop_bounds[0][params.fy_loop_idx[0]] = 0;
-      loop_bounds[1][params.reduction_loop_idx[1]] = 0;
-      loop_bounds[1][params.fy_loop_idx[1]] = 0;
-      loop_bounds[1][params.fx_loop_idx] = 0;
+      loop_bounds[0][matrix_loop_position(params, MatrixLoopLevel::L2,
+                                          MatrixLoopDimension::IC)] = 0;
+      loop_bounds[0][matrix_loop_position(params, MatrixLoopLevel::L2,
+                                          MatrixLoopDimension::FY)] = 0;
+      loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
+                                          MatrixLoopDimension::IC)] = 0;
+      loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
+                                          MatrixLoopDimension::FY)] = 0;
+      loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
+                                          MatrixLoopDimension::FX)] = 0;
 
-      ac_int<LOOP_WIDTH, false> y0_max = loop_bounds[1][params.y_loop_idx[1]];
-      ac_int<LOOP_WIDTH, false> x0_max = loop_bounds[1][params.x_loop_idx[1]];
-      ac_int<LOOP_WIDTH, false> k1_max =
-          loop_bounds[1][params.weight_loop_idx[1]];
+      ac_int<LOOP_WIDTH, false> y0_max = loop_bounds[1][matrix_loop_position(
+          params, MatrixLoopLevel::L1, MatrixLoopDimension::OY)];
+      ac_int<LOOP_WIDTH, false> x0_max = loop_bounds[1][matrix_loop_position(
+          params, MatrixLoopLevel::L1, MatrixLoopDimension::OX)];
+      ac_int<LOOP_WIDTH, false> k1_max = loop_bounds[1][matrix_loop_position(
+          params, MatrixLoopLevel::L1, MatrixLoopDimension::OC)];
 
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
@@ -244,17 +278,29 @@ SC_MODULE(MatrixUnitOutputController) {
                           for (loop_counters[1][5] = 0;;
                                loop_counters[1][5]++) {
                             ac_int<LOOP_WIDTH, false> y1 =
-                                loop_counters[0][params.y_loop_idx[0]];
+                                loop_counters[0][matrix_loop_position(
+                                    params, MatrixLoopLevel::L2,
+                                    MatrixLoopDimension::OY)];
                             ac_int<LOOP_WIDTH, false> x1 =
-                                loop_counters[0][params.x_loop_idx[0]];
+                                loop_counters[0][matrix_loop_position(
+                                    params, MatrixLoopLevel::L2,
+                                    MatrixLoopDimension::OX)];
                             ac_int<LOOP_WIDTH, false> k2 =
-                                loop_counters[0][params.weight_loop_idx[0]];
+                                loop_counters[0][matrix_loop_position(
+                                    params, MatrixLoopLevel::L2,
+                                    MatrixLoopDimension::OC)];
                             ac_int<LOOP_WIDTH, false> y0 =
-                                loop_counters[1][params.y_loop_idx[1]];
+                                loop_counters[1][matrix_loop_position(
+                                    params, MatrixLoopLevel::L1,
+                                    MatrixLoopDimension::OY)];
                             ac_int<LOOP_WIDTH, false> x0 =
-                                loop_counters[1][params.x_loop_idx[1]];
+                                loop_counters[1][matrix_loop_position(
+                                    params, MatrixLoopLevel::L1,
+                                    MatrixLoopDimension::OX)];
                             ac_int<LOOP_WIDTH, false> k1 =
-                                loop_counters[1][params.weight_loop_idx[1]];
+                                loop_counters[1][matrix_loop_position(
+                                    params, MatrixLoopLevel::L1,
+                                    MatrixLoopDimension::OC)];
 
                             Pack1D<BufferType, width> outputs;
 #if DOUBLE_BUFFERED_ACCUM_BUFFER
@@ -263,11 +309,17 @@ SC_MODULE(MatrixUnitOutputController) {
                                             [accumulation_buffer_bank]
                                                 .Pop();
                               ac_int<LOOP_WIDTH, false> x0 =
-                                  loop_counters[1][params.x_loop_idx[1]];
+                                  loop_counters[1][matrix_loop_position(
+                                      params, MatrixLoopLevel::L1,
+                                      MatrixLoopDimension::OX)];
                               ac_int<LOOP_WIDTH, false> y0 =
-                                  loop_counters[1][params.y_loop_idx[1]];
+                                  loop_counters[1][matrix_loop_position(
+                                      params, MatrixLoopLevel::L1,
+                                      MatrixLoopDimension::OY)];
                               ac_int<LOOP_WIDTH, false> k1 =
-                                  loop_counters[1][params.weight_loop_idx[1]];
+                                  loop_counters[1][matrix_loop_position(
+                                      params, MatrixLoopLevel::L1,
+                                      MatrixLoopDimension::OC)];
 
                               if (k1 == k1_max && y0 == y0_max &&
                                   x0 == x0_max) {

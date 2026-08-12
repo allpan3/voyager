@@ -285,7 +285,10 @@ SC_MODULE(WeightScaleController) {
       for (int i = 0; i < 2; i++) {
 #pragma hls_unroll yes
         for (int j = 0; j < 6; j++) {
-          loop_bounds[i][j] = params.loops[i][j] - 1;
+          loop_bounds[i][j] =
+              matrix_loop_slot_bound(
+                  params, matrix_loop_level_from_outer_first_index(i), j) -
+              1;
         }
       }
 
@@ -293,15 +296,20 @@ SC_MODULE(WeightScaleController) {
       loop_bounds[1][params.weight_reuse_idx[0]] = 0;
       loop_bounds[1][params.weight_reuse_idx[1]] = 0;
 
-      ac_int<LOOP_WIDTH, false> K2 = params.loops[0][params.weight_loop_idx[0]];
-      ac_int<LOOP_WIDTH, false> FY1 = params.loops[0][params.fy_loop_idx[0]];
-      ac_int<LOOP_WIDTH, false> C2 =
-          params.loops[0][params.reduction_loop_idx[0]];
-      ac_int<LOOP_WIDTH, false> FY0 = params.loops[1][params.fy_loop_idx[1]];
-      ac_int<LOOP_WIDTH, false> FX = params.loops[1][params.fx_loop_idx];
-      ac_int<LOOP_WIDTH, false> C1 =
-          params.loops[1][params.reduction_loop_idx[1]];
-      ac_int<LOOP_WIDTH, false> K1 = params.loops[1][params.weight_loop_idx[1]];
+      ac_int<LOOP_WIDTH, false> K2 = matrix_loop_bound(
+          params, MatrixLoopLevel::L2, MatrixLoopDimension::OC);
+      ac_int<LOOP_WIDTH, false> FY1 = matrix_loop_bound(
+          params, MatrixLoopLevel::L2, MatrixLoopDimension::FY);
+      ac_int<LOOP_WIDTH, false> C2 = matrix_loop_bound(
+          params, MatrixLoopLevel::L2, MatrixLoopDimension::IC);
+      ac_int<LOOP_WIDTH, false> FY0 = matrix_loop_bound(
+          params, MatrixLoopLevel::L1, MatrixLoopDimension::FY);
+      ac_int<LOOP_WIDTH, false> FX = matrix_loop_bound(
+          params, MatrixLoopLevel::L1, MatrixLoopDimension::FX);
+      ac_int<LOOP_WIDTH, false> C1 = matrix_loop_bound(
+          params, MatrixLoopLevel::L1, MatrixLoopDimension::IC);
+      ac_int<LOOP_WIDTH, false> K1 = matrix_loop_bound(
+          params, MatrixLoopLevel::L1, MatrixLoopDimension::OC);
 
       // extra loop to control reuse which only occurs during transpose and
       // when cols > rows
@@ -309,7 +317,9 @@ SC_MODULE(WeightScaleController) {
       constexpr int ratio = cols > rows ? cols / rows : 1;
       if (ratio > 1 && params.weight_transpose && C2 >= ratio) {
         // we can reuse the weights already in the buffer
-        loop_bounds[0][params.reduction_loop_idx[0]] = C2 / ratio - 1;
+        loop_bounds[0][matrix_loop_position(params, MatrixLoopLevel::L2,
+                                            MatrixLoopDimension::IC)] =
+            C2 / ratio - 1;
         transpose_reuse_bound = ratio - 1;
       }
 
@@ -322,18 +332,28 @@ SC_MODULE(WeightScaleController) {
       ac_int<LOOP_WIDTH, false> spatial_reuse_bound = 1;
       if (C2 == 1) {
         // OX loop can be absorbed
-        if (params.weight_loop_idx[0] < params.x_loop_idx[0]) {
+        if (matrix_loop_position(params, MatrixLoopLevel::L2,
+                                 MatrixLoopDimension::OC) <
+            matrix_loop_position(params, MatrixLoopLevel::L2,
+                                 MatrixLoopDimension::OX)) {
           if (!reuse_weights) {
-            spatial_reuse_bound = params.loops[0][params.x_loop_idx[0]];
+            spatial_reuse_bound = matrix_loop_bound(params, MatrixLoopLevel::L2,
+                                                    MatrixLoopDimension::OX);
           }
-          loop_bounds[0][params.x_loop_idx[0]] = 0;
+          loop_bounds[0][matrix_loop_position(params, MatrixLoopLevel::L2,
+                                              MatrixLoopDimension::OX)] = 0;
         }
         // OY loop can be absorbed
-        if (params.weight_loop_idx[0] < params.y_loop_idx[0]) {
+        if (matrix_loop_position(params, MatrixLoopLevel::L2,
+                                 MatrixLoopDimension::OC) <
+            matrix_loop_position(params, MatrixLoopLevel::L2,
+                                 MatrixLoopDimension::OY)) {
           if (!reuse_weights) {
-            spatial_reuse_bound *= params.loops[0][params.y_loop_idx[0]];
+            spatial_reuse_bound *= matrix_loop_bound(
+                params, MatrixLoopLevel::L2, MatrixLoopDimension::OY);
           }
-          loop_bounds[0][params.y_loop_idx[0]] = 0;
+          loop_bounds[0][matrix_loop_position(params, MatrixLoopLevel::L2,
+                                              MatrixLoopDimension::OY)] = 0;
         }
       }
 
@@ -363,14 +383,21 @@ SC_MODULE(WeightScaleController) {
                               for (loop_counters[1][5] = 0;;
                                    loop_counters[1][5]++) {
                                 ac_int<LOOP_WIDTH, false> c1 =
-                                    loop_counters[1]
-                                                 [params.reduction_loop_idx[1]];
+                                    loop_counters[1][matrix_loop_position(
+                                        params, MatrixLoopLevel::L1,
+                                        MatrixLoopDimension::IC)];
                                 ac_int<LOOP_WIDTH, false> fx =
-                                    loop_counters[1][params.fx_loop_idx];
+                                    loop_counters[1][matrix_loop_position(
+                                        params, MatrixLoopLevel::L1,
+                                        MatrixLoopDimension::FX)];
                                 ac_int<LOOP_WIDTH, false> fy0 =
-                                    loop_counters[1][params.fy_loop_idx[1]];
+                                    loop_counters[1][matrix_loop_position(
+                                        params, MatrixLoopLevel::L1,
+                                        MatrixLoopDimension::FY)];
                                 ac_int<LOOP_WIDTH, false> k1 =
-                                    loop_counters[1][params.weight_loop_idx[1]];
+                                    loop_counters[1][matrix_loop_position(
+                                        params, MatrixLoopLevel::L1,
+                                        MatrixLoopDimension::OC)];
 
                                 ac_int<16, false> address = fy0 * fy_stride +
                                                             fx * fx_stride +

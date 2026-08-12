@@ -13,6 +13,19 @@ struct BaseParams {
   virtual ~BaseParams() {}
 };
 
+// Semantic levels used by controller-facing matrix schedule accessors
+enum class MatrixLoopLevel : unsigned { L1 = 0, L2 = 1 };
+
+// Canonical convolution dimensions independent of physical loop slots
+enum class MatrixLoopDimension : unsigned {
+  OX = 0,
+  OY,
+  IC,
+  OC,
+  FX,
+  FY,
+};
+
 struct MatrixParams : BaseParams {
 #ifndef __SYNTHESIS__
   MatrixParams() {
@@ -536,6 +549,94 @@ struct MatrixParams : BaseParams {
     return true;
   }
 };
+
+// Convert one semantic level to the legacy MatrixParams storage index
+inline int matrix_loop_storage_level(MatrixLoopLevel level) {
+  return level == MatrixLoopLevel::L1 ? 1 : 0;
+}
+
+// Convert an outer-first controller-counter index to a semantic level
+inline MatrixLoopLevel matrix_loop_level_from_outer_first_index(int level) {
+  return level == 0 ? MatrixLoopLevel::L2 : MatrixLoopLevel::L1;
+}
+
+// Return the physical slot assigned to one semantic matrix dimension
+inline ac_int<3, false> matrix_loop_position(const MatrixParams& params,
+                                             MatrixLoopLevel level,
+                                             MatrixLoopDimension dimension) {
+  const int storage_level = matrix_loop_storage_level(level);
+  switch (dimension) {
+    case MatrixLoopDimension::OX:
+      return params.x_loop_idx[storage_level];
+    case MatrixLoopDimension::OY:
+      return params.y_loop_idx[storage_level];
+    case MatrixLoopDimension::IC:
+      return params.reduction_loop_idx[storage_level];
+    case MatrixLoopDimension::OC:
+      return params.weight_loop_idx[storage_level];
+    case MatrixLoopDimension::FX:
+      return level == MatrixLoopLevel::L1 ? params.fx_loop_idx
+                                          : ac_int<3, false>(5);
+    case MatrixLoopDimension::FY:
+      return params.fy_loop_idx[storage_level];
+  }
+  return 0;
+}
+
+// Return one bound by physical slot without exposing storage-level numbering
+inline ac_int<MatrixParams::LOOP_WIDTH, false> matrix_loop_slot_bound(
+    const MatrixParams& params, MatrixLoopLevel level, int slot) {
+  return params.loops[matrix_loop_storage_level(level)][slot];
+}
+
+// Return one bound by semantic dimension
+inline ac_int<MatrixParams::LOOP_WIDTH, false> matrix_loop_bound(
+    const MatrixParams& params, MatrixLoopLevel level,
+    MatrixLoopDimension dimension) {
+  return matrix_loop_slot_bound(params, level,
+                                matrix_loop_position(params, level, dimension));
+}
+
+// Return one semantic loop counter from a physical counter array
+template <typename Counters>
+inline auto matrix_loop_counter(const Counters& counters,
+                                const MatrixParams& params,
+                                MatrixLoopLevel level,
+                                MatrixLoopDimension dimension) {
+  return counters[matrix_loop_position(params, level, dimension)];
+}
+
+// Combine one L2 and L1 counter into a semantic coordinate
+template <typename OuterCounters, typename InnerCounters>
+inline auto matrix_combined_coordinate(const OuterCounters& outer_counters,
+                                       const InnerCounters& inner_counters,
+                                       const MatrixParams& params,
+                                       MatrixLoopDimension dimension) {
+  return matrix_loop_counter(outer_counters, params, MatrixLoopLevel::L2,
+                             dimension) *
+             matrix_loop_bound(params, MatrixLoopLevel::L1, dimension) +
+         matrix_loop_counter(inner_counters, params, MatrixLoopLevel::L1,
+                             dimension);
+}
+
+// Return whether a loop is nested inside any live reduction at one level
+inline bool matrix_loop_is_inside_reduction(const MatrixParams& params,
+                                            MatrixLoopLevel level,
+                                            MatrixLoopDimension dimension) {
+  const auto position = matrix_loop_position(params, level, dimension);
+  const auto ic_position =
+      matrix_loop_position(params, level, MatrixLoopDimension::IC);
+  const auto fx_position =
+      matrix_loop_position(params, level, MatrixLoopDimension::FX);
+  const auto fy_position =
+      matrix_loop_position(params, level, MatrixLoopDimension::FY);
+  return (matrix_loop_bound(params, level, MatrixLoopDimension::IC) > 1 &&
+          ic_position < position) ||
+         (matrix_loop_bound(params, level, MatrixLoopDimension::FX) > 1 &&
+          fx_position < position) ||
+         (matrix_loop_bound(params, level, MatrixLoopDimension::FY) > 1 &&
+          fy_position < position);
+}
 
 // TODO: this should be parameterized on VECTOR_DATATYPE
 struct VectorInstructions {
