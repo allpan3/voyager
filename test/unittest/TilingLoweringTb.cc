@@ -171,10 +171,7 @@ bool test_complete_lowering() {
                   lowered.reduction_loop_idx[1] == 3 &&
                   lowered.weight_loop_idx[1] == 0 &&
                   lowered.fx_loop_idx == 4 && lowered.fy_loop_idx[1] == 1,
-              "L1 positions must preserve the complete source order") &&
-      require(lowered.weight_reuse_idx[0] == 5 &&
-                  lowered.weight_reuse_idx[1] == 5,
-              "single innermost spatial loop must preserve legacy reuse");
+              "L1 positions must preserve the complete source order");
   return passed;
 }
 
@@ -188,26 +185,94 @@ bool test_partial_lowering() {
   passed &= check_loops(lowered.loops[0], {1, 1, 1, 5, 4, 1}, "partial L2");
   passed &= check_loops(lowered.loops[1], {1, 1, 1, 1, 3, 2}, "partial L1");
   passed &=
-      require(lowered.x_loop_idx[0] == 4 && lowered.fy_loop_idx[0] == 3 &&
-                  lowered.y_loop_idx[1] == 5 && lowered.fx_loop_idx == 4,
-              "omitted dimensions must retain unique unit slots") &&
-      require(lowered.weight_reuse_idx[0] == 5 &&
-                  lowered.weight_reuse_idx[1] == 5,
-              "partial lowering must preserve legacy reuse");
+      check_loops(lowered.loops[1], {6, 5, 4, 3, 1, 2}, "unit-weight reuse L1");
+  passed &=
+      require(lowered.x_loop_idx[1] == 3 && lowered.weight_loop_idx[1] == 4 &&
+                  lowered.y_loop_idx[1] == 5,
+              "semantic selectors must straddle the unit OC loop");
+  passed &= require(l1_output_reuses_weights(lowered, lowered.x_loop_idx[1]),
+                    "unit outer OC must not block OX weight reuse");
+  passed &= require(l1_output_reuses_weights(lowered, lowered.y_loop_idx[1]),
+                    "unit outer OC must not block OY weight reuse");
   return passed;
 }
 
-// Preserve two innermost L1 spatial reuse positions for legacy consumers
-bool test_legacy_weight_reuse() {
-  const auto lowered = get_interstellar_tiling(
-      make_tiling({{voyager::Loop::OX, 2}, {voyager::Loop::OY, 3}}, {}));
+// Stop reuse at a live weight loop outside an output loop
+bool test_live_weight_loop_reload() {
+  const auto lowered =
+      get_interstellar_tiling(make_tiling({{voyager::Loop::OY, 2},
+                                           {voyager::Loop::OC, 2},
+                                           {voyager::Loop::OX, 3},
+                                           {voyager::Loop::IC, 4},
+                                           {voyager::Loop::FX, 5},
+                                           {voyager::Loop::FY, 6}},
+                                          {}));
+
   bool passed = true;
-  passed &= require(lowered.x_loop_idx[1] == 5 &&
-                        lowered.y_loop_idx[1] == 4,
-                    "L1 spatial positions must preserve source order");
-  passed &= require(lowered.weight_reuse_idx[0] == 4 &&
-                        lowered.weight_reuse_idx[1] == 5,
-                    "two innermost spatial loops must preserve legacy reuse");
+  passed &= check_loops(lowered.loops[1], {6, 5, 4, 3, 2, 2},
+                        "live-weight reload L1");
+  passed &= require(!l1_output_reuses_weights(lowered, lowered.x_loop_idx[1]),
+                    "live outer OC must force an OX weight reload");
+  passed &= require(l1_output_reuses_weights(lowered, lowered.y_loop_idx[1]),
+                    "OY inside the live OC loop must still reuse weights");
+  return passed;
+}
+
+// Match the biased MobileBERT selector placement used by the exact SA gate
+bool test_mobilebert_selector_reuse() {
+  const auto lowered =
+      get_interstellar_tiling(make_tiling({{voyager::Loop::OX, 128},
+                                           {voyager::Loop::OC, 2},
+                                           {voyager::Loop::OY, 1},
+                                           {voyager::Loop::IC, 1},
+                                           {voyager::Loop::FX, 1},
+                                           {voyager::Loop::FY, 1}},
+                                          {}));
+
+  bool passed = true;
+  passed &=
+      check_loops(lowered.loops[1], {1, 1, 1, 1, 2, 128}, "MobileBERT L1");
+  passed &= require(lowered.x_loop_idx[1] == 5 && lowered.y_loop_idx[1] == 3 &&
+                        lowered.weight_loop_idx[1] == 4 &&
+                        lowered.reduction_loop_idx[1] == 2 &&
+                        lowered.fx_loop_idx == 1 && lowered.fy_loop_idx[1] == 0,
+                    "MobileBERT semantic selectors must match its schedule");
+  passed &= require(
+      lowered.weight_reuse_idx[0] == 5 && lowered.weight_reuse_idx[1] == 5,
+      "MobileBERT must serialize its single OX reuse selector");
+  passed &= require(l1_output_reuses_weights(lowered, lowered.x_loop_idx[1]),
+                    "MobileBERT OX must reuse the resident weight");
+  passed &= require(!l1_output_reuses_weights(lowered, lowered.y_loop_idx[1]),
+                    "MobileBERT OY must remain outside the live OC loop");
+  return passed;
+}
+
+// Preserve OX and OY reuse across distinct convolution output selectors
+bool test_distinct_conv_output_reuse() {
+  const auto lowered =
+      get_interstellar_tiling(make_tiling({{voyager::Loop::OX, 14},
+                                           {voyager::Loop::OY, 28},
+                                           {voyager::Loop::FX, 3},
+                                           {voyager::Loop::FY, 3},
+                                           {voyager::Loop::IC, 1},
+                                           {voyager::Loop::OC, 1}},
+                                          {}));
+
+  bool passed = true;
+  passed &= check_loops(lowered.loops[1], {1, 1, 3, 3, 28, 14},
+                        "distinct-output convolution L1");
+  passed &= require(lowered.x_loop_idx[1] == 5 && lowered.y_loop_idx[1] == 4 &&
+                        lowered.weight_loop_idx[1] == 0 &&
+                        lowered.reduction_loop_idx[1] == 1 &&
+                        lowered.fy_loop_idx[1] == 2 && lowered.fx_loop_idx == 3,
+                    "convolution OY and OX selectors must remain distinct");
+  passed &= require(
+      lowered.weight_reuse_idx[0] == 4 && lowered.weight_reuse_idx[1] == 5,
+      "convolution must serialize both OY and OX reuse selectors");
+  passed &= require(l1_output_reuses_weights(lowered, lowered.y_loop_idx[1]),
+                    "convolution OY must reuse the resident weight");
+  passed &= require(l1_output_reuses_weights(lowered, lowered.x_loop_idx[1]),
+                    "convolution OX must reuse the resident weight");
   return passed;
 }
 
@@ -223,9 +288,8 @@ int main() {
   const int passed = test_semantic_normalization() +
                      test_normalization_validation() +
                      test_complete_lowering() + test_partial_lowering() +
-                     test_legacy_weight_reuse() +
                      test_outer_fx_rejected();
-  std::cout << "Tiling lowering checks passed: " << passed << "/6"
+  std::cout << "Tiling lowering checks passed: " << passed << "/5"
             << std::endl;
-  return passed == 6 ? 0 : 1;
+  return passed == 5 ? 0 : 1;
 }

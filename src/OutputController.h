@@ -91,11 +91,11 @@ SC_MODULE(MatrixUnitOutputController) {
       MatrixParams params = read_accum_buffer_params.Pop();
 
       auto Y0 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                  MatrixLoopDimension::OY);
+                                  MatrixLoopParam::OY);
       auto X0 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                  MatrixLoopDimension::OX);
+                                  MatrixLoopParam::OX);
       auto K1 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                  MatrixLoopDimension::OC);
+                                  MatrixLoopParam::OC);
 
       ac_int<LOOP_WIDTH, false> loop_counters[2][6];
       ac_int<LOOP_WIDTH, false> loop_bounds[2][6];
@@ -113,15 +113,15 @@ SC_MODULE(MatrixUnitOutputController) {
 
       // set irrelevant loop bounds to 0
       loop_bounds[0][matrix_loop_position(params, MatrixLoopLevel::L2,
-                                          MatrixLoopDimension::IC)] = 0;
+                                          MatrixLoopParam::IC)] = 0;
       loop_bounds[0][matrix_loop_position(params, MatrixLoopLevel::L2,
-                                          MatrixLoopDimension::FY)] = 0;
+                                          MatrixLoopParam::FY)] = 0;
       loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                          MatrixLoopDimension::IC)] = 0;
+                                          MatrixLoopParam::IC)] = 0;
       loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                          MatrixLoopDimension::FY)] = 0;
+                                          MatrixLoopParam::FY)] = 0;
       loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                          MatrixLoopDimension::FX)] = 0;
+                                          MatrixLoopParam::FX)] = 0;
 
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
@@ -140,15 +140,15 @@ SC_MODULE(MatrixUnitOutputController) {
                             ac_int<LOOP_WIDTH, false> y0 =
                                 loop_counters[1][matrix_loop_position(
                                     params, MatrixLoopLevel::L1,
-                                    MatrixLoopDimension::OY)];
+                                    MatrixLoopParam::OY)];
                             ac_int<LOOP_WIDTH, false> x0 =
                                 loop_counters[1][matrix_loop_position(
                                     params, MatrixLoopLevel::L1,
-                                    MatrixLoopDimension::OX)];
+                                    MatrixLoopParam::OX)];
                             ac_int<LOOP_WIDTH, false> k0 =
                                 loop_counters[1][matrix_loop_position(
                                     params, MatrixLoopLevel::L1,
-                                    MatrixLoopDimension::OC)];
+                                    MatrixLoopParam::OC)];
 
                             ac_int<32, false> address =
                                 k0 * Y0 * X0 + y0 * X0 + x0;
@@ -214,17 +214,17 @@ SC_MODULE(MatrixUnitOutputController) {
       }
 #endif
       auto Y1 = matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                  MatrixLoopDimension::OY);
+                                  MatrixLoopParam::OY);
       auto X1 = matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                  MatrixLoopDimension::OX);
+                                  MatrixLoopParam::OX);
       auto K2 = matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                  MatrixLoopDimension::OC);
+                                  MatrixLoopParam::OC);
       auto Y0 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                  MatrixLoopDimension::OY);
+                                  MatrixLoopParam::OY);
       auto X0 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                  MatrixLoopDimension::OX);
+                                  MatrixLoopParam::OX);
       auto K1 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                  MatrixLoopDimension::OC) *
+                                  MatrixLoopParam::OC) *
                 width;
 
       ac_int<16, false> X = X0 * X1;
@@ -246,22 +246,22 @@ SC_MODULE(MatrixUnitOutputController) {
 
       // set irrelevant loop bounds to 0
       loop_bounds[0][matrix_loop_position(params, MatrixLoopLevel::L2,
-                                          MatrixLoopDimension::IC)] = 0;
+                                          MatrixLoopParam::IC)] = 0;
       loop_bounds[0][matrix_loop_position(params, MatrixLoopLevel::L2,
-                                          MatrixLoopDimension::FY)] = 0;
+                                          MatrixLoopParam::FY)] = 0;
       loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                          MatrixLoopDimension::IC)] = 0;
+                                          MatrixLoopParam::IC)] = 0;
       loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                          MatrixLoopDimension::FY)] = 0;
+                                          MatrixLoopParam::FY)] = 0;
       loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                          MatrixLoopDimension::FX)] = 0;
+                                          MatrixLoopParam::FX)] = 0;
 
       ac_int<LOOP_WIDTH, false> y0_max = loop_bounds[1][matrix_loop_position(
-          params, MatrixLoopLevel::L1, MatrixLoopDimension::OY)];
+          params, MatrixLoopLevel::L1, MatrixLoopParam::OY)];
       ac_int<LOOP_WIDTH, false> x0_max = loop_bounds[1][matrix_loop_position(
-          params, MatrixLoopLevel::L1, MatrixLoopDimension::OX)];
+          params, MatrixLoopLevel::L1, MatrixLoopParam::OX)];
       ac_int<LOOP_WIDTH, false> k1_max = loop_bounds[1][matrix_loop_position(
-          params, MatrixLoopLevel::L1, MatrixLoopDimension::OC)];
+          params, MatrixLoopLevel::L1, MatrixLoopParam::OC)];
 
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
@@ -280,27 +280,27 @@ SC_MODULE(MatrixUnitOutputController) {
                             ac_int<LOOP_WIDTH, false> y1 =
                                 loop_counters[0][matrix_loop_position(
                                     params, MatrixLoopLevel::L2,
-                                    MatrixLoopDimension::OY)];
+                                    MatrixLoopParam::OY)];
                             ac_int<LOOP_WIDTH, false> x1 =
                                 loop_counters[0][matrix_loop_position(
                                     params, MatrixLoopLevel::L2,
-                                    MatrixLoopDimension::OX)];
+                                    MatrixLoopParam::OX)];
                             ac_int<LOOP_WIDTH, false> k2 =
                                 loop_counters[0][matrix_loop_position(
                                     params, MatrixLoopLevel::L2,
-                                    MatrixLoopDimension::OC)];
+                                    MatrixLoopParam::OC)];
                             ac_int<LOOP_WIDTH, false> y0 =
                                 loop_counters[1][matrix_loop_position(
                                     params, MatrixLoopLevel::L1,
-                                    MatrixLoopDimension::OY)];
+                                    MatrixLoopParam::OY)];
                             ac_int<LOOP_WIDTH, false> x0 =
                                 loop_counters[1][matrix_loop_position(
                                     params, MatrixLoopLevel::L1,
-                                    MatrixLoopDimension::OX)];
+                                    MatrixLoopParam::OX)];
                             ac_int<LOOP_WIDTH, false> k1 =
                                 loop_counters[1][matrix_loop_position(
                                     params, MatrixLoopLevel::L1,
-                                    MatrixLoopDimension::OC)];
+                                    MatrixLoopParam::OC)];
 
                             Pack1D<BufferType, width> outputs;
 #if DOUBLE_BUFFERED_ACCUM_BUFFER
@@ -311,15 +311,15 @@ SC_MODULE(MatrixUnitOutputController) {
                               ac_int<LOOP_WIDTH, false> x0 =
                                   loop_counters[1][matrix_loop_position(
                                       params, MatrixLoopLevel::L1,
-                                      MatrixLoopDimension::OX)];
+                                      MatrixLoopParam::OX)];
                               ac_int<LOOP_WIDTH, false> y0 =
                                   loop_counters[1][matrix_loop_position(
                                       params, MatrixLoopLevel::L1,
-                                      MatrixLoopDimension::OY)];
+                                      MatrixLoopParam::OY)];
                               ac_int<LOOP_WIDTH, false> k1 =
                                   loop_counters[1][matrix_loop_position(
                                       params, MatrixLoopLevel::L1,
-                                      MatrixLoopDimension::OC)];
+                                      MatrixLoopParam::OC)];
 
                               if (k1 == k1_max && y0 == y0_max &&
                                   x0 == x0_max) {

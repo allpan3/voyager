@@ -17,22 +17,22 @@
 #include "test/toolchain/SpMM.h"
 #endif
 
-// Return one compiler tiling position by semantic level and dimension
+// Return one compiler tiling position by semantic level and loop parameter
 inline int matrix_loop_position(const Tiling& tiling, MatrixLoopLevel level,
-                                MatrixLoopDimension dimension) {
+                                MatrixLoopParam loop_param) {
   const int storage_level = matrix_loop_storage_level(level);
-  switch (dimension) {
-    case MatrixLoopDimension::OX:
+  switch (loop_param) {
+    case MatrixLoopParam::OX:
       return tiling.x_loop_idx[storage_level];
-    case MatrixLoopDimension::OY:
+    case MatrixLoopParam::OY:
       return tiling.y_loop_idx[storage_level];
-    case MatrixLoopDimension::IC:
+    case MatrixLoopParam::IC:
       return tiling.reduction_loop_idx[storage_level];
-    case MatrixLoopDimension::OC:
+    case MatrixLoopParam::OC:
       return tiling.weight_loop_idx[storage_level];
-    case MatrixLoopDimension::FX:
+    case MatrixLoopParam::FX:
       return level == MatrixLoopLevel::L1 ? tiling.fx_loop_idx : 5;
-    case MatrixLoopDimension::FY:
+    case MatrixLoopParam::FY:
       return tiling.fy_loop_idx[storage_level];
   }
   return 0;
@@ -52,21 +52,17 @@ void project_matrix_outer_output_loops(
     ac_int<3, false>& output_x_loop_idx, ac_int<3, false>& output_y_loop_idx,
     ac_int<3, false>& output_k_loop_idx) {
   const int source_x_loop_idx =
-      matrix_loop_position(params, MatrixLoopLevel::L2,
-                           MatrixLoopDimension::OX);
+      matrix_loop_position(params, MatrixLoopLevel::L2, MatrixLoopParam::OX);
   const int source_y_loop_idx =
-      matrix_loop_position(params, MatrixLoopLevel::L2,
-                           MatrixLoopDimension::OY);
+      matrix_loop_position(params, MatrixLoopLevel::L2, MatrixLoopParam::OY);
   const int source_k_loop_idx =
-      matrix_loop_position(params, MatrixLoopLevel::L2,
-                           MatrixLoopDimension::OC);
+      matrix_loop_position(params, MatrixLoopLevel::L2, MatrixLoopParam::OC);
 
   // DWC historically aliases all semantics to slot zero but uses three bounds
   if (source_x_loop_idx == 0 && source_y_loop_idx == 0 &&
       source_k_loop_idx == 0) {
     for (int i = 0; i < 3; i++) {
-      output_loops[i] =
-          matrix_loop_slot_bound(params, MatrixLoopLevel::L2, i);
+      output_loops[i] = matrix_loop_slot_bound(params, MatrixLoopLevel::L2, i);
     }
     output_x_loop_idx = 0;
     output_y_loop_idx = 0;

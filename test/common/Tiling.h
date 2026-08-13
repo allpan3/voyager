@@ -25,8 +25,9 @@ enum class SemanticLoop {
 
 // Complete inner-to-outer level with omitted dimensions appended at bound one
 struct SemanticTilingLevel {
-  std::array<int, kSemanticLoopCount> bounds;          // OX, OY, IC, OC, FX, FY
-  std::array<SemanticLoop, kSemanticLoopCount> order;  // mapped then unit suffix
+  std::array<int, kSemanticLoopCount> bounds;  // OX, OY, IC, OC, FX, FY
+  std::array<SemanticLoop, kSemanticLoopCount>
+      order;                         // mapped then unit suffix
   std::size_t specified_loop_count;  // source-ordered prefix length
 
   // Return the explicit factor for one semantic dimension

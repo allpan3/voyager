@@ -286,9 +286,6 @@ SC_MODULE(MatrixUnitTb) {
     params.weight_loop_idx[1] = 3;
     params.x_loop_idx[1] = 4;
     params.reduction_loop_idx[1] = 5;
-    params.weight_reuse_idx[0] = 0;
-    params.weight_reuse_idx[1] = 1;
-
     if (job == MATRIX_SET_MAJOR_REPLAY) {
       // Traverse one resident C2 set across both live outer-X contexts
       params.weight_loop_idx[0] = 0;
@@ -306,8 +303,6 @@ SC_MODULE(MatrixUnitTb) {
       params.y_loop_idx[1] = 3;
       params.x_loop_idx[1] = 4;
       params.fx_loop_idx = 5;
-      params.weight_reuse_idx[0] = 3;
-      params.weight_reuse_idx[1] = 4;
       params.loops[1][params.reduction_loop_idx[1]] = c1_extent(job);
       params.loops[1][params.fy_loop_idx[1]] = fy_extent(job);
       params.loops[1][params.fx_loop_idx] = fx_extent(job);

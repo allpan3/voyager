@@ -48,8 +48,11 @@ struct MemoryRequest {
   }
 };
 
-// CIMWeightDescriptor describes one resident weight tile and its logical
-// replays
+// Declare the lifetime of one ordered CIM resident-set sequence
+//
+// WeightController emits this at a sequence boundary. CIMProcessor consumes
+// set_count consecutive sets in [replay][set] order and releases each set after
+// its final one of replay_count traversals
 struct CIMWeightDescriptor {
   ac_int<16, false> set_count;
   ac_int<16, false> replay_count;

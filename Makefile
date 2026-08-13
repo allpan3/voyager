@@ -508,10 +508,10 @@ $(CC_BUILD_DIR)/Harness-fast.o: test/common/Harness.cc test/common/Harness.h tes
 $(CC_BUILD_DIR)/Harness-checker.o: test/common/Harness.cc test/common/Harness.h test/common/Utils.h test/toolchain/MapOperation.h $(wildcard src/*.h) $(wildcard src/datatypes/*.h) $(wildcard src/vector_unit/*.h) $(wildcard src/matrix_vector_unit/*.h) test/checker/PEChecker.h
 	$(CC) $(C17FLAGS) -DCONNECTIONS_FAST_SIM -DCHECK_PE -c -o $@ $<
 
-$(CC_BUILD_DIR)/GoldModel.o: test/common/GoldModel.cc test/common/GoldModel.h test/common/Utils.h src/ArchitectureParams.h src/vector_unit/ApproximationUnit.h test/toolchain/ApproximationConstants.h $(wildcard src/datatypes/*.h) $(wildcard test/common/operations/*.h)
+$(CC_BUILD_DIR)/GoldModel.o: test/common/GoldModel.cc test/common/GoldModel.h test/common/Utils.h test/common/Tiling.h src/ArchitectureParams.h src/vector_unit/ApproximationUnit.h test/toolchain/ApproximationConstants.h $(wildcard src/datatypes/*.h) $(wildcard test/common/operations/*.h)
 	$(CC) $(C17FLAGS) -g -c -o $@ $<
 
-$(CC_BUILD_DIR)/GoldModel-checker.o: test/common/GoldModel.cc test/common/GoldModel.h test/common/Utils.h src/ArchitectureParams.h $(wildcard src/datatypes/*.h) $(wildcard test/common/operations/*.h) test/checker/PEChecker.h
+$(CC_BUILD_DIR)/GoldModel-checker.o: test/common/GoldModel.cc test/common/GoldModel.h test/common/Utils.h test/common/Tiling.h src/ArchitectureParams.h $(wildcard src/datatypes/*.h) $(wildcard test/common/operations/*.h) test/checker/PEChecker.h
 	$(CC) $(C17FLAGS) -DCHECK_PE -g -c -o $@ $<
 
 $(CC_BUILD_DIR)/Simulation.o: test/common/Simulation.cc test/common/Simulation.h src/ArchitectureParams.h $(wildcard src/datatypes/*.h) test/common/Utils.h test/common/MemoryInterface.h
@@ -523,7 +523,7 @@ $(CC_BUILD_DIR)/ArrayMemory.o: test/common/ArrayMemory.cc test/common/ArrayMemor
 $(CC_BUILD_DIR)/DataLoader.o: test/common/DataLoader.cc test/common/DataLoader.h test/common/MemoryInterface.h
 	$(CC) $(C17FLAGS) -c -o $@ $<
 
-$(CC_BUILD_DIR)/MapOperation.o: test/toolchain/MapOperation.cc $(wildcard test/toolchain/*.h)
+$(CC_BUILD_DIR)/MapOperation.o: test/toolchain/MapOperation.cc test/common/Tiling.h $(wildcard test/toolchain/*.h)
 	$(CC) $(C17FLAGS) -c -o $@ $<
 
 $(CC_BUILD_DIR)/TestRunner.o: test/common/TestRunner.cc

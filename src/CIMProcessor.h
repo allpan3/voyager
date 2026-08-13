@@ -12,14 +12,15 @@
 #include "Params.h"
 #include "PerfMonitor.h"
 
-// CIMProcessor directly drives a resident-weight CIMArray for the strict native
-// mapping Its issue controller fuses MatrixProcessor's input and weight
-// controllers: it loads a resident weight set at each schedule swap point, then
-// issues the associated A beat. Its result controller unpacks array results and
-// uses MatrixUnit's buffer for temporal sums rows and cols preserve the
-// MatrixProcessor template positions; the CIM array interprets them as its
-// resident B[K][N] shape MatrixUnit owns the storage, while buffer_size mirrors
-// the MatrixProcessor backend signature
+// Execute a lowered matrix schedule on a resident-weight CIM array
+//
+// WeightController owns weight order and lifetime: it streams set payloads plus
+// descriptors that declare an ordered set sequence and its replay count. The
+// loader assigns each sequence to the physical set ring, while the issue path
+// only walks [replay][set], waits for first-use readiness, and releases a set
+// after its final replay. The result path reduces IC/FX/FY contributions
+// through MatrixUnit's accumulation buffer. rows and cols retain
+// MatrixProcessor's template positions and represent the resident B[K][N] shape
 template <typename InputTypeTuple, typename WeightTypeTuple, typename Input,
           typename Weight, typename Psum, typename Buffer, typename Scale,
           int rows, int cols, int buffer_size, int CH_IN, int CH_OUT,
@@ -54,12 +55,14 @@ SC_MODULE(CIMProcessor) {
   using WriteRequest = typename Array::WriteRequest;
 
   static constexpr int LOOP_WIDTH = 10;
+  static constexpr int LOOP_LEVEL_COUNT = 2;
+  static constexpr int LOOP_SLOT_COUNT = 6;
   // Carry one ordered accumulator transaction between read issue and completion
   struct AccumulationMetadata {
     Pack1D<Psum, N> result;
-    Pack1D<Buffer, N> initial;
-    ac_int<1, false> first;
-    ac_int<1, false> bank;
+    Pack1D<Buffer, N> initial_value;
+    ac_int<1, false> starts_reduction;
+    ac_int<1, false> buffer_bank;
 
     static const unsigned int width =
         Pack1D<Psum, N>::width + Pack1D<Buffer, N>::width + 2;
@@ -67,33 +70,35 @@ SC_MODULE(CIMProcessor) {
     template <unsigned int Size>
     void Marshall(Marshaller<Size> &m) {
       m & result;
-      m & initial;
-      m & first;
-      m & bank;
+      m & initial_value;
+      m & starts_reduction;
+      m & buffer_bank;
     }
 
     inline friend void sc_trace(sc_trace_file *tf,
                                 const AccumulationMetadata &metadata,
                                 const std::string &name) {
       sc_trace(tf, metadata.result, name + ".result");
-      sc_trace(tf, metadata.initial, name + ".initial");
-      sc_trace(tf, metadata.first, name + ".first");
-      sc_trace(tf, metadata.bank, name + ".bank");
+      sc_trace(tf, metadata.initial_value, name + ".initial_value");
+      sc_trace(tf, metadata.starts_reduction, name + ".starts_reduction");
+      sc_trace(tf, metadata.buffer_bank, name + ".buffer_bank");
     }
 
     inline friend std::ostream &operator<<(
         std::ostream &os, const AccumulationMetadata &metadata) {
       os << metadata.result << " ";
-      os << metadata.initial << " ";
-      os << metadata.first << " ";
-      os << metadata.bank;
+      os << metadata.initial_value << " ";
+      os << metadata.starts_reduction << " ";
+      os << metadata.buffer_bank;
       return os;
     }
 
     inline friend bool operator==(const AccumulationMetadata &lhs,
                                   const AccumulationMetadata &rhs) {
-      return lhs.result == rhs.result && lhs.initial == rhs.initial &&
-             lhs.first == rhs.first && lhs.bank == rhs.bank;
+      return lhs.result == rhs.result &&
+             lhs.initial_value == rhs.initial_value &&
+             lhs.starts_reduction == rhs.starts_reduction &&
+             lhs.buffer_bank == rhs.buffer_bank;
     }
   };
 
@@ -213,7 +218,7 @@ SC_MODULE(CIMProcessor) {
 #endif
 
  private:
-  // Bind one logical resident tile to a contiguous range on the set ring
+  // Bind one logical set sequence to a contiguous physical ring allocation
   struct ScheduledWeightDescriptor {
     CIMWeightDescriptor logical;
     Set first_set;
@@ -245,7 +250,7 @@ SC_MODULE(CIMProcessor) {
     }
   };
 
-  // ResidentSetState records whether one physical set is free or ready
+  // Track whether one set accepts a fill or is retained for descriptor replays
   enum ResidentSetState { SET_FREE = 0, SET_READY = 1 };
   using ResidentSetStateBits = ac_int<1, false>;
 
@@ -282,7 +287,7 @@ SC_MODULE(CIMProcessor) {
       accum_output_fifo);
   Connections::Combinational<Pack1D<Buffer, N>> CCS_INIT_S1(accum_output_enq);
 
-  // Buffer one ring traversal of descriptor assignments
+  // Buffer one ring traversal of scheduled descriptor assignments
   Connections::Fifo<ScheduledWeightDescriptor, B_SETS> CCS_INIT_S1(
       scheduled_weight_descriptor_fifo);
   Connections::Combinational<ScheduledWeightDescriptor> CCS_INIT_S1(
@@ -413,7 +418,7 @@ SC_MODULE(CIMProcessor) {
   }
 
  private:
-  // Return the product of every scheduled matrix loop bound
+  // Return the operation volume; fixed-unit FX@L2 occupies omitted slot 5
   static ac_int<32, false> total_operations(const MatrixParams &params) {
     return matrix_loop_slot_bound(params, MatrixLoopLevel::L2, 0) *
            matrix_loop_slot_bound(params, MatrixLoopLevel::L2, 1) *
@@ -428,118 +433,82 @@ SC_MODULE(CIMProcessor) {
            matrix_loop_slot_bound(params, MatrixLoopLevel::L1, 5);
   }
 
+  // Reset both physical counter levels before walking one semantic schedule
+  static void reset_loop_counters(
+      ac_int<LOOP_WIDTH, false> loop_counters[2][6]) {
+#pragma hls_unroll yes
+    for (int level = 0; level < LOOP_LEVEL_COUNT; level++) {
+#pragma hls_unroll yes
+      for (int slot = 0; slot < LOOP_SLOT_COUNT; slot++) {
+        loop_counters[level][slot] = 0;
+      }
+    }
+  }
+
   // Advance the shared two-level loop-counter representation by one operation
   static void advance_loop_counters(
       ac_int<LOOP_WIDTH, false> loop_counters[2][6],
       const MatrixParams &params) {
-    loop_counters[1][5]++;
+    loop_counters[LOOP_LEVEL_COUNT - 1][LOOP_SLOT_COUNT - 1]++;
 #pragma hls_unroll yes
-    for (int level = 1; level >= 0; level--) {
+    for (int level = LOOP_LEVEL_COUNT - 1; level >= 0; level--) {
 #pragma hls_unroll yes
-      for (int loop = 5; loop >= 0; loop--) {
-        if (loop_counters[level][loop] ==
+      for (int slot = LOOP_SLOT_COUNT - 1; slot >= 0; slot--) {
+        if (loop_counters[level][slot] ==
             matrix_loop_slot_bound(
                 params, matrix_loop_level_from_outer_first_index(level),
-                loop)) {
-          loop_counters[level][loop] = 0;
-          if (loop > 0) {
-            loop_counters[level][loop - 1]++;
+                slot)) {
+          loop_counters[level][slot] = 0;
+          if (slot > 0) {
+            loop_counters[level][slot - 1]++;
           } else if (level > 0) {
-            loop_counters[level - 1][5]++;
+            loop_counters[level - 1][LOOP_SLOT_COUNT - 1]++;
           }
         }
       }
     }
   }
 
-  // Match MatrixProcessor::push_inputs when deciding whether one resident
-  // weight block spans X/Y operations
-  static bool reuses_weights(const MatrixParams &params) {
-    const auto fy1 =
-        matrix_loop_bound(params, MatrixLoopLevel::L2, MatrixLoopDimension::FY);
-    const auto c2 =
-        matrix_loop_bound(params, MatrixLoopLevel::L2, MatrixLoopDimension::IC);
-    const auto fy0 =
-        matrix_loop_bound(params, MatrixLoopLevel::L1, MatrixLoopDimension::FY);
-    const auto fx =
-        matrix_loop_bound(params, MatrixLoopLevel::L1, MatrixLoopDimension::FX);
-    const auto c1 =
-        matrix_loop_bound(params, MatrixLoopLevel::L1, MatrixLoopDimension::IC);
-    const auto k1 =
-        matrix_loop_bound(params, MatrixLoopLevel::L1, MatrixLoopDimension::OC);
-    const bool x_inner = matrix_loop_position(params, MatrixLoopLevel::L2,
-                                              MatrixLoopDimension::OC) <
-                         matrix_loop_position(params, MatrixLoopLevel::L2,
-                                              MatrixLoopDimension::OX);
-    const bool y_inner = matrix_loop_position(params, MatrixLoopLevel::L2,
-                                              MatrixLoopDimension::OC) <
-                         matrix_loop_position(params, MatrixLoopLevel::L2,
-                                              MatrixLoopDimension::OY);
-    return fy1 == 1 && c2 == 1 && fy0 == 1 && fx == 1 && c1 == 1 && k1 == 1 &&
-           (x_inner || y_inner);
-  }
-
-  // Match MatrixProcessor::push_inputs weight_reuse_idx selection for the outer
-  // swap condition
-  static void select_weight_reuse_indices(const MatrixParams &params,
-                                          ac_int<3, false> indices[2]) {
-    const bool x_inner = matrix_loop_position(params, MatrixLoopLevel::L2,
-                                              MatrixLoopDimension::OC) <
-                         matrix_loop_position(params, MatrixLoopLevel::L2,
-                                              MatrixLoopDimension::OX);
-    const bool y_inner = matrix_loop_position(params, MatrixLoopLevel::L2,
-                                              MatrixLoopDimension::OC) <
-                         matrix_loop_position(params, MatrixLoopLevel::L2,
-                                              MatrixLoopDimension::OY);
-    if (x_inner && y_inner) {
-      indices[0] = matrix_loop_position(params, MatrixLoopLevel::L2,
-                                        MatrixLoopDimension::OX);
-      indices[1] = matrix_loop_position(params, MatrixLoopLevel::L2,
-                                        MatrixLoopDimension::OY);
-    } else {
-      const auto index = x_inner
-                             ? matrix_loop_position(params, MatrixLoopLevel::L2,
-                                                    MatrixLoopDimension::OX)
-                             : matrix_loop_position(params, MatrixLoopLevel::L2,
-                                                    MatrixLoopDimension::OY);
-      indices[0] = index;
-      indices[1] = index;
-    }
-  }
-
-  // Mapper-provided loop indices define weight lifetimes; this matches
-  // MatrixProcessor::push_inputs swap_weights
-  static bool needs_weight_load(
+  // Return whether counters are at a resident-weight-set run boundary
+  //
+  // The boundary starts a run before issuing a MAC and ends it after counters
+  // advance; reused L1 output dimensions must all wrap to zero
+  static bool weight_set_boundary(
       const MatrixParams &params,
       const ac_int<LOOP_WIDTH, false> loop_counters[2][6],
-      const ac_int<3, false> outer_reuse_indices[2], bool reuse_weights,
-      ac_int<32, false> step) {
-    const bool inner =
-        loop_counters[1][params.weight_reuse_idx[0]] == 0 &&
-        loop_counters[1][params.weight_reuse_idx[1]] == 0;
-    const bool outer = loop_counters[0][outer_reuse_indices[0]] == 0 &&
-                       loop_counters[0][outer_reuse_indices[1]] == 0;
-    return step == 0 || (inner && (!reuse_weights || outer));
+      bool l1_ox_reuses_weights,
+      bool l1_oy_reuses_weights) {
+    return (!l1_ox_reuses_weights ||
+            matrix_loop_counter(loop_counters[1], params,
+                                MatrixLoopLevel::L1,
+                                MatrixLoopParam::OX) == 0) &&
+           (!l1_oy_reuses_weights ||
+            matrix_loop_counter(loop_counters[1], params,
+                                MatrixLoopLevel::L1,
+                                MatrixLoopParam::OY) == 0);
   }
 
-  // Return the accumulation entries needed by all simultaneously live outputs
+  // Count live [OC@L1][OY][OX] partial sums required by the schedule
+  //
+  // An outer output dimension contributes only when a reduction loop
+  // encloses it because those coordinates remain live across later terms
   static ac_int<32, false> accumulation_footprint(const MatrixParams &params) {
-    const bool include_x1 = matrix_loop_is_inside_reduction(
-        params, MatrixLoopLevel::L2, MatrixLoopDimension::OX);
-    const bool include_y1 = matrix_loop_is_inside_reduction(
-        params, MatrixLoopLevel::L2, MatrixLoopDimension::OY);
+    const bool includes_outer_ox = matrix_loop_is_inside_reduction(
+        params, MatrixLoopLevel::L2, MatrixLoopParam::OX);
+    const bool includes_outer_oy = matrix_loop_is_inside_reduction(
+        params, MatrixLoopLevel::L2, MatrixLoopParam::OY);
     ac_int<32, false> x_extent =
-        matrix_loop_bound(params, MatrixLoopLevel::L1, MatrixLoopDimension::OX);
+        matrix_loop_bound(params, MatrixLoopLevel::L1, MatrixLoopParam::OX);
     ac_int<32, false> y_extent =
-        matrix_loop_bound(params, MatrixLoopLevel::L1, MatrixLoopDimension::OY);
-    if (include_x1)
+        matrix_loop_bound(params, MatrixLoopLevel::L1, MatrixLoopParam::OY);
+    if (includes_outer_ox)
       x_extent *= matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                    MatrixLoopDimension::OX);
-    if (include_y1)
+                                    MatrixLoopParam::OX);
+    if (includes_outer_oy)
       y_extent *= matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                    MatrixLoopDimension::OY);
+                                    MatrixLoopParam::OY);
     return matrix_loop_bound(params, MatrixLoopLevel::L1,
-                             MatrixLoopDimension::OC) *
+                             MatrixLoopParam::OC) *
            y_extent * x_extent;
   }
 
@@ -612,7 +581,7 @@ SC_MODULE(CIMProcessor) {
     return matches;
   }
 
-  // Apply loader and compute transitions to the per-set state scoreboard
+  // Track FREE -> READY after fill and READY -> FREE after the final replay
   void set_scoreboard() {
     set_ready_channel.ResetRead();
     set_release_channel.ResetRead();
@@ -654,7 +623,10 @@ SC_MODULE(CIMProcessor) {
     }
   }
 
-  // Pack logical tiles sequentially around the physical set ring
+  // Allocate each descriptor sequence around the ring and fill its sets
+  //
+  // The descriptor is queued before its payload so compute can consume schedule
+  // metadata early, then wait only for each selected set to become READY
   void load_weights() {
     weight_channel.Reset();
     weight_descriptor_channel.Reset();
@@ -666,28 +638,28 @@ SC_MODULE(CIMProcessor) {
 
     Set next_set = 0;
     while (true) {
-      const CIMWeightDescriptor logical = weight_descriptor_channel.Pop();
+      const CIMWeightDescriptor descriptor = weight_descriptor_channel.Pop();
 
 #ifndef __SYNTHESIS__
-      if (logical.set_count == 0 || logical.set_count > B_SETS ||
-          logical.replay_count == 0) {
-        SC_REPORT_FATAL("CIMProcessor", "invalid resident weight tile");
+      if (descriptor.set_count == 0 || descriptor.set_count > B_SETS ||
+          descriptor.replay_count == 0) {
+        SC_REPORT_FATAL("CIMProcessor", "invalid resident weight sequence");
       }
 #endif
 
       ScheduledWeightDescriptor scheduled;
-      scheduled.logical = logical;
+      scheduled.logical = descriptor;
       scheduled.first_set = next_set;
       scheduled_weight_descriptor_enq.Push(scheduled);
 
-      ac_int<16, false> tile_slot = 0;
+      ac_int<16, false> sets_filled = 0;
       int k = 0;
       int span = 0;
       Set write_set = next_set;
 
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
-      while (tile_slot < logical.set_count) {
+      while (sets_filled < descriptor.set_count) {
         // Only the first payload beat needs to wait for ownership of this set
         if (k == 0 && span == 0) {
           while (!resident_set_has_state(write_set, SET_FREE)) {
@@ -702,7 +674,7 @@ SC_MODULE(CIMProcessor) {
         const bool set_complete = row_complete && k == K - 1;
         if (set_complete) {
           set_ready_channel.Push(write_set);
-          tile_slot++;
+          sets_filled++;
           write_set = next_resident_set(write_set);
           next_set = write_set;
           k = 0;
@@ -730,8 +702,11 @@ SC_MODULE(CIMProcessor) {
     return beat;
   }
 
-  // Fuse MatrixProcessor::push_inputs and push_weights into one direct CIM
-  // issue controller
+  // Consume resident-set descriptors while issuing the full compute schedule
+  //
+  // A descriptor is the only weight-lifetime policy seen here: it names a
+  // consecutive set sequence and how many times that sequence is replayed
+  // before its sets can be released
   void issue_operations() {
     params_in.Reset();
     input_channel.Reset();
@@ -748,12 +723,6 @@ SC_MODULE(CIMProcessor) {
 
     wait();
 
-    ScheduledWeightDescriptor descriptor;
-    Set selected_weight_set = 0;
-    ac_int<16, false> set_slot = 0;
-    ac_int<16, false> replay = 0;
-    bool need_descriptor = true;
-    bool selected_set_final_visit = false;
     while (true) {
       const MatrixParams params = params_in.Pop();
       process_accumulation_params_enq.Push(params);
@@ -774,22 +743,23 @@ SC_MODULE(CIMProcessor) {
         SC_REPORT_FATAL("CIMProcessor",
                         "currently does not support MX or replicated operands");
       }
-      const bool outer_k_context =
+      const bool outer_oc_partial_context =
           matrix_loop_bound(params, MatrixLoopLevel::L2,
-                            MatrixLoopDimension::OC) > 1 &&
+                            MatrixLoopParam::OC) > 1 &&
           matrix_loop_is_inside_reduction(params, MatrixLoopLevel::L2,
-                                          MatrixLoopDimension::OC);
-      if (outer_k_context) {
+                                          MatrixLoopParam::OC);
+      if (outer_oc_partial_context) {
         SC_REPORT_FATAL("CIMProcessor",
                         "outer output-column partial contexts are unsupported");
       }
 #if DOUBLE_BUFFERED_ACCUM_BUFFER
-      const bool outer_spatial_context =
+      const bool l2_output_context =
           matrix_loop_is_inside_reduction(params, MatrixLoopLevel::L2,
-                                          MatrixLoopDimension::OX) ||
+                                          MatrixLoopParam::OX) ||
           matrix_loop_is_inside_reduction(params, MatrixLoopLevel::L2,
-                                          MatrixLoopDimension::OY);
-      if (outer_spatial_context && params.write_output_to_accum_buffer) {
+                                          MatrixLoopParam::OY);
+      if (l2_output_context &&
+          params.write_output_to_accum_buffer) {
         SC_REPORT_FATAL(
             "CIMProcessor",
             "outer partial contexts cannot use banked accumulation output");
@@ -802,25 +772,30 @@ SC_MODULE(CIMProcessor) {
 #endif
 
       ac_int<LOOP_WIDTH, false> loop_counters[2][6];
-#pragma hls_unroll yes
-      for (int level = 0; level < 2; level++) {
-#pragma hls_unroll yes
-        for (int loop = 0; loop < 6; loop++) {
-          loop_counters[level][loop] = 0;
-        }
-      }
+      reset_loop_counters(loop_counters);
 
       const ac_int<32, false> total_ops = total_operations(params);
-      const bool reuse_weights = reuses_weights(params);
-      ac_int<3, false> outer_reuse_indices[2];
-      select_weight_reuse_indices(params, outer_reuse_indices);
+      const bool l1_ox_reuses_weights =
+          matrix_loop_reuses_weights(
+              params, MatrixLoopLevel::L1, MatrixLoopParam::OX);
+      const bool l1_oy_reuses_weights =
+          matrix_loop_reuses_weights(
+              params, MatrixLoopLevel::L1, MatrixLoopParam::OY);
+      // Walk the current descriptor in [replay][set] order
+      ScheduledWeightDescriptor descriptor;
+      Set selected_weight_set = 0;
+      ac_int<16, false> set_index = 0;
+      ac_int<16, false> replay_index = 0;
+      bool sequence_complete = true;
+      bool selected_set_is_on_final_replay = false;
 
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
       for (ac_int<32, false> step = 0; step < total_ops; step++) {
-        if (needs_weight_load(params, loop_counters, outer_reuse_indices,
-                              reuse_weights, step)) {
-          if (need_descriptor) {
+        if (weight_set_boundary(params, loop_counters,
+                                    l1_ox_reuses_weights,
+                                    l1_oy_reuses_weights)) {
+          if (sequence_complete) {
             descriptor = scheduled_weight_descriptor_deq.Pop();
 
 #ifndef __SYNTHESIS__
@@ -829,20 +804,20 @@ SC_MODULE(CIMProcessor) {
                 descriptor.first_set >= B_SETS ||
                 descriptor.logical.replay_count == 0) {
               SC_REPORT_FATAL("CIMProcessor",
-                              "invalid scheduled resident weight tile");
+                              "invalid scheduled weight descriptor");
             }
 #endif
 
-            set_slot = 0;
-            replay = 0;
-            need_descriptor = false;
+            set_index = 0;
+            replay_index = 0;
+            sequence_complete = false;
           }
 
           selected_weight_set =
-              resident_set_at_offset(descriptor.first_set, set_slot);
-          selected_set_final_visit =
-              replay == descriptor.logical.replay_count - 1;
-          if (replay == 0) {
+              resident_set_at_offset(descriptor.first_set, set_index);
+          selected_set_is_on_final_replay =
+              replay_index == descriptor.logical.replay_count - 1;
+          if (replay_index == 0) {
             while (!resident_set_has_state(selected_weight_set, SET_READY)) {
 #if ENABLE_PERF_COUNTERS
               mac_wait_weight_set_load_cycles++;
@@ -851,13 +826,13 @@ SC_MODULE(CIMProcessor) {
             }
           }
 
-          set_slot++;
-          if (set_slot == descriptor.logical.set_count) {
-            set_slot = 0;
-            replay++;
-            if (replay == descriptor.logical.replay_count) {
-              replay = 0;
-              need_descriptor = true;
+          set_index++;
+          if (set_index == descriptor.logical.set_count) {
+            set_index = 0;
+            replay_index++;
+            if (replay_index == descriptor.logical.replay_count) {
+              replay_index = 0;
+              sequence_complete = true;
             }
           }
         }
@@ -878,11 +853,12 @@ SC_MODULE(CIMProcessor) {
         mac_request_channel.Push(request);
 
         advance_loop_counters(loop_counters, params);
-        const bool leaves_selected_set =
+        const bool finishes_set_run =
             step + 1 == total_ops ||
-            needs_weight_load(params, loop_counters, outer_reuse_indices,
-                              reuse_weights, step + 1);
-        if (selected_set_final_visit && leaves_selected_set) {
+           weight_set_boundary(params, loop_counters,
+                                    l1_ox_reuses_weights,
+                                    l1_oy_reuses_weights);
+        if (selected_set_is_on_final_replay && finishes_set_run) {
           // The array independently blocks same-set writes until this accepted
           // MAC closes its physical issue window
           set_release_channel.Push(selected_weight_set);
@@ -894,104 +870,113 @@ SC_MODULE(CIMProcessor) {
           mac_wait_weight_set_load_cycles);
 #endif
 #ifndef __SYNTHESIS__
-      if (!need_descriptor) {
-        SC_REPORT_FATAL("CIMProcessor",
-                        "matrix job ended inside a resident weight tile");
+      if (!sequence_complete) {
+        SC_REPORT_FATAL(
+            "CIMProcessor",
+            "matrix job ended before completing its weight sequence");
       }
 #endif
     }
   }
 
-  // Match the address expression in MatrixProcessor accumulation and write-back
+  // Return whether one semantic loop is at its first iteration
+  static bool loop_at_start(const MatrixParams &params,
+                            const ac_int<LOOP_WIDTH, false> loop_counters[2][6],
+                            MatrixLoopLevel level,
+                            MatrixLoopParam loop_param) {
+    return matrix_loop_counter(loop_counters[matrix_loop_storage_level(level)],
+                               params, level, loop_param) == 0;
+  }
+
+  // Return whether one semantic loop is at its final iteration
+  static bool loop_at_end(const MatrixParams &params,
+                          const ac_int<LOOP_WIDTH, false> loop_counters[2][6],
+                          MatrixLoopLevel level,
+                          MatrixLoopParam loop_param) {
+    return matrix_loop_counter(loop_counters[matrix_loop_storage_level(level)],
+                               params, level, loop_param) ==
+           matrix_loop_bound(params, level, loop_param) - 1;
+  }
+
+  // Address one live output as [OC@L1][combined OY][combined OX]
+  //
+  // Outer OX/OY participates only when nested inside an unfinished reduction;
+  // otherwise that outer loop completes one output before starting the next and
+  // may reuse the same accumulation-buffer address
   static ac_int<16, false> accumulation_address(
       const MatrixParams &params,
       const ac_int<LOOP_WIDTH, false> loop_counters[2][6]) {
-    const bool include_x1 = matrix_loop_is_inside_reduction(
-        params, MatrixLoopLevel::L2, MatrixLoopDimension::OX);
-    const bool include_y1 = matrix_loop_is_inside_reduction(
-        params, MatrixLoopLevel::L2, MatrixLoopDimension::OY);
+    const bool includes_outer_ox = matrix_loop_is_inside_reduction(
+        params, MatrixLoopLevel::L2, MatrixLoopParam::OX);
+    const bool includes_outer_oy = matrix_loop_is_inside_reduction(
+        params, MatrixLoopLevel::L2, MatrixLoopParam::OY);
     const ac_int<16, false> x0_extent =
-        matrix_loop_bound(params, MatrixLoopLevel::L1, MatrixLoopDimension::OX);
+        matrix_loop_bound(params, MatrixLoopLevel::L1, MatrixLoopParam::OX);
     const ac_int<16, false> y0_extent =
-        matrix_loop_bound(params, MatrixLoopLevel::L1, MatrixLoopDimension::OY);
+        matrix_loop_bound(params, MatrixLoopLevel::L1, MatrixLoopParam::OY);
     ac_int<16, false> x_extent = x0_extent;
     ac_int<16, false> y_extent = y0_extent;
-    ac_int<16, false> x = loop_counters[1][matrix_loop_position(
-        params, MatrixLoopLevel::L1, MatrixLoopDimension::OX)];
-    ac_int<16, false> y = loop_counters[1][matrix_loop_position(
-        params, MatrixLoopLevel::L1, MatrixLoopDimension::OY)];
-    if (include_x1) {
+    ac_int<16, false> x = matrix_loop_counter(
+        loop_counters[1], params, MatrixLoopLevel::L1, MatrixLoopParam::OX);
+    ac_int<16, false> y = matrix_loop_counter(
+        loop_counters[1], params, MatrixLoopLevel::L1, MatrixLoopParam::OY);
+    if (includes_outer_ox) {
       x_extent *= matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                    MatrixLoopDimension::OX);
-      x += loop_counters[0][matrix_loop_position(params, MatrixLoopLevel::L2,
-                                                 MatrixLoopDimension::OX)] *
+                                    MatrixLoopParam::OX);
+      x += matrix_loop_counter(loop_counters[0], params, MatrixLoopLevel::L2,
+                               MatrixLoopParam::OX) *
            x0_extent;
     }
-    if (include_y1) {
+    if (includes_outer_oy) {
       y_extent *= matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                    MatrixLoopDimension::OY);
-      y += loop_counters[0][matrix_loop_position(params, MatrixLoopLevel::L2,
-                                                 MatrixLoopDimension::OY)] *
+                                    MatrixLoopParam::OY);
+      y += matrix_loop_counter(loop_counters[0], params, MatrixLoopLevel::L2,
+                               MatrixLoopParam::OY) *
            y0_extent;
     }
-    return loop_counters[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                                 MatrixLoopDimension::OC)] *
+    return matrix_loop_counter(loop_counters[1], params, MatrixLoopLevel::L1,
+                               MatrixLoopParam::OC) *
                y_extent * x_extent +
            y * x_extent + x;
   }
 
-  // Match MatrixProcessor::process_accumulation is_non_accumulating_tile
-  static bool starts_accumulation(
+  // Return whether this is the first IC/FX/FY contribution to one output
+  static bool starts_output_reduction(
       const MatrixParams &params,
       const ac_int<LOOP_WIDTH, false> loop_counters[2][6]) {
-    return loop_counters[0][matrix_loop_position(
-               params, MatrixLoopLevel::L2, MatrixLoopDimension::IC)] == 0 &&
-           loop_counters[1][matrix_loop_position(
-               params, MatrixLoopLevel::L1, MatrixLoopDimension::IC)] == 0 &&
-           loop_counters[1][matrix_loop_position(
-               params, MatrixLoopLevel::L1, MatrixLoopDimension::FX)] == 0 &&
-           loop_counters[0][matrix_loop_position(
-               params, MatrixLoopLevel::L2, MatrixLoopDimension::FY)] == 0 &&
-           loop_counters[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                                 MatrixLoopDimension::FY)] == 0;
+    return loop_at_start(params, loop_counters, MatrixLoopLevel::L2,
+                         MatrixLoopParam::IC) &&
+           loop_at_start(params, loop_counters, MatrixLoopLevel::L1,
+                         MatrixLoopParam::IC) &&
+           loop_at_start(params, loop_counters, MatrixLoopLevel::L1,
+                         MatrixLoopParam::FX) &&
+           loop_at_start(params, loop_counters, MatrixLoopLevel::L2,
+                         MatrixLoopParam::FY) &&
+           loop_at_start(params, loop_counters, MatrixLoopLevel::L1,
+                         MatrixLoopParam::FY);
   }
 
-  // Match MatrixProcessor::write_back accumulation_finished
-  static bool finishes_accumulation(
+  // Return whether this is the final IC/FX/FY contribution to one output
+  static bool finishes_output_reduction(
       const MatrixParams &params,
       const ac_int<LOOP_WIDTH, false> loop_counters[2][6]) {
-    return loop_counters[0][matrix_loop_position(params, MatrixLoopLevel::L2,
-                                                 MatrixLoopDimension::IC)] ==
-               matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                 MatrixLoopDimension::IC) -
-                   1 &&
-           loop_counters[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                                 MatrixLoopDimension::IC)] ==
-               matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                 MatrixLoopDimension::IC) -
-                   1 &&
-           loop_counters[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                                 MatrixLoopDimension::FX)] ==
-               matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                 MatrixLoopDimension::FX) -
-                   1 &&
-           loop_counters[0][matrix_loop_position(params, MatrixLoopLevel::L2,
-                                                 MatrixLoopDimension::FY)] ==
-               matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                 MatrixLoopDimension::FY) -
-                   1 &&
-           loop_counters[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                                 MatrixLoopDimension::FY)] ==
-               matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                 MatrixLoopDimension::FY) -
-                   1;
+    return loop_at_end(params, loop_counters, MatrixLoopLevel::L2,
+                       MatrixLoopParam::IC) &&
+           loop_at_end(params, loop_counters, MatrixLoopLevel::L1,
+                       MatrixLoopParam::IC) &&
+           loop_at_end(params, loop_counters, MatrixLoopLevel::L1,
+                       MatrixLoopParam::FX) &&
+           loop_at_end(params, loop_counters, MatrixLoopLevel::L2,
+                       MatrixLoopParam::FY) &&
+           loop_at_end(params, loop_counters, MatrixLoopLevel::L1,
+                       MatrixLoopParam::FY);
   }
 
-  // Return whether this operation writes a partial sum for a later operation
-  static bool writes_accumulation(
+  // Return whether the sum must remain in MatrixUnit's accumulation buffer
+  static bool stores_partial_sum(
       const MatrixParams &params,
       const ac_int<LOOP_WIDTH, false> loop_counters[2][6]) {
-    return !finishes_accumulation(params, loop_counters) ||
+    return !finishes_output_reduction(params, loop_counters) ||
            (DOUBLE_BUFFERED_ACCUM_BUFFER &&
             params.write_output_to_accum_buffer);
   }
@@ -1002,37 +987,39 @@ SC_MODULE(CIMProcessor) {
       const ac_int<LOOP_WIDTH, false> loop_counters[2][6]) {
     const bool finishes_x_context =
         !matrix_loop_is_inside_reduction(params, MatrixLoopLevel::L2,
-                                         MatrixLoopDimension::OX) ||
-        loop_counters[0][matrix_loop_position(params, MatrixLoopLevel::L2,
-                                              MatrixLoopDimension::OX)] ==
-            matrix_loop_bound(params, MatrixLoopLevel::L2,
-                              MatrixLoopDimension::OX) -
-                1;
+                                         MatrixLoopParam::OX) ||
+        loop_at_end(params, loop_counters, MatrixLoopLevel::L2,
+                    MatrixLoopParam::OX);
     const bool finishes_y_context =
         !matrix_loop_is_inside_reduction(params, MatrixLoopLevel::L2,
-                                         MatrixLoopDimension::OY) ||
-        loop_counters[0][matrix_loop_position(params, MatrixLoopLevel::L2,
-                                              MatrixLoopDimension::OY)] ==
-            matrix_loop_bound(params, MatrixLoopLevel::L2,
-                              MatrixLoopDimension::OY) -
-                1;
-    return finishes_accumulation(params, loop_counters) && finishes_x_context &&
-           finishes_y_context &&
-           loop_counters[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                                 MatrixLoopDimension::OC)] ==
-               matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                 MatrixLoopDimension::OC) -
-                   1 &&
-           loop_counters[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                                 MatrixLoopDimension::OX)] ==
-               matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                 MatrixLoopDimension::OX) -
-                   1 &&
-           loop_counters[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                                 MatrixLoopDimension::OY)] ==
-               matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                 MatrixLoopDimension::OY) -
-                   1;
+                                         MatrixLoopParam::OY) ||
+        loop_at_end(params, loop_counters, MatrixLoopLevel::L2,
+                    MatrixLoopParam::OY);
+    return finishes_output_reduction(params, loop_counters) &&
+           finishes_x_context && finishes_y_context &&
+           loop_at_end(params, loop_counters, MatrixLoopLevel::L1,
+                       MatrixLoopParam::OC) &&
+           loop_at_end(params, loop_counters, MatrixLoopLevel::L1,
+                       MatrixLoopParam::OX) &&
+           loop_at_end(params, loop_counters, MatrixLoopLevel::L1,
+                       MatrixLoopParam::OY);
+  }
+
+  // Return whether this operation begins a new N-lane bias vector
+  static bool starts_bias_vector(
+      const MatrixParams &params,
+      const ac_int<LOOP_WIDTH, false> inner_loop_counters[6]) {
+    // Bias is indexed by OC only, so every loop nested inside OC@L1 must
+    // restart
+    const auto inner_oc_position = matrix_loop_position(
+        params, MatrixLoopLevel::L1, MatrixLoopParam::OC);
+    bool starts = true;
+#pragma hls_unroll yes
+    for (int slot = 0; slot < LOOP_SLOT_COUNT; slot++) {
+      starts = starts &&
+               (slot <= inner_oc_position || inner_loop_counters[slot] == 0);
+    }
+    return starts;
   }
 
   // Pop the one complete reduced MAC-result beat and unpack its N lanes
@@ -1089,44 +1076,26 @@ SC_MODULE(CIMProcessor) {
     while (true) {
       const MatrixParams params = process_accumulation_params_deq.Pop();
       ac_int<LOOP_WIDTH, false> loop_counters[2][6];
-#pragma hls_unroll yes
-      for (int level = 0; level < 2; level++) {
-#pragma hls_unroll yes
-        for (int loop = 0; loop < 6; loop++) {
-          loop_counters[level][loop] = 0;
-        }
-      }
+      reset_loop_counters(loop_counters);
 
       Pack1D<Buffer, N> bias = Pack1D<Buffer, N>::zero();
-      int bias_reuse_indices[4] = {5, 5, 5, 5};
-      for (int loop = 5;
-           loop > matrix_loop_position(params, MatrixLoopLevel::L1,
-                                       MatrixLoopDimension::OC);
-           loop--) {
-        bias_reuse_indices[5 - loop] = loop;
-      }
-
       const ac_int<32, false> total_ops = total_operations(params);
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
       for (ac_int<32, false> step = 0; step < total_ops; step++) {
         AccumulationMetadata metadata;
         metadata.result = result_to_accum_channel.Pop();
-        metadata.first = starts_accumulation(params, loop_counters);
-        metadata.initial = Pack1D<Buffer, N>::zero();
-        metadata.bank = accumulation_buffer_bank;
+        metadata.starts_reduction =
+            starts_output_reduction(params, loop_counters);
+        metadata.initial_value = Pack1D<Buffer, N>::zero();
+        metadata.buffer_bank = accumulation_buffer_bank;
 
-        if (metadata.first) {
+        if (metadata.starts_reduction) {
           if (params.has_bias) {
-            const bool read_bias =
-                loop_counters[1][bias_reuse_indices[0]] == 0 &&
-                loop_counters[1][bias_reuse_indices[1]] == 0 &&
-                loop_counters[1][bias_reuse_indices[2]] == 0 &&
-                loop_counters[1][bias_reuse_indices[3]] == 0;
-            if (read_bias) {
+            if (starts_bias_vector(params, loop_counters[1])) {
               bias = bias_channel.Pop();
             }
-            metadata.initial = bias;
+            metadata.initial_value = bias;
           }
         } else {
           accumulation_buffer_read_address[accumulation_buffer_bank].Push(
@@ -1162,12 +1131,12 @@ SC_MODULE(CIMProcessor) {
 #pragma hls_pipeline_stall_mode flush
     while (true) {
       const AccumulationMetadata metadata = accumulation_metadata_deq.Pop();
-      Pack1D<Buffer, N> previous = metadata.initial;
+      Pack1D<Buffer, N> previous = metadata.initial_value;
 
-      if (!metadata.first) {
+      if (!metadata.starts_reduction) {
 #pragma hls_unroll yes
         for (int bank = 0; bank < ACCUM_BUFFER_BANKS; bank++) {
-          if (metadata.bank == bank) {
+          if (metadata.buffer_bank == bank) {
             previous = accumulation_buffer_read_data[bank].Pop();
           }
         }
@@ -1205,23 +1174,17 @@ SC_MODULE(CIMProcessor) {
     while (true) {
       const MatrixParams params = write_back_params_deq.Pop();
       ac_int<LOOP_WIDTH, false> loop_counters[2][6];
-#pragma hls_unroll yes
-      for (int level = 0; level < 2; level++) {
-#pragma hls_unroll yes
-        for (int loop = 0; loop < 6; loop++) {
-          loop_counters[level][loop] = 0;
-        }
-      }
+      reset_loop_counters(loop_counters);
 
       const ac_int<32, false> total_ops = total_operations(params);
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
       for (ac_int<32, false> step = 0; step < total_ops; step++) {
         const Pack1D<Buffer, N> accumulated = accum_to_wb_deq.Pop();
-        const bool write_accumulation =
-            writes_accumulation(params, loop_counters);
+        const bool store_partial_sum =
+            stores_partial_sum(params, loop_counters);
 
-        if (!write_accumulation) {
+        if (!store_partial_sum) {
           accum_output_enq.Push(accumulated);
         } else {
           BufferWriteRequest<Pack1D<Buffer, N>> request;

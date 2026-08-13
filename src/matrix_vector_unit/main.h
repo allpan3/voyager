@@ -177,15 +177,15 @@ struct MatrixVectorUnit<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
       const MatrixParams params = fetch_input_param.Pop();
 
       loop_t K2 = matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                    MatrixLoopDimension::OC);
+                                    MatrixLoopParam::OC);
       loop_t K1 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                    MatrixLoopDimension::OC);
+                                    MatrixLoopParam::OC);
       loop_t k_bound = (K2 * K1 + bs - 1) / bs - 1;
 
       loop_t C2 = matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                    MatrixLoopDimension::IC);
+                                    MatrixLoopParam::IC);
       loop_t C1 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                    MatrixLoopDimension::IC);
+                                    MatrixLoopParam::IC);
       loop_t c_bound = (C2 * C1 + width - 1) / width - 1;
 
 #pragma hls_pipeline_init_interval 1
@@ -220,15 +220,15 @@ struct MatrixVectorUnit<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
       const MatrixParams params = process_input_param.Pop();
 
       loop_t K2 = matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                    MatrixLoopDimension::OC);
+                                    MatrixLoopParam::OC);
       loop_t K1 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                    MatrixLoopDimension::OC);
+                                    MatrixLoopParam::OC);
       loop_t k_bound = (K2 * K1 + bs - 1) / bs - 1;
 
       loop_t C2 = matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                    MatrixLoopDimension::IC);
+                                    MatrixLoopParam::IC);
       loop_t C1 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                    MatrixLoopDimension::IC);
+                                    MatrixLoopParam::IC);
       ac_int<32, false> C = C2 * C1;
       loop_t c_bound = (C + width - 1) / width - 1;
 
@@ -282,15 +282,15 @@ struct MatrixVectorUnit<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
       const MatrixParams params = process_input_scale_param.Pop();
 
       loop_t K2 = matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                    MatrixLoopDimension::OC);
+                                    MatrixLoopParam::OC);
       loop_t K1 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                    MatrixLoopDimension::OC);
+                                    MatrixLoopParam::OC);
       loop_t k_bound = (K2 * K1 + bs - 1) / bs - 1;
 
       loop_t C2 = matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                    MatrixLoopDimension::IC);
+                                    MatrixLoopParam::IC);
       loop_t C1 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                    MatrixLoopDimension::IC);
+                                    MatrixLoopParam::IC);
       loop_t c_bound = (C2 * C1 + width - 1) / width - 1;
 
       constexpr int buffer_width = Scale::width * width / bs;
@@ -336,15 +336,15 @@ struct MatrixVectorUnit<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
       start.SyncPush();
 
       loop_t K1 = matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                    MatrixLoopDimension::OC);
+                                    MatrixLoopParam::OC);
       loop_t K0 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                    MatrixLoopDimension::OC);
+                                    MatrixLoopParam::OC);
       loop_t k_bound = (K1 * K0 + bs - 1) / bs - 1;
 
       loop_t C2 = matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                    MatrixLoopDimension::IC);
+                                    MatrixLoopParam::IC);
       loop_t C1 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                    MatrixLoopDimension::IC);
+                                    MatrixLoopParam::IC);
       ac_int<32, false> C = C2 * C1;
       loop_t c_bound = (C + width - 1) / width - 1;
 
@@ -387,13 +387,13 @@ struct MatrixVectorUnit<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
       const MatrixParams params = fetch_weight_dq_qparams_param.Pop();
 
       loop_t K2 = matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                    MatrixLoopDimension::OC);
+                                    MatrixLoopParam::OC);
       loop_t K1 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                    MatrixLoopDimension::OC);
+                                    MatrixLoopParam::OC);
       loop_t C2 = matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                    MatrixLoopDimension::IC);
+                                    MatrixLoopParam::IC);
       loop_t C1 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                    MatrixLoopDimension::IC);
+                                    MatrixLoopParam::IC);
       ac_int<32, false> C = C2 * C1;
       loop_t c_bound = (C + width - 1) / width - 1;
       loop_t k_bound = (K2 * K1 + bs - 1) / bs - 1;
@@ -426,13 +426,13 @@ struct MatrixVectorUnit<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
       const MatrixParams params = process_weight_dq_qparams_param.Pop();
 
       loop_t K2 = matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                    MatrixLoopDimension::OC);
+                                    MatrixLoopParam::OC);
       loop_t K1 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                    MatrixLoopDimension::OC);
+                                    MatrixLoopParam::OC);
       loop_t C2 = matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                    MatrixLoopDimension::IC);
+                                    MatrixLoopParam::IC);
       loop_t C1 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                    MatrixLoopDimension::IC);
+                                    MatrixLoopParam::IC);
       ac_int<32, false> C = C2 * C1;
       loop_t c_bound = (C + width - 1) / width - 1;
       loop_t k_bound = (K2 * K1 + bs - 1) / bs - 1;
@@ -484,13 +484,13 @@ struct MatrixVectorUnit<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
       const MatrixParams params = fetch_weight_param.Pop();
 
       loop_t K2 = matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                    MatrixLoopDimension::OC);
+                                    MatrixLoopParam::OC);
       loop_t K1 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                    MatrixLoopDimension::OC);
+                                    MatrixLoopParam::OC);
       loop_t C2 = matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                    MatrixLoopDimension::IC);
+                                    MatrixLoopParam::IC);
       loop_t C1 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                    MatrixLoopDimension::IC);
+                                    MatrixLoopParam::IC);
       ac_int<32, false> C = C2 * C1;
       loop_t c_bound = (C + width - 1) / width - 1;
       loop_t k_bound = (K2 * K1 + bs - 1) / bs - 1;
@@ -532,13 +532,13 @@ struct MatrixVectorUnit<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
       const MatrixParams params = process_weight_param.Pop();
 
       loop_t K2 = matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                    MatrixLoopDimension::OC);
+                                    MatrixLoopParam::OC);
       loop_t K1 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                    MatrixLoopDimension::OC);
+                                    MatrixLoopParam::OC);
       loop_t C2 = matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                    MatrixLoopDimension::IC);
+                                    MatrixLoopParam::IC);
       loop_t C1 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                    MatrixLoopDimension::IC);
+                                    MatrixLoopParam::IC);
       loop_t k_bound = (K2 * K1 + bs - 1) / bs - 1;
       loop_t c_bound = (C2 * C1 + width - 1) / width - 1;
 
@@ -602,13 +602,13 @@ struct MatrixVectorUnit<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
       const MatrixParams params = process_weight_scale_param.Pop();
 
       loop_t K2 = matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                    MatrixLoopDimension::OC);
+                                    MatrixLoopParam::OC);
       loop_t K1 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                    MatrixLoopDimension::OC);
+                                    MatrixLoopParam::OC);
       loop_t C2 = matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                    MatrixLoopDimension::IC);
+                                    MatrixLoopParam::IC);
       loop_t C1 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                    MatrixLoopDimension::IC);
+                                    MatrixLoopParam::IC);
       loop_t c_bound = (C2 * C1 + width - 1) / width - 1;
       loop_t k_bound = (K2 * K1 + bs - 1) / bs - 1;
 
@@ -654,9 +654,9 @@ struct MatrixVectorUnit<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
       const MatrixParams params = fetch_bias_param.Pop();
 
       loop_t K2 = matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                    MatrixLoopDimension::OC);
+                                    MatrixLoopParam::OC);
       loop_t K1 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                    MatrixLoopDimension::OC);
+                                    MatrixLoopParam::OC);
       loop_t k_bound = (K2 * K1 + bs - 1) / bs - 1;
 
 #pragma hls_pipeline_init_interval 1
@@ -694,13 +694,13 @@ struct MatrixVectorUnit<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
       MatrixParams params = run_accumulation_param.Pop();
 
       loop_t K2 = matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                    MatrixLoopDimension::OC);
+                                    MatrixLoopParam::OC);
       loop_t K1 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                    MatrixLoopDimension::OC);
+                                    MatrixLoopParam::OC);
       loop_t C2 = matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                    MatrixLoopDimension::IC);
+                                    MatrixLoopParam::IC);
       loop_t C1 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                    MatrixLoopDimension::IC);
+                                    MatrixLoopParam::IC);
       loop_t c_bound = (C2 * C1 + width - 1) / width - 1;
       loop_t k_bound = (K2 * K1 + bs - 1) / bs - 1;
 

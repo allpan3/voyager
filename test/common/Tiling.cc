@@ -155,13 +155,11 @@ void assign_loop(Tiling& tiling, std::size_t semantic_level,
 
 // Preserve the legacy pair of innermost L1 spatial reuse slots
 void set_legacy_weight_reuse_indices(Tiling& tiling) {
-  if (tiling.x_loop_idx[kL1Level] == 5 ||
-      tiling.y_loop_idx[kL1Level] == 5) {
+  if (tiling.x_loop_idx[kL1Level] == 5 || tiling.y_loop_idx[kL1Level] == 5) {
     tiling.weight_reuse_idx[0] = 5;
     tiling.weight_reuse_idx[1] = 5;
   }
-  if (tiling.x_loop_idx[kL1Level] == 4 ||
-      tiling.y_loop_idx[kL1Level] == 4) {
+  if (tiling.x_loop_idx[kL1Level] == 4 || tiling.y_loop_idx[kL1Level] == 4) {
     tiling.weight_reuse_idx[0] = 4;
   }
 }
@@ -195,7 +193,8 @@ const char* tiling_loop_name(const Tiling& tiling, int level, int slot) {
   if (tiling.reduction_loop_idx[level] == slot) return "IC";
   if (tiling.weight_loop_idx[level] == slot) return "OC";
   if ((level == kL1Level && tiling.fx_loop_idx == slot) ||
-      (level == kL2Level && slot == 5)) return "FX";
+      (level == kL2Level && slot == 5))
+    return "FX";
   if (tiling.fy_loop_idx[level] == slot) return "FY";
   return "?";
 }
@@ -276,7 +275,7 @@ std::ostream& operator<<(std::ostream& os, const Tiling& tiling) {
   os << "Schedule:" << std::endl;
   for (int level = 0; level < 2; level++) {
     os << (level == kL2Level ? "  L2 outer -> inner: "
-                            : "  L1 outer -> inner: ");
+                             : "  L1 outer -> inner: ");
     for (int slot = 0; slot < 6; slot++) {
       if (slot != 0) os << ", ";
       os << tiling_loop_name(tiling, level, slot) << "="

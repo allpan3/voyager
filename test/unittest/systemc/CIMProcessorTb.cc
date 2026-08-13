@@ -300,8 +300,6 @@ SC_MODULE(CIMProcessorTb) {
     params.x_loop_idx[1] = 4;
     params.reduction_loop_idx[1] = 5;
 
-    params.weight_reuse_idx[0] = 0;
-    params.weight_reuse_idx[1] = 1;
     params.use_input_codebook = false;
     params.use_weight_codebook = false;
     return params;
@@ -640,7 +638,7 @@ SC_MODULE(CIMProcessorTb) {
   // Send a no-accumulation stream that reuses one resident weight set
   void send_throughput_job(int operations, int weight_pattern,
                            int input_pattern) {
-    queue_weight_descriptors({make_weight_descriptor(1, 1)});
+    queue_weight_descriptors({make_weight_descriptor(1, operations)});
     params_channel.Push(make_throughput_params(operations));
     start_channel.SyncPop();
 
@@ -971,7 +969,7 @@ SC_MODULE(CIMProcessorTb) {
       expect_output(label.str(), reused_x, 3);
     }
     send_job(make_weight_reuse_params(true), {20, 20, 20, 20},
-             {true, false, false, false}, {make_weight_descriptor(1, 1)}, 1);
+             {true, false, false, false}, {make_weight_descriptor(1, 4)}, 1);
 
     const BufferVector reused_y = expected_partial(2, 30);
     for (int output_y = 0; output_y < 4; output_y++) {
@@ -980,7 +978,7 @@ SC_MODULE(CIMProcessorTb) {
       expect_output(label.str(), reused_y, 3);
     }
     send_job(make_weight_reuse_params(false), {30, 30, 30, 30},
-             {true, false, false, false}, {make_weight_descriptor(1, 1)}, 2);
+             {true, false, false, false}, {make_weight_descriptor(1, 4)}, 2);
 
     const BufferVector backpressure_bias = queue_bias(100);
     BufferVector backpressured = backpressure_bias;
@@ -993,14 +991,15 @@ SC_MODULE(CIMProcessorTb) {
     const BufferVector interleaved_bias = queue_bias(200);
     BufferVector interleaved_0 = interleaved_bias;
     add_vector(interleaved_0, expected_partial(12, 120));
-    add_vector(interleaved_0, expected_partial(12, 122));
+    add_vector(interleaved_0, expected_partial(12, 121));
     BufferVector interleaved_1 = interleaved_bias;
-    add_vector(interleaved_1, expected_partial(12, 121));
-    add_vector(interleaved_1, expected_partial(12, 123));
+    add_vector(interleaved_1, expected_partial(13, 120));
+    add_vector(interleaved_1, expected_partial(13, 121));
     expect_output("interleaved accumulation address 0", interleaved_0, 0);
     expect_output("interleaved accumulation address 1", interleaved_1, 0);
-    send_job(make_interleaved_accumulation_params(), {120, 121, 122, 123},
-             {true, true, true, true}, make_weight_descriptors(4), 12);
+    send_job(make_interleaved_accumulation_params(), {120, 120, 121, 121},
+             {true, false, true, false},
+             {make_weight_descriptor(2, 1)}, {12, 13, 12, 13});
 
     while (checked_outputs < kThroughputOperations + 13) {
       tick();
@@ -1051,12 +1050,10 @@ SC_MODULE(CIMProcessorTb) {
       for (int x = 0; x < kStridedX; x++) {
         for (int reduction = 0; reduction < kStridedReduction; reduction++) {
           for (int y = 0; y < kStridedY; y++) {
-            const int operation =
-                ((k * kStridedX + x) * kStridedReduction + reduction) *
-                    kStridedY +
-                y;
-            strided_weight_patterns.push_back(kStridedWeightBase + operation);
-            strided_weight_loads.push_back(true);
+            const int weight_pattern =
+                kStridedWeightBase + k * kStridedReduction + reduction;
+            strided_weight_patterns.push_back(weight_pattern);
+            strided_weight_loads.push_back(y == 0);
           }
         }
       }
@@ -1064,14 +1061,14 @@ SC_MODULE(CIMProcessorTb) {
     for (int k = 0; k < kStridedK; k++) {
       for (int x = 0; x < kStridedX; x++) {
         for (int y = 0; y < kStridedY; y++) {
-          const int first_operation =
-              ((k * kStridedX + x) * kStridedReduction) * kStridedY + y;
-          const int second_operation = first_operation + kStridedY;
           BufferVector expected = expected_partial(
-              kStridedInputPattern, kStridedWeightBase + first_operation);
-          add_vector(expected,
-                     expected_partial(kStridedInputPattern,
-                                      kStridedWeightBase + second_operation));
+              kStridedInputPattern,
+              kStridedWeightBase + k * kStridedReduction);
+          add_vector(
+              expected,
+              expected_partial(
+                  kStridedInputPattern,
+                  kStridedWeightBase + k * kStridedReduction + 1));
           std::ostringstream label;
           label << "strided accumulation K " << k << " X " << x << " Y " << y;
           expect_output(label.str(), expected, 0);
@@ -1080,7 +1077,8 @@ SC_MODULE(CIMProcessorTb) {
     }
     send_job(make_strided_accumulation_params(), strided_weight_patterns,
              strided_weight_loads,
-             make_weight_descriptors(strided_weight_patterns.size()),
+             make_weight_descriptors(kStridedK * kStridedX *
+                                     kStridedReduction),
              kStridedInputPattern);
 
     if constexpr (B_SETS >= 2) {

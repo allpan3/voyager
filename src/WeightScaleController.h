@@ -292,24 +292,31 @@ SC_MODULE(WeightScaleController) {
         }
       }
 
-      // set irrelevant loop bounds to 0
-      loop_bounds[1][params.weight_reuse_idx[0]] = 0;
-      loop_bounds[1][params.weight_reuse_idx[1]] = 0;
+      if (matrix_loop_reuses_weights(
+              params, MatrixLoopLevel::L1, MatrixLoopParam::OX)) {
+        loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
+                                            MatrixLoopParam::OX)] = 0;
+      }
+      if (matrix_loop_reuses_weights(
+              params, MatrixLoopLevel::L1, MatrixLoopParam::OY)) {
+        loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
+                                            MatrixLoopParam::OY)] = 0;
+      }
 
       ac_int<LOOP_WIDTH, false> K2 = matrix_loop_bound(
-          params, MatrixLoopLevel::L2, MatrixLoopDimension::OC);
+          params, MatrixLoopLevel::L2, MatrixLoopParam::OC);
       ac_int<LOOP_WIDTH, false> FY1 = matrix_loop_bound(
-          params, MatrixLoopLevel::L2, MatrixLoopDimension::FY);
+          params, MatrixLoopLevel::L2, MatrixLoopParam::FY);
       ac_int<LOOP_WIDTH, false> C2 = matrix_loop_bound(
-          params, MatrixLoopLevel::L2, MatrixLoopDimension::IC);
+          params, MatrixLoopLevel::L2, MatrixLoopParam::IC);
       ac_int<LOOP_WIDTH, false> FY0 = matrix_loop_bound(
-          params, MatrixLoopLevel::L1, MatrixLoopDimension::FY);
+          params, MatrixLoopLevel::L1, MatrixLoopParam::FY);
       ac_int<LOOP_WIDTH, false> FX = matrix_loop_bound(
-          params, MatrixLoopLevel::L1, MatrixLoopDimension::FX);
+          params, MatrixLoopLevel::L1, MatrixLoopParam::FX);
       ac_int<LOOP_WIDTH, false> C1 = matrix_loop_bound(
-          params, MatrixLoopLevel::L1, MatrixLoopDimension::IC);
+          params, MatrixLoopLevel::L1, MatrixLoopParam::IC);
       ac_int<LOOP_WIDTH, false> K1 = matrix_loop_bound(
-          params, MatrixLoopLevel::L1, MatrixLoopDimension::OC);
+          params, MatrixLoopLevel::L1, MatrixLoopParam::OC);
 
       // extra loop to control reuse which only occurs during transpose and
       // when cols > rows
@@ -318,7 +325,7 @@ SC_MODULE(WeightScaleController) {
       if (ratio > 1 && params.weight_transpose && C2 >= ratio) {
         // we can reuse the weights already in the buffer
         loop_bounds[0][matrix_loop_position(params, MatrixLoopLevel::L2,
-                                            MatrixLoopDimension::IC)] =
+                                            MatrixLoopParam::IC)] =
             C2 / ratio - 1;
         transpose_reuse_bound = ratio - 1;
       }
@@ -333,27 +340,27 @@ SC_MODULE(WeightScaleController) {
       if (C2 == 1) {
         // OX loop can be absorbed
         if (matrix_loop_position(params, MatrixLoopLevel::L2,
-                                 MatrixLoopDimension::OC) <
+                                 MatrixLoopParam::OC) <
             matrix_loop_position(params, MatrixLoopLevel::L2,
-                                 MatrixLoopDimension::OX)) {
+                                 MatrixLoopParam::OX)) {
           if (!reuse_weights) {
             spatial_reuse_bound = matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                                    MatrixLoopDimension::OX);
+                                                    MatrixLoopParam::OX);
           }
           loop_bounds[0][matrix_loop_position(params, MatrixLoopLevel::L2,
-                                              MatrixLoopDimension::OX)] = 0;
+                                              MatrixLoopParam::OX)] = 0;
         }
         // OY loop can be absorbed
         if (matrix_loop_position(params, MatrixLoopLevel::L2,
-                                 MatrixLoopDimension::OC) <
+                                 MatrixLoopParam::OC) <
             matrix_loop_position(params, MatrixLoopLevel::L2,
-                                 MatrixLoopDimension::OY)) {
+                                 MatrixLoopParam::OY)) {
           if (!reuse_weights) {
             spatial_reuse_bound *= matrix_loop_bound(
-                params, MatrixLoopLevel::L2, MatrixLoopDimension::OY);
+                params, MatrixLoopLevel::L2, MatrixLoopParam::OY);
           }
           loop_bounds[0][matrix_loop_position(params, MatrixLoopLevel::L2,
-                                              MatrixLoopDimension::OY)] = 0;
+                                              MatrixLoopParam::OY)] = 0;
         }
       }
 
@@ -385,19 +392,19 @@ SC_MODULE(WeightScaleController) {
                                 ac_int<LOOP_WIDTH, false> c1 =
                                     loop_counters[1][matrix_loop_position(
                                         params, MatrixLoopLevel::L1,
-                                        MatrixLoopDimension::IC)];
+                                        MatrixLoopParam::IC)];
                                 ac_int<LOOP_WIDTH, false> fx =
                                     loop_counters[1][matrix_loop_position(
                                         params, MatrixLoopLevel::L1,
-                                        MatrixLoopDimension::FX)];
+                                        MatrixLoopParam::FX)];
                                 ac_int<LOOP_WIDTH, false> fy0 =
                                     loop_counters[1][matrix_loop_position(
                                         params, MatrixLoopLevel::L1,
-                                        MatrixLoopDimension::FY)];
+                                        MatrixLoopParam::FY)];
                                 ac_int<LOOP_WIDTH, false> k1 =
                                     loop_counters[1][matrix_loop_position(
                                         params, MatrixLoopLevel::L1,
-                                        MatrixLoopDimension::OC)];
+                                        MatrixLoopParam::OC)];
 
                                 ac_int<16, false> address = fy0 * fy_stride +
                                                             fx * fx_stride +
