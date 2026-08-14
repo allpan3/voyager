@@ -536,12 +536,6 @@ struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
         weight_scales[i] = Scale::one();
       }
 
-      // loop indices that are used to determine when to read in a new bias
-      int bias_reuse_indices[4] = {5, 5, 5, 5};
-      for (int i = 5; i > params.weight_loop_idx[1]; i--) {
-        bias_reuse_indices[5 - i] = i;
-      }
-
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
       while (step < total_ops) {
@@ -584,10 +578,14 @@ struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
 
         if (is_non_accumulating_tile) {
           if (params.has_bias) {
-            bool read_bias = loop_counters[1][bias_reuse_indices[0]] == 0 &&
-                             loop_counters[1][bias_reuse_indices[1]] == 0 &&
-                             loop_counters[1][bias_reuse_indices[2]] == 0 &&
-                             loop_counters[1][bias_reuse_indices[3]] == 0;
+            // Read one bias when every loop nested inside L1 OC is at zero
+            bool read_bias = true;
+#pragma hls_unroll yes
+            for (int slot = 0; slot < 6; slot++) {
+              if (slot > params.weight_loop_idx[1]) {
+                read_bias = read_bias && loop_counters[1][slot] == 0;
+              }
+            }
 
             if (read_bias) {
               bias = bias_channel.Pop();
