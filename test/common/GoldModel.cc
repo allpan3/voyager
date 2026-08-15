@@ -108,6 +108,7 @@ std::vector<std::any> run_operation(const Operation& operation,
   std::any output_ptr;
   std::vector<std::any> outputs;
   float* output_code = nullptr;
+  bool direct_matrix_output = false;
 
   const auto param = operation.param;
   auto op_list = get_op_list(param);
@@ -139,6 +140,9 @@ std::vector<std::any> run_operation(const Operation& operation,
     const auto input_shape = get_shape(input);
     int input_dim = get_size(input_shape) / input_shape.back();
     bool is_fc = input_dim == 1;
+    direct_matrix_output =
+        !is_dwc && !is_fc && !has_fused_spmm(first_op) &&
+        op_list.size() == 1 && !output_tensors.back().has_reshape();
 
     if (!is_dwc && input.dtype() != "bfloat16") {
       input_ptr = process_gemm_inputs<SaInput>(first_op, "input_code", input,
@@ -547,7 +551,13 @@ std::vector<std::any> run_operation(const Operation& operation,
     output_ptr = reshape_if_needed<Vector>(output_ptr, reshape_op);
   }
 
-  cast_output<Vector, SUPPORTED_TYPES>(output_ptr, output_tensor, output_code);
+  // Preserve the accumulator pointer type when no vector epilogue consumes it
+  if (direct_matrix_output) {
+    cast_output<AccumBuffer, SUPPORTED_TYPES>(output_ptr, output_tensor,
+                                              output_code);
+  } else {
+    cast_output<Vector, SUPPORTED_TYPES>(output_ptr, output_tensor, output_code);
+  }
   outputs.push_back(output_ptr);
 
   if (output_code != nullptr) {
