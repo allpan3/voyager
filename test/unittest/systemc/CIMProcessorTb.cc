@@ -586,7 +586,8 @@ SC_MODULE(CIMProcessorTb) {
   // Preload resident tiles before admitting their MAC inputs
   void send_preloaded_tiles_job(
       const MatrixParams &params, const std::vector<int> &weight_patterns,
-      const std::vector<CIMWeightDescriptor> &descriptors, int input_pattern) {
+      const std::vector<CIMWeightDescriptor> &descriptors, int input_pattern,
+      std::vector<unsigned long> *weight_completion_cycles = nullptr) {
     std::size_t scheduled_set_count = 0;
     for (const CIMWeightDescriptor &descriptor : descriptors) {
       scheduled_set_count += descriptor.set_count.to_uint();
@@ -599,6 +600,9 @@ SC_MODULE(CIMProcessorTb) {
 
     for (const int weight_pattern : weight_patterns) {
       push_weight_set(weight_pattern);
+      if (weight_completion_cycles != nullptr) {
+        weight_completion_cycles->push_back(current_cycle());
+      }
     }
     for (std::size_t operation = 0; operation < weight_patterns.size();
          operation++) {
@@ -676,6 +680,30 @@ SC_MODULE(CIMProcessorTb) {
       }
     }
     std::cout << std::endl;
+  }
+
+  // Require descriptor grouping to preserve resident-set programming cadence
+  void require_matching_weight_intervals(
+      const std::vector<unsigned long> &split_cycles,
+      const std::vector<unsigned long> &grouped_cycles) {
+    require(split_cycles.size() == grouped_cycles.size(),
+            "descriptor cadence sample counts differ");
+    for (std::size_t index = 1;
+         index < split_cycles.size() && index < grouped_cycles.size();
+         index++) {
+      const unsigned long split_interval =
+          split_cycles[index] - split_cycles[index - 1];
+      const unsigned long grouped_interval =
+          grouped_cycles[index] - grouped_cycles[index - 1];
+      std::cout << "CIM_DESCRIPTOR_CADENCE set=" << index
+                << " split=" << split_interval
+                << " grouped=" << grouped_interval << std::endl;
+      std::ostringstream message;
+      message << "descriptor boundary changed set " << index
+              << " programming interval from " << grouped_interval << " to "
+              << split_interval;
+      require(split_interval == grouped_interval, message.str());
+    }
   }
 
 #if ENABLE_PERF_COUNTERS
@@ -998,8 +1026,8 @@ SC_MODULE(CIMProcessorTb) {
     expect_output("interleaved accumulation address 0", interleaved_0, 0);
     expect_output("interleaved accumulation address 1", interleaved_1, 0);
     send_job(make_interleaved_accumulation_params(), {120, 120, 121, 121},
-             {true, false, true, false},
-             {make_weight_descriptor(2, 1)}, {12, 13, 12, 13});
+             {true, false, true, false}, {make_weight_descriptor(2, 1)},
+             {12, 13, 12, 13});
 
     while (checked_outputs < kThroughputOperations + 13) {
       tick();
@@ -1062,13 +1090,10 @@ SC_MODULE(CIMProcessorTb) {
       for (int x = 0; x < kStridedX; x++) {
         for (int y = 0; y < kStridedY; y++) {
           BufferVector expected = expected_partial(
-              kStridedInputPattern,
-              kStridedWeightBase + k * kStridedReduction);
-          add_vector(
-              expected,
-              expected_partial(
-                  kStridedInputPattern,
-                  kStridedWeightBase + k * kStridedReduction + 1));
+              kStridedInputPattern, kStridedWeightBase + k * kStridedReduction);
+          add_vector(expected, expected_partial(kStridedInputPattern,
+                                                kStridedWeightBase +
+                                                    k * kStridedReduction + 1));
           std::ostringstream label;
           label << "strided accumulation K " << k << " X " << x << " Y " << y;
           expect_output(label.str(), expected, 0);
@@ -1077,8 +1102,7 @@ SC_MODULE(CIMProcessorTb) {
     }
     send_job(make_strided_accumulation_params(), strided_weight_patterns,
              strided_weight_loads,
-             make_weight_descriptors(kStridedK * kStridedX *
-                                     kStridedReduction),
+             make_weight_descriptors(kStridedK * kStridedX * kStridedReduction),
              kStridedInputPattern);
 
     if constexpr (B_SETS >= 2) {
@@ -1098,6 +1122,7 @@ SC_MODULE(CIMProcessorTb) {
 
       std::vector<CIMWeightDescriptor> single_set_descriptors;
       std::vector<int> individual_set_patterns;
+      std::vector<unsigned long> individual_set_load_cycles;
       for (int set = 0; set < B_SETS; set++) {
         std::ostringstream label;
         label << "individual-set preload " << set;
@@ -1105,9 +1130,31 @@ SC_MODULE(CIMProcessorTb) {
         single_set_descriptors.push_back(make_weight_descriptor(1, 1));
         individual_set_patterns.push_back(44 + set);
       }
+      const int individual_outputs_before = checked_outputs;
       send_preloaded_tiles_job(make_weight_reload_params(B_SETS),
                                individual_set_patterns, single_set_descriptors,
-                               9);
+                               9, &individual_set_load_cycles);
+      while (checked_outputs < individual_outputs_before + B_SETS) {
+        tick();
+      }
+
+      std::vector<int> grouped_set_patterns;
+      std::vector<unsigned long> grouped_set_load_cycles;
+      for (int set = 0; set < B_SETS; set++) {
+        std::ostringstream label;
+        label << "grouped-set preload " << set;
+        expect_output(label.str(), expected_partial(10, 64 + set), 0);
+        grouped_set_patterns.push_back(64 + set);
+      }
+      const int grouped_outputs_before = checked_outputs;
+      send_preloaded_tiles_job(
+          make_weight_reload_params(B_SETS), grouped_set_patterns,
+          {make_weight_descriptor(B_SETS, 1)}, 10, &grouped_set_load_cycles);
+      while (checked_outputs < grouped_outputs_before + B_SETS) {
+        tick();
+      }
+      require_matching_weight_intervals(individual_set_load_cycles,
+                                        grouped_set_load_cycles);
 
       std::vector<int> variable_tile_patterns;
       for (int set = 0; set < B_SETS; set++) {
@@ -1135,7 +1182,7 @@ SC_MODULE(CIMProcessorTb) {
         kStridedK * kStridedX * kStridedY;
     const int expected_output_count = 15 + kStridedOutputCount +
                                       kThroughputOperations +
-                                      (B_SETS >= 2 ? 5 * B_SETS + 2 : 0);
+                                      (B_SETS >= 2 ? 6 * B_SETS + 2 : 0);
     while (checked_outputs < expected_output_count) {
       tick();
     }

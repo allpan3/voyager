@@ -295,6 +295,14 @@ SC_MODULE(CIMProcessor) {
   Connections::Combinational<ScheduledWeightDescriptor> CCS_INIT_S1(
       scheduled_weight_descriptor_deq);
 
+  // Buffer descriptors independently for the continuous programming loop
+  Connections::Fifo<ScheduledWeightDescriptor, B_SETS> CCS_INIT_S1(
+      loader_weight_descriptor_fifo);
+  Connections::Combinational<ScheduledWeightDescriptor> CCS_INIT_S1(
+      loader_weight_descriptor_enq);
+  Connections::Combinational<ScheduledWeightDescriptor> CCS_INIT_S1(
+      loader_weight_descriptor_deq);
+
   // Centralize per-set state updates from the loader and compute scheduler
   sc_signal<ResidentSetStateBits> resident_set_state[B_SETS];
   Connections::Combinational<Set> CCS_INIT_S1(set_ready_channel);
@@ -360,6 +368,11 @@ SC_MODULE(CIMProcessor) {
     scheduled_weight_descriptor_fifo.enq(scheduled_weight_descriptor_enq);
     scheduled_weight_descriptor_fifo.deq(scheduled_weight_descriptor_deq);
 
+    loader_weight_descriptor_fifo.clk(clk);
+    loader_weight_descriptor_fifo.rst(rstn);
+    loader_weight_descriptor_fifo.enq(loader_weight_descriptor_enq);
+    loader_weight_descriptor_fifo.deq(loader_weight_descriptor_deq);
+
     process_accumulation_params_fifo.clk(clk);
     process_accumulation_params_fifo.rst(rstn);
     process_accumulation_params_fifo.enq(process_accumulation_params_enq);
@@ -380,6 +393,10 @@ SC_MODULE(CIMProcessor) {
     async_reset_signal_is(rstn, false);
 
     SC_THREAD(issue_operations);
+    sensitive << clk.pos();
+    async_reset_signal_is(rstn, false);
+
+    SC_THREAD(schedule_weight_descriptors);
     sensitive << clk.pos();
     async_reset_signal_is(rstn, false);
 
@@ -604,16 +621,11 @@ SC_MODULE(CIMProcessor) {
     }
   }
 
-  // Allocate each descriptor sequence around the ring and fill its sets
-  //
-  // The descriptor is queued before its payload so compute can consume schedule
-  // metadata early, then wait only for each selected set to become READY
-  void load_weights() {
-    weight_channel.Reset();
+  // Assign descriptor sequences to the resident ring ahead of their payloads
+  void schedule_weight_descriptors() {
     weight_descriptor_channel.Reset();
-    write_request_channel.ResetWrite();
     scheduled_weight_descriptor_enq.ResetWrite();
-    set_ready_channel.ResetWrite();
+    loader_weight_descriptor_enq.ResetWrite();
 
     wait();
 
@@ -632,40 +644,76 @@ SC_MODULE(CIMProcessor) {
       scheduled.logical = descriptor;
       scheduled.first_set = next_set;
       scheduled_weight_descriptor_enq.Push(scheduled);
+      loader_weight_descriptor_enq.Push(scheduled);
+      next_set = resident_set_at_offset(next_set, descriptor.set_count);
+    }
+  }
 
-      ac_int<16, false> sets_filled = 0;
-      int k = 0;
-      int span = 0;
-      Set write_set = next_set;
+  // Fill resident sets without draining the payload pipeline at descriptors
+  void load_weights() {
+    weight_channel.Reset();
+    loader_weight_descriptor_deq.ResetRead();
+    write_request_channel.ResetWrite();
+    set_ready_channel.ResetWrite();
+
+    wait();
+
+    ScheduledWeightDescriptor current;
+    ScheduledWeightDescriptor pending;
+    bool current_valid = false;
+    bool pending_valid = false;
+    ac_int<16, false> sets_remaining = 0;
+    int k = 0;
+    int span = 0;
+    Set write_set = 0;
 
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
-      while (sets_filled < descriptor.set_count) {
-        // Only the first payload beat needs to wait for ownership of this set
-        if (k == 0 && span == 0) {
-          while (!resident_set_has_state(write_set, SET_FREE)) {
-            wait();
-          }
+    while (true) {
+      ScheduledWeightDescriptor next;
+      if (!pending_valid && loader_weight_descriptor_deq.PopNB(next)) {
+        pending = next;
+        pending_valid = true;
+      }
+      if (!current_valid) {
+        if (!pending_valid) {
+          wait();
+          continue;
         }
+        current = pending;
+        current_valid = true;
+        pending_valid = false;
+        sets_remaining = current.logical.set_count;
+        write_set = current.first_set;
+      }
 
-        const ac_int<WEIGHT_WRITE_WIDTH, false> beat = weight_channel.Pop();
-        write_weight_beat(write_set, k, span, beat);
+      // Only the first payload beat needs to wait for ownership of this set
+      if (k == 0 && span == 0) {
+        while (!resident_set_has_state(write_set, SET_FREE)) {
+          wait();
+        }
+      }
 
-        const bool row_complete = span == WEIGHT_BEATS_PER_ROW - 1;
-        const bool set_complete = row_complete && k == K - 1;
-        if (set_complete) {
-          set_ready_channel.Push(write_set);
-          sets_filled++;
-          write_set = next_resident_set(write_set);
-          next_set = write_set;
-          k = 0;
-          span = 0;
-        } else if (row_complete) {
-          k++;
-          span = 0;
+      const ac_int<WEIGHT_WRITE_WIDTH, false> beat = weight_channel.Pop();
+      write_weight_beat(write_set, k, span, beat);
+
+      const bool row_complete = span == WEIGHT_BEATS_PER_ROW - 1;
+      const bool set_complete = row_complete && k == K - 1;
+      if (set_complete) {
+        set_ready_channel.Push(write_set);
+        if (sets_remaining == 1) {
+          current_valid = false;
         } else {
-          span++;
+          sets_remaining--;
+          write_set = next_resident_set(write_set);
         }
+        k = 0;
+        span = 0;
+      } else if (row_complete) {
+        k++;
+        span = 0;
+      } else {
+        span++;
       }
     }
   }
