@@ -62,8 +62,8 @@ static_assert(CIM_PROCESSOR_TEST_STRICT_CADENCE == 0 ||
 static constexpr int CH_IN = 64;
 static constexpr int CH_OUT = 64;
 static constexpr int B_SETS = CIM_PROCESSOR_TEST_B_SETS;
-static constexpr int BASE_A_WIDTH = 4;
-static constexpr int BASE_B_WIDTH = 4;
+static constexpr int BASE_A_WIDTH = 8;  // One A slice matches production II1
+static constexpr int BASE_B_WIDTH = 8;
 static constexpr int BASE_C_WIDTH = 20;
 static constexpr int TILE_INPUT_AXIS_ELEMENTS = 1;
 static constexpr int TILE_OUTPUT_AXIS_ELEMENTS = 2;
@@ -169,11 +169,16 @@ SC_MODULE(CIMProcessorTb) {
   std::deque<ExpectedOutput> expected_outputs;
   std::deque<BufferVector> pending_biases;
   std::deque<CIMWeightDescriptor> pending_weight_descriptors;
+  std::deque<int> pending_weight_sets;
   std::vector<unsigned long> throughput_input_cycles;
   std::vector<unsigned long> throughput_output_cycles;
   sc_event expected_output_event;
   sc_event bias_event;
   sc_event weight_descriptor_event;
+  sc_event weight_event;
+  sc_event weight_completion_event;
+  int queued_weight_sets;
+  int completed_weight_sets;
   int checked_outputs;
   bool test_failed;
 
@@ -190,6 +195,8 @@ SC_MODULE(CIMProcessorTb) {
         accumulation_done_1("accumulation_done_1"),
 #endif
         buffer_cycle(0),
+        queued_weight_sets(0),
+        completed_weight_sets(0),
         checked_outputs(0),
         test_failed(false) {
     dut.clk(clk);
@@ -235,6 +242,9 @@ SC_MODULE(CIMProcessorTb) {
     sensitive << clk.posedge_event();
 
     SC_THREAD(drive_weight_descriptors);
+    sensitive << clk.posedge_event();
+
+    SC_THREAD(drive_weights);
     sensitive << clk.posedge_event();
 
     SC_THREAD(check_outputs);
@@ -452,12 +462,53 @@ SC_MODULE(CIMProcessorTb) {
   }
 
   // Push one complete row-major resident-set payload
-  void push_weight_set(int weight_pattern) {
+  void write_weight_set(int weight_pattern) {
     for (int k = 0; k < K; k++) {
       for (int span = 0; span < Processor::WEIGHT_BEATS_PER_ROW; span++) {
         weight_channel.Push(make_weight_beat(weight_pattern, k, span));
       }
     }
+  }
+
+  // Program every queued set from one channel-driving process
+  void drive_weights() {
+    weight_channel.ResetWrite();
+    wait();
+    while (!rstn.read()) {
+      wait();
+    }
+
+    while (true) {
+      if (pending_weight_sets.empty()) {
+        wait(weight_event);
+        continue;
+      }
+      const int weight_pattern = pending_weight_sets.front();
+      pending_weight_sets.pop_front();
+      write_weight_set(weight_pattern);
+      completed_weight_sets++;
+      weight_completion_event.notify(SC_ZERO_TIME);
+    }
+  }
+
+  // Queue one set without coupling its programming to input acceptance
+  int queue_weight_set(int weight_pattern) {
+    pending_weight_sets.push_back(weight_pattern);
+    queued_weight_sets++;
+    weight_event.notify(SC_ZERO_TIME);
+    return queued_weight_sets;
+  }
+
+  // Wait until every queued set has reached the processor input
+  void wait_for_weight_sets(int target) {
+    while (completed_weight_sets < target) {
+      wait(weight_completion_event);
+    }
+  }
+
+  // Program one complete set before the caller continues
+  void push_weight_set(int weight_pattern) {
+    wait_for_weight_sets(queue_weight_set(weight_pattern));
   }
 
   // Compute one complete golden MAC result
@@ -632,6 +683,37 @@ SC_MODULE(CIMProcessorTb) {
     }
     input_channel.Push(make_inputs(input_pattern));
     input_channel.Push(make_inputs(input_pattern));
+  }
+
+  // Refill the complete ring while the next descriptor is already runnable
+  void send_consecutive_full_ring_replay_job(
+      int input_pattern, int first_weight_pattern, int second_weight_pattern) {
+    static constexpr int kReplaysPerDescriptor = 2;
+    MatrixParams params = make_multiset_reuse_params(B_SETS);
+    params.loops[0][params.x_loop_idx[0]] = 2 * kReplaysPerDescriptor;
+    queue_weight_descriptors(
+        {make_weight_descriptor(B_SETS, kReplaysPerDescriptor),
+         make_weight_descriptor(B_SETS, kReplaysPerDescriptor)});
+    params_channel.Push(params);
+    start_channel.SyncPop();
+
+    for (int set = 0; set < B_SETS; set++) {
+      push_weight_set(first_weight_pattern + set);
+    }
+
+    int completion_target = completed_weight_sets;
+    for (int set = 0; set < B_SETS; set++) {
+      completion_target = queue_weight_set(second_weight_pattern + set);
+    }
+
+    for (int descriptor = 0; descriptor < 2; descriptor++) {
+      for (int replay = 0; replay < kReplaysPerDescriptor; replay++) {
+        for (int set = 0; set < B_SETS; set++) {
+          input_channel.Push(make_inputs(input_pattern));
+        }
+      }
+    }
+    wait_for_weight_sets(completion_target);
   }
 
   // Return the current clock index for ready/valid cadence measurements
@@ -938,7 +1020,6 @@ SC_MODULE(CIMProcessorTb) {
   void run() {
     params_channel.ResetWrite();
     input_channel.ResetWrite();
-    weight_channel.ResetWrite();
     start_channel.ResetRead();
 #if ENABLE_PERF_COUNTERS
     perf_counter_select.write(MatrixPerformance::SNAPSHOT_SEQUENCE);
@@ -1120,6 +1201,28 @@ SC_MODULE(CIMProcessorTb) {
       send_job(make_multiset_reuse_params(B_SETS), full_set_patterns,
                full_set_loads, {make_weight_descriptor(B_SETS, 2)}, 8);
 
+      static constexpr int kConsecutiveInputPattern = 16;
+      static constexpr int kConsecutiveFirstWeightBase = 180;
+      static constexpr int kConsecutiveSecondWeightBase = 200;
+      for (int descriptor = 0; descriptor < 2; descriptor++) {
+        const int weight_base = descriptor == 0 ? kConsecutiveFirstWeightBase
+                                                : kConsecutiveSecondWeightBase;
+        for (int replay = 0; replay < 2; replay++) {
+          for (int set = 0; set < B_SETS; set++) {
+            std::ostringstream label;
+            label << "consecutive full-ring descriptor " << descriptor
+                  << " replay " << replay << " set " << set;
+            expect_output(
+                label.str(),
+                expected_partial(kConsecutiveInputPattern, weight_base + set),
+                0);
+          }
+        }
+      }
+      send_consecutive_full_ring_replay_job(kConsecutiveInputPattern,
+                                            kConsecutiveFirstWeightBase,
+                                            kConsecutiveSecondWeightBase);
+
       std::vector<CIMWeightDescriptor> single_set_descriptors;
       std::vector<int> individual_set_patterns;
       std::vector<unsigned long> individual_set_load_cycles;
@@ -1182,7 +1285,7 @@ SC_MODULE(CIMProcessorTb) {
         kStridedK * kStridedX * kStridedY;
     const int expected_output_count = 15 + kStridedOutputCount +
                                       kThroughputOperations +
-                                      (B_SETS >= 2 ? 6 * B_SETS + 2 : 0);
+                                      (B_SETS >= 2 ? 10 * B_SETS + 2 : 0);
     while (checked_outputs < expected_output_count) {
       tick();
     }
@@ -1269,6 +1372,8 @@ SC_MODULE(CIMProcessorTb) {
       std::cout << "[PASS] cim_processor_heterogeneous_jobs" << std::endl;
       if constexpr (B_SETS >= 2) {
         std::cout << "[PASS] cim_processor_full_set_replay" << std::endl;
+        std::cout << "[PASS] cim_processor_consecutive_full_ring_descriptors"
+                  << std::endl;
         std::cout << "[PASS] cim_processor_individual_set_preload" << std::endl;
         std::cout << "[PASS] cim_processor_variable_tile_preload" << std::endl;
         std::cout << "[PASS] cim_processor_progressive_release" << std::endl;

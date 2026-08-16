@@ -266,17 +266,28 @@ SC_MODULE(CIMProcessor) {
 #endif
 
  private:
+  // Size tags for every queued descriptor plus the active compute descriptor
+  static constexpr int WEIGHT_DESCRIPTOR_FIFO_DEPTH = B_SETS;
+  static constexpr int MAX_LIVE_WEIGHT_DESCRIPTORS =
+      WEIGHT_DESCRIPTOR_FIFO_DEPTH + 1;
+  static constexpr int WEIGHT_DESCRIPTOR_TAG_WIDTH =
+      ac::nbits<MAX_LIVE_WEIGHT_DESCRIPTORS - 1>::val;
+  using WeightDescriptorTag = ac_int<WEIGHT_DESCRIPTOR_TAG_WIDTH, false>;
+
   // Bind one logical set sequence to a contiguous physical ring allocation
   struct ScheduledWeightDescriptor {
     CIMWeightDescriptor logical;
     Set first_set;
+    WeightDescriptorTag descriptor_tag;
 
-    static const unsigned int width = CIMWeightDescriptor::width + Set::width;
+    static const unsigned int width =
+        CIMWeightDescriptor::width + Set::width + WeightDescriptorTag::width;
 
     template <unsigned int Size>
     void Marshall(Marshaller<Size> &m) {
       m & logical;
       m & first_set;
+      m & descriptor_tag;
     }
 
     inline friend void sc_trace(sc_trace_file *tf,
@@ -284,17 +295,52 @@ SC_MODULE(CIMProcessor) {
                                 const std::string &name) {
       sc_trace(tf, descriptor.logical, name + ".logical");
       sc_trace(tf, descriptor.first_set, name + ".first_set");
+      sc_trace(tf, descriptor.descriptor_tag, name + ".descriptor_tag");
     }
 
     inline friend std::ostream &operator<<(
         std::ostream &os, const ScheduledWeightDescriptor &descriptor) {
-      os << descriptor.logical << " " << descriptor.first_set;
+      os << descriptor.logical << " " << descriptor.first_set << " "
+         << descriptor.descriptor_tag;
       return os;
     }
 
     inline friend bool operator==(const ScheduledWeightDescriptor &lhs,
                                   const ScheduledWeightDescriptor &rhs) {
-      return lhs.logical == rhs.logical && lhs.first_set == rhs.first_set;
+      return lhs.logical == rhs.logical && lhs.first_set == rhs.first_set &&
+             lhs.descriptor_tag == rhs.descriptor_tag;
+    }
+  };
+
+  // Tag one per-set state transition with its descriptor ownership
+  struct ResidentSetEvent {
+    Set set;
+    WeightDescriptorTag descriptor_tag;
+
+    static const unsigned int width = Set::width + WeightDescriptorTag::width;
+
+    template <unsigned int Size>
+    void Marshall(Marshaller<Size> &m) {
+      m & set;
+      m & descriptor_tag;
+    }
+
+    inline friend void sc_trace(sc_trace_file *tf,
+                                const ResidentSetEvent &event,
+                                const std::string &name) {
+      sc_trace(tf, event.set, name + ".set");
+      sc_trace(tf, event.descriptor_tag, name + ".descriptor_tag");
+    }
+
+    inline friend std::ostream &operator<<(std::ostream &os,
+                                           const ResidentSetEvent &event) {
+      os << event.set << " " << event.descriptor_tag;
+      return os;
+    }
+
+    inline friend bool operator==(const ResidentSetEvent &lhs,
+                                  const ResidentSetEvent &rhs) {
+      return lhs.set == rhs.set && lhs.descriptor_tag == rhs.descriptor_tag;
     }
   };
 
@@ -331,8 +377,7 @@ SC_MODULE(CIMProcessor) {
   Connections::Combinational<AccumulationResult> CCS_INIT_S1(accum_to_wb_deq);
 
   // Retire forwarding slots only after their accumulation writes are accepted
-  Connections::Fifo<AccumulationForwardingSlot,
-                    ACCUMULATION_FORWARDING_ENTRIES>
+  Connections::Fifo<AccumulationForwardingSlot, ACCUMULATION_FORWARDING_ENTRIES>
       CCS_INIT_S1(accumulation_forwarding_commit_fifo);
   Connections::Combinational<AccumulationForwardingSlot> CCS_INIT_S1(
       accumulation_forwarding_commit_enq);
@@ -340,8 +385,7 @@ SC_MODULE(CIMProcessor) {
       accumulation_forwarding_commit_deq);
 
   // Isolate slot-credit recycling from a blocked accumulation operation
-  Connections::Fifo<AccumulationForwardingSlot,
-                    ACCUMULATION_FORWARDING_ENTRIES>
+  Connections::Fifo<AccumulationForwardingSlot, ACCUMULATION_FORWARDING_ENTRIES>
       CCS_INIT_S1(accumulation_forwarding_free_fifo);
   Connections::Combinational<AccumulationForwardingSlot> CCS_INIT_S1(
       accumulation_forwarding_free_enq);
@@ -354,7 +398,8 @@ SC_MODULE(CIMProcessor) {
   Connections::Combinational<Pack1D<Buffer, N>> CCS_INIT_S1(accum_output_enq);
 
   // Buffer one ring traversal of scheduled descriptor assignments
-  Connections::Fifo<ScheduledWeightDescriptor, B_SETS> CCS_INIT_S1(
+  Connections::Fifo<ScheduledWeightDescriptor,
+                    WEIGHT_DESCRIPTOR_FIFO_DEPTH> CCS_INIT_S1(
       scheduled_weight_descriptor_fifo);
   Connections::Combinational<ScheduledWeightDescriptor> CCS_INIT_S1(
       scheduled_weight_descriptor_enq);
@@ -362,7 +407,8 @@ SC_MODULE(CIMProcessor) {
       scheduled_weight_descriptor_deq);
 
   // Buffer descriptors independently for the continuous programming loop
-  Connections::Fifo<ScheduledWeightDescriptor, B_SETS> CCS_INIT_S1(
+  Connections::Fifo<ScheduledWeightDescriptor,
+                    WEIGHT_DESCRIPTOR_FIFO_DEPTH> CCS_INIT_S1(
       loader_weight_descriptor_fifo);
   Connections::Combinational<ScheduledWeightDescriptor> CCS_INIT_S1(
       loader_weight_descriptor_enq);
@@ -371,8 +417,9 @@ SC_MODULE(CIMProcessor) {
 
   // Centralize per-set state updates from the loader and compute scheduler
   sc_signal<ResidentSetStateBits> resident_set_state[B_SETS];
-  Connections::Combinational<Set> CCS_INIT_S1(set_ready_channel);
-  Connections::Combinational<Set> CCS_INIT_S1(set_release_channel);
+  sc_signal<WeightDescriptorTag> resident_set_owner_tag[B_SETS];
+  Connections::Combinational<ResidentSetEvent> CCS_INIT_S1(set_ready_channel);
+  Connections::Combinational<ResidentSetEvent> CCS_INIT_S1(set_release_channel);
 
   Connections::Fifo<MatrixParams, 1> CCS_INIT_S1(
       process_accumulation_params_fifo);
@@ -421,10 +468,8 @@ SC_MODULE(CIMProcessor) {
 
     accumulation_forwarding_commit_fifo.clk(clk);
     accumulation_forwarding_commit_fifo.rst(rstn);
-    accumulation_forwarding_commit_fifo.enq(
-        accumulation_forwarding_commit_enq);
-    accumulation_forwarding_commit_fifo.deq(
-        accumulation_forwarding_commit_deq);
+    accumulation_forwarding_commit_fifo.enq(accumulation_forwarding_commit_enq);
+    accumulation_forwarding_commit_fifo.deq(accumulation_forwarding_commit_deq);
 
     accumulation_forwarding_free_fifo.clk(clk);
     accumulation_forwarding_free_fifo.rst(rstn);
@@ -661,6 +706,20 @@ SC_MODULE(CIMProcessor) {
     return matches;
   }
 
+  // Return whether the selected set is ready for this descriptor
+  bool resident_set_is_ready_for(
+      Set selected, WeightDescriptorTag descriptor_tag) const {
+    bool matches = false;
+#pragma hls_unroll yes
+    for (int set = 0; set < B_SETS; set++) {
+      if (selected == Set(set)) {
+        matches = resident_set_state[set].read() == SET_READY &&
+                  resident_set_owner_tag[set].read() == descriptor_tag;
+      }
+    }
+    return matches;
+  }
+
   // Track FREE -> READY after fill and READY -> FREE after the final replay
   void set_scoreboard() {
     set_ready_channel.ResetRead();
@@ -668,6 +727,7 @@ SC_MODULE(CIMProcessor) {
 #pragma hls_unroll yes
     for (int set = 0; set < B_SETS; set++) {
       resident_set_state[set].write(ResidentSetStateBits(SET_FREE));
+      resident_set_owner_tag[set].write(0);
     }
 
     wait();
@@ -675,29 +735,36 @@ SC_MODULE(CIMProcessor) {
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
     while (true) {
-      Set ready_set = 0;
-      Set released_set = 0;
-      const bool became_ready = set_ready_channel.PopNB(ready_set);
-      const bool released = set_release_channel.PopNB(released_set);
+      ResidentSetEvent ready_event;
+      ResidentSetEvent release_event;
+      const bool became_ready = set_ready_channel.PopNB(ready_event);
+      const bool released = set_release_channel.PopNB(release_event);
 #ifndef __SYNTHESIS__
-      if (became_ready && !resident_set_has_state(ready_set, SET_FREE)) {
+      if (became_ready && !resident_set_has_state(ready_event.set, SET_FREE)) {
         SC_REPORT_FATAL("CIMProcessor", "completed resident set is not free");
       }
-      if (released && !resident_set_has_state(released_set, SET_READY)) {
-        SC_REPORT_FATAL("CIMProcessor", "released resident set is not ready");
+      if (released && !resident_set_is_ready_for(release_event.set,
+                                                 release_event.descriptor_tag)) {
+        SC_REPORT_FATAL("CIMProcessor",
+                        "released resident set ownership does not match");
       }
 #endif
 
 #pragma hls_unroll yes
       for (int set = 0; set < B_SETS; set++) {
         ResidentSetStateBits next = resident_set_state[set].read();
-        if (became_ready && ready_set == Set(set)) {
-          next = SET_READY;
-        }
-        if (released && released_set == Set(set)) {
+        WeightDescriptorTag next_descriptor_tag =
+            resident_set_owner_tag[set].read();
+        if (released && release_event.set == Set(set) &&
+            release_event.descriptor_tag == next_descriptor_tag) {
           next = SET_FREE;
         }
+        if (became_ready && ready_event.set == Set(set)) {
+          next = SET_READY;
+          next_descriptor_tag = ready_event.descriptor_tag;
+        }
         resident_set_state[set].write(next);
+        resident_set_owner_tag[set].write(next_descriptor_tag);
       }
       wait();
     }
@@ -712,6 +779,7 @@ SC_MODULE(CIMProcessor) {
     wait();
 
     Set next_set = 0;
+    WeightDescriptorTag next_descriptor_tag = 0;
     while (true) {
       const CIMWeightDescriptor descriptor = weight_descriptor_channel.Pop();
 
@@ -725,9 +793,11 @@ SC_MODULE(CIMProcessor) {
       ScheduledWeightDescriptor scheduled;
       scheduled.logical = descriptor;
       scheduled.first_set = next_set;
+      scheduled.descriptor_tag = next_descriptor_tag;
       scheduled_weight_descriptor_enq.Push(scheduled);
       loader_weight_descriptor_enq.Push(scheduled);
       next_set = resident_set_at_offset(next_set, descriptor.set_count);
+      next_descriptor_tag++;
     }
   }
 
@@ -782,7 +852,10 @@ SC_MODULE(CIMProcessor) {
       const bool row_complete = span == WEIGHT_BEATS_PER_ROW - 1;
       const bool set_complete = row_complete && k == K - 1;
       if (set_complete) {
-        set_ready_channel.Push(write_set);
+        ResidentSetEvent ready_event;
+        ready_event.set = write_set;
+        ready_event.descriptor_tag = current.descriptor_tag;
+        set_ready_channel.Push(ready_event);
         if (sets_remaining == 1) {
           current_valid = false;
         } else {
@@ -938,7 +1011,8 @@ SC_MODULE(CIMProcessor) {
           selected_set_is_on_final_replay =
               replay_index == descriptor.logical.replay_count - 1;
           if (replay_index == 0) {
-            while (!resident_set_has_state(selected_weight_set, SET_READY)) {
+            while (!resident_set_is_ready_for(selected_weight_set,
+                                              descriptor.descriptor_tag)) {
 #if ENABLE_PERF_COUNTERS
               mac_wait_weight_set_load_cycles++;
 #endif
@@ -979,7 +1053,10 @@ SC_MODULE(CIMProcessor) {
         if (selected_set_is_on_final_replay && finishes_set_run) {
           // The array independently blocks same-set writes until this accepted
           // MAC closes its physical issue window
-          set_release_channel.Push(selected_weight_set);
+          ResidentSetEvent release_event;
+          release_event.set = selected_weight_set;
+          release_event.descriptor_tag = descriptor.descriptor_tag;
+          set_release_channel.Push(release_event);
         }
       }
 
@@ -1226,10 +1303,8 @@ SC_MODULE(CIMProcessor) {
 
     wait();
 
-    Pack1D<Buffer, N>
-        forwarded_values[ACCUMULATION_FORWARDING_ENTRIES];
-    ac_int<16, false>
-        forwarded_addresses[ACCUMULATION_FORWARDING_ENTRIES];
+    Pack1D<Buffer, N> forwarded_values[ACCUMULATION_FORWARDING_ENTRIES];
+    ac_int<16, false> forwarded_addresses[ACCUMULATION_FORWARDING_ENTRIES];
     ac_int<1, false> forwarded_banks[ACCUMULATION_FORWARDING_ENTRIES];
     bool forwarded_lookup_valid[ACCUMULATION_FORWARDING_ENTRIES];
 #pragma hls_unroll yes
@@ -1310,8 +1385,7 @@ SC_MODULE(CIMProcessor) {
     wait();
 
     for (int entry = 0; entry < ACCUMULATION_FORWARDING_ENTRIES; entry++) {
-      accumulation_forwarding_free_enq.Push(
-          AccumulationForwardingSlot(entry));
+      accumulation_forwarding_free_enq.Push(AccumulationForwardingSlot(entry));
     }
 
 #pragma hls_pipeline_init_interval 1
@@ -1366,8 +1440,7 @@ SC_MODULE(CIMProcessor) {
           request.last = false;
           accumulation_buffer_write_request[accumulation_buffer_bank].Push(
               request);
-          accumulation_forwarding_commit_enq.Push(
-              completed.forwarding_slot);
+          accumulation_forwarding_commit_enq.Push(completed.forwarding_slot);
         }
 
 #if DOUBLE_BUFFERED_ACCUM_BUFFER
