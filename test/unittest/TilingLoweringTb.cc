@@ -2,10 +2,14 @@
 #include <functional>
 #include <initializer_list>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
 
+#define NO_SYSC
+#include "src/Params.h"
+#undef NO_SYSC
 #include "test/common/Tiling.h"
 
 using ProtoLoopBound = std::pair<voyager::Loop, int>;
@@ -304,6 +308,27 @@ bool test_distinct_conv_output_reuse() {
   return passed;
 }
 
+// Keep weight-reuse selectors in MatrixParams value and diagnostic semantics
+bool test_matrix_params_weight_reuse_semantics() {
+  MatrixParams baseline;
+  MatrixParams changed;
+  changed.weight_reuse_idx[0] = 4;
+  changed.weight_reuse_idx[1] = 5;
+
+  bool passed =
+      require(!(baseline == changed),
+              "weight reuse selectors must affect parameter equality");
+  std::ostringstream output;
+  output << changed;
+  passed &= require(
+      output.str().find("weight_reuse_idx[0]: 4") != std::string::npos,
+      "parameter diagnostics must include the first weight reuse selector");
+  passed &= require(
+      output.str().find("weight_reuse_idx[1]: 5") != std::string::npos,
+      "parameter diagnostics must include the second weight reuse selector");
+  return passed;
+}
+
 // Reject outer FX until the legacy controller interface can represent it
 bool test_outer_fx_rejected() {
   const auto tiling = make_tiling({}, {{voyager::Loop::FX, 2}});
@@ -318,7 +343,8 @@ int main() {
       test_complete_lowering() + test_partial_lowering() +
       test_unit_weight_loop_reuse() + test_live_weight_loop_reload() +
       test_mobilebert_selector_reuse() + test_distinct_conv_output_reuse() +
-      test_outer_fx_rejected();
-  std::cout << "Tiling lowering checks passed: " << passed << "/9" << std::endl;
-  return passed == 9 ? 0 : 1;
+      test_matrix_params_weight_reuse_semantics() + test_outer_fx_rejected();
+  std::cout << "Tiling lowering checks passed: " << passed << "/10"
+            << std::endl;
+  return passed == 10 ? 0 : 1;
 }

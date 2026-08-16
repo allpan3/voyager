@@ -423,7 +423,7 @@ test-systemc-matrix-unit: check-systemc-env
 $(TILING_LOWERING_BUILD)/TilingLoweringTb: $(TILING_LOWERING_OBJS)
 	$(SYSTEMC_CC) -o $@ $^ $(TILING_LOWERING_LDFLAGS)
 
-$(TILING_LOWERING_BUILD)/TilingLoweringTb.o: $(THIS_DIR)/TilingLoweringTb.cc $(REPO_ROOT)/test/common/Tiling.h $(TILING_LOWERING_PARAM_PB) $(TILING_LOWERING_TILING_PB)
+$(TILING_LOWERING_BUILD)/TilingLoweringTb.o: $(THIS_DIR)/TilingLoweringTb.cc $(REPO_ROOT)/src/Params.h $(REPO_ROOT)/test/common/Tiling.h $(TILING_LOWERING_PARAM_PB) $(TILING_LOWERING_TILING_PB)
 	mkdir -p $(@D)
 	$(SYSTEMC_CC) $(TILING_LOWERING_CXXFLAGS) -c -o $@ $<
 

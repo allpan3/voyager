@@ -144,7 +144,7 @@ struct MatrixParams : BaseParams {
   ac_int<3, false> weight_loop_idx[2];
   ac_int<3, false> fy_loop_idx[2];
   ac_int<3, false> fx_loop_idx;
-  // Kept in the wire format; software emits zero and controllers ignore it
+  // SA uses these serialized indices to collapse the L1 weight-reuse loops
   ac_int<3, false> weight_reuse_idx[2];
   ac_int<8, false> stride;
   ac_int<8, false> padding;
@@ -371,6 +371,10 @@ struct MatrixParams : BaseParams {
       os << "fy_loop_idx[" << i << "]: " << params.fy_loop_idx[i] << std::endl;
     }
     os << "fx_loop_idx: " << params.fx_loop_idx << std::endl;
+    for (int i = 0; i < 2; i++) {
+      os << "weight_reuse_idx[" << i << "]: " << params.weight_reuse_idx[i]
+         << std::endl;
+    }
     os << "stride: " << params.stride << std::endl;
     os << "padding: " << params.padding << std::endl;
     for (int i = 0; i < 2; i++) {
@@ -476,6 +480,7 @@ struct MatrixParams : BaseParams {
       if (lhs.reduction_loop_idx[i] != rhs.reduction_loop_idx[i]) return false;
       if (lhs.weight_loop_idx[i] != rhs.weight_loop_idx[i]) return false;
       if (lhs.fy_loop_idx[i] != rhs.fy_loop_idx[i]) return false;
+      if (lhs.weight_reuse_idx[i] != rhs.weight_reuse_idx[i]) return false;
       if (lhs.weight_addr_reduction_loop_idx[i] !=
           rhs.weight_addr_reduction_loop_idx[i])
         return false;
