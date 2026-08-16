@@ -585,14 +585,28 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
     }
     return set_count;
   }
+
+  // Identify an L1 spatial loop that repeats the complete inner weight sequence
+  static bool cim_l1_spatial_replays_sequence(const MatrixParams &params,
+                                              int spatial_loop_idx) {
+    const auto l1_oc = params.loops[1][params.weight_loop_idx[1]];
+    const auto l1_ic = params.loops[1][params.reduction_loop_idx[1]];
+    const auto l1_fy = params.loops[1][params.fy_loop_idx[1]];
+    const auto l1_fx = params.loops[1][params.fx_loop_idx];
+    return params.loops[1][spatial_loop_idx] > 1 &&
+           (l1_oc == 1 || params.weight_loop_idx[1] > spatial_loop_idx) &&
+           (l1_ic == 1 || params.reduction_loop_idx[1] > spatial_loop_idx) &&
+           (l1_fy == 1 || params.fy_loop_idx[1] > spatial_loop_idx) &&
+           (l1_fx == 1 || params.fx_loop_idx > spatial_loop_idx);
+  }
 #endif
 
   // Own weight-order policy and emit backend-specific weight uses
   //
-  // Innermost L1 OX/OY loops keep one selected weight. Eligible L2 OX/OY loops
-  // replay the whole L1 sequence. CIM descriptors carry that repetition to
-  // CIMProcessor, while the systolic path follows MatrixProcessor's legacy
-  // swap protocol
+  // Innermost L1 OX/OY loops keep one selected weight. Outer L1 or eligible L2
+  // OX/OY loops replay a fitting L1 sequence. CIM descriptors carry that
+  // repetition to CIMProcessor, while the systolic path follows
+  // MatrixProcessor's legacy swap protocol
   void reader() {
     reader_params.ResetRead();
 
@@ -644,6 +658,35 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
       if (l1_oy_reuses_weights) {
         loop_bounds[1][params.y_loop_idx[1]] = 1;
       }
+
+      const bool l1_ox_replays_sequence =
+          !l1_ox_reuses_weights &&
+          cim_l1_spatial_replays_sequence(params, params.x_loop_idx[1]);
+      const bool l1_oy_replays_sequence =
+          !l1_oy_reuses_weights &&
+          cim_l1_spatial_replays_sequence(params, params.y_loop_idx[1]);
+      if (l1_ox_replays_sequence) {
+        loop_bounds[1][params.x_loop_idx[1]] = 1;
+      }
+      if (l1_oy_replays_sequence) {
+        loop_bounds[1][params.y_loop_idx[1]] = 1;
+      }
+      const bool l1_group_replay_requested =
+          l1_ox_replays_sequence || l1_oy_replays_sequence;
+      const bool l1_group_replay_fits =
+          cim_l1_set_count(loop_bounds[1]) <= B_SETS;
+      const bool l1_group_replay_enabled =
+          l1_group_replay_requested && l1_group_replay_fits;
+      if (l1_group_replay_requested && !l1_group_replay_fits) {
+        if (l1_ox_replays_sequence) {
+          loop_bounds[1][params.x_loop_idx[1]] =
+              params.loops[1][params.x_loop_idx[1]];
+        }
+        if (l1_oy_replays_sequence) {
+          loop_bounds[1][params.y_loop_idx[1]] =
+              params.loops[1][params.y_loop_idx[1]];
+        }
+      }
 #else
       // Use the compiler-selected SA collapse slots across synthesized blocks
       loop_bounds[1][params.weight_reuse_idx[0]] = 1;
@@ -683,6 +726,12 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
       const bool omit_outer_ox_from_weight_reader = l2_ox_reuses_weights;
       const bool omit_outer_oy_from_weight_reader = l2_oy_reuses_weights;
       ac_int<16, false> compute_sequence_replay_count = 1;
+      if (l1_group_replay_enabled && l1_ox_replays_sequence) {
+        compute_sequence_replay_count *= params.loops[1][params.x_loop_idx[1]];
+      }
+      if (l1_group_replay_enabled && l1_oy_replays_sequence) {
+        compute_sequence_replay_count *= params.loops[1][params.y_loop_idx[1]];
+      }
       if (omit_outer_ox_from_weight_reader) {
         loop_bounds[0][params.x_loop_idx[0]] = 1;
         compute_sequence_replay_count *= params.loops[0][params.x_loop_idx[0]];

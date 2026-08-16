@@ -61,17 +61,21 @@ SC_MODULE(CIMProcessor) {
   struct AccumulationMetadata {
     Pack1D<Psum, N> result;
     Pack1D<Buffer, N> initial_value;
+    ac_int<16, false> address;
     ac_int<1, false> starts_reduction;
+    ac_int<1, false> stores_partial_sum;
     ac_int<1, false> buffer_bank;
 
     static const unsigned int width =
-        Pack1D<Psum, N>::width + Pack1D<Buffer, N>::width + 2;
+        Pack1D<Psum, N>::width + Pack1D<Buffer, N>::width + 19;
 
     template <unsigned int Size>
     void Marshall(Marshaller<Size> &m) {
       m & result;
       m & initial_value;
+      m & address;
       m & starts_reduction;
+      m & stores_partial_sum;
       m & buffer_bank;
     }
 
@@ -80,7 +84,9 @@ SC_MODULE(CIMProcessor) {
                                 const std::string &name) {
       sc_trace(tf, metadata.result, name + ".result");
       sc_trace(tf, metadata.initial_value, name + ".initial_value");
+      sc_trace(tf, metadata.address, name + ".address");
       sc_trace(tf, metadata.starts_reduction, name + ".starts_reduction");
+      sc_trace(tf, metadata.stores_partial_sum, name + ".stores_partial_sum");
       sc_trace(tf, metadata.buffer_bank, name + ".buffer_bank");
     }
 
@@ -88,7 +94,9 @@ SC_MODULE(CIMProcessor) {
         std::ostream &os, const AccumulationMetadata &metadata) {
       os << metadata.result << " ";
       os << metadata.initial_value << " ";
+      os << metadata.address << " ";
       os << metadata.starts_reduction << " ";
+      os << metadata.stores_partial_sum << " ";
       os << metadata.buffer_bank;
       return os;
     }
@@ -97,7 +105,9 @@ SC_MODULE(CIMProcessor) {
                                   const AccumulationMetadata &rhs) {
       return lhs.result == rhs.result &&
              lhs.initial_value == rhs.initial_value &&
+             lhs.address == rhs.address &&
              lhs.starts_reduction == rhs.starts_reduction &&
+             lhs.stores_partial_sum == rhs.stores_partial_sum &&
              lhs.buffer_bank == rhs.buffer_bank;
     }
   };
@@ -1102,6 +1112,8 @@ SC_MODULE(CIMProcessor) {
         metadata.starts_reduction =
             starts_output_reduction(params, loop_counters);
         metadata.initial_value = Pack1D<Buffer, N>::zero();
+        metadata.address = accumulation_address(params, loop_counters);
+        metadata.stores_partial_sum = stores_partial_sum(params, loop_counters);
         metadata.buffer_bank = accumulation_buffer_bank;
 
         if (metadata.starts_reduction) {
@@ -1113,7 +1125,7 @@ SC_MODULE(CIMProcessor) {
           }
         } else {
           accumulation_buffer_read_address[accumulation_buffer_bank].Push(
-              accumulation_address(params, loop_counters));
+              metadata.address);
         }
 
         accumulation_metadata_enq.Push(metadata);
@@ -1141,6 +1153,11 @@ SC_MODULE(CIMProcessor) {
 
     wait();
 
+    Pack1D<Buffer, N> forwarded = Pack1D<Buffer, N>::zero();
+    ac_int<16, false> forwarded_address = 0;
+    ac_int<1, false> forwarded_bank = 0;
+    bool forwarded_valid = false;
+
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
     while (true) {
@@ -1148,12 +1165,17 @@ SC_MODULE(CIMProcessor) {
       Pack1D<Buffer, N> previous = metadata.initial_value;
 
       if (!metadata.starts_reduction) {
+        Pack1D<Buffer, N> buffered = Pack1D<Buffer, N>::zero();
 #pragma hls_unroll yes
         for (int bank = 0; bank < ACCUM_BUFFER_BANKS; bank++) {
           if (metadata.buffer_bank == bank) {
-            previous = accumulation_buffer_read_data[bank].Pop();
+            buffered = accumulation_buffer_read_data[bank].Pop();
           }
         }
+        const bool forwards_previous = forwarded_valid &&
+                                       metadata.address == forwarded_address &&
+                                       metadata.buffer_bank == forwarded_bank;
+        previous = forwards_previous ? forwarded : buffered;
       }
 
 #pragma hls_unroll yes
@@ -1161,6 +1183,14 @@ SC_MODULE(CIMProcessor) {
         previous[n] += static_cast<Buffer>(metadata.result[n]);
       }
 
+      if (metadata.stores_partial_sum) {
+        forwarded = previous;
+        forwarded_address = metadata.address;
+        forwarded_bank = metadata.buffer_bank;
+        forwarded_valid = true;
+      } else {
+        forwarded_valid = false;
+      }
       accum_to_wb_enq.Push(previous);
     }
   }
