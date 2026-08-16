@@ -23,4 +23,12 @@ proc pre_assembly {} {
   directive set /$full_block_name_stripped/$cim_array_name_stripped -MAP_TO_MODULE {[Block] CIMArray.v1}
 }
 
+# Keep every pending partial sum independently readable for associative forwarding
+proc pre_architect {} {
+  global full_block_name_stripped
+  set forwarding_values_path "/$full_block_name_stripped/$full_block_name_stripped:complete_accumulation/complete_accumulation/forwarded_values.value.int_val:rsc"
+
+  directive set $forwarding_values_path -MAP_TO_MODULE {[Register]}
+}
+
 # Accumulator requests and responses are decoupled across independent threads

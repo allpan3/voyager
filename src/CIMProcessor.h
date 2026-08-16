@@ -120,6 +120,44 @@ SC_MODULE(CIMProcessor) {
   static constexpr int WEIGHT_BEATS_PER_ROW = OUTPUT_AXIS_TILES / B_PORT_TILES;
 
   static constexpr int ACCUM_TO_WB_FIFO_DEPTH = SUPPORT_MX ? 8 : 1;
+  // II=1 produces one partial sum per cycle, so the three-cycle FIFO,
+  // write-request, and buffer-write path requires three bypass entries
+  static constexpr int ACCUMULATION_FORWARDING_ENTRIES = 3;
+  using AccumulationForwardingSlot = ac_int<2, false>;
+
+  // Carry an accumulated value and its pending-write forwarding slot
+  struct AccumulationResult {
+    Pack1D<Buffer, N> value;
+    AccumulationForwardingSlot forwarding_slot;
+
+    static const unsigned int width = Pack1D<Buffer, N>::width + 2;
+
+    template <unsigned int Size>
+    void Marshall(Marshaller<Size> &m) {
+      m & value;
+      m & forwarding_slot;
+    }
+
+    inline friend void sc_trace(sc_trace_file *tf,
+                                const AccumulationResult &result,
+                                const std::string &name) {
+      sc_trace(tf, result.value, name + ".value");
+      sc_trace(tf, result.forwarding_slot, name + ".forwarding_slot");
+    }
+
+    inline friend std::ostream &operator<<(std::ostream &os,
+                                           const AccumulationResult &result) {
+      os << result.value << " " << result.forwarding_slot;
+      return os;
+    }
+
+    inline friend bool operator==(const AccumulationResult &lhs,
+                                  const AccumulationResult &rhs) {
+      return lhs.value == rhs.value &&
+             lhs.forwarding_slot == rhs.forwarding_slot;
+    }
+  };
+
   static constexpr int OUTPUT_FIFO_DEPTH = 8;
   static constexpr int RESIDENT_SET_COUNT = B_SETS;
 #if DOUBLE_BUFFERED_ACCUM_BUFFER
@@ -287,10 +325,28 @@ SC_MODULE(CIMProcessor) {
       accumulation_metadata_deq);
 
   // Match MatrixProcessor's accumulation-to-write-back decoupling
-  Connections::Fifo<Pack1D<Buffer, N>, ACCUM_TO_WB_FIFO_DEPTH> CCS_INIT_S1(
+  Connections::Fifo<AccumulationResult, ACCUM_TO_WB_FIFO_DEPTH> CCS_INIT_S1(
       accum_to_wb_fifo);
-  Connections::Combinational<Pack1D<Buffer, N>> CCS_INIT_S1(accum_to_wb_enq);
-  Connections::Combinational<Pack1D<Buffer, N>> CCS_INIT_S1(accum_to_wb_deq);
+  Connections::Combinational<AccumulationResult> CCS_INIT_S1(accum_to_wb_enq);
+  Connections::Combinational<AccumulationResult> CCS_INIT_S1(accum_to_wb_deq);
+
+  // Retire forwarding slots only after their accumulation writes are accepted
+  Connections::Fifo<AccumulationForwardingSlot,
+                    ACCUMULATION_FORWARDING_ENTRIES>
+      CCS_INIT_S1(accumulation_forwarding_commit_fifo);
+  Connections::Combinational<AccumulationForwardingSlot> CCS_INIT_S1(
+      accumulation_forwarding_commit_enq);
+  Connections::Combinational<AccumulationForwardingSlot> CCS_INIT_S1(
+      accumulation_forwarding_commit_deq);
+
+  // Isolate slot-credit recycling from a blocked accumulation operation
+  Connections::Fifo<AccumulationForwardingSlot,
+                    ACCUMULATION_FORWARDING_ENTRIES>
+      CCS_INIT_S1(accumulation_forwarding_free_fifo);
+  Connections::Combinational<AccumulationForwardingSlot> CCS_INIT_S1(
+      accumulation_forwarding_free_enq);
+  Connections::Combinational<AccumulationForwardingSlot> CCS_INIT_S1(
+      accumulation_forwarding_free_deq);
 
   // Match MatrixProcessor's final-output decoupling after accumulation
   Connections::Fifo<Pack1D<Buffer, N>, OUTPUT_FIFO_DEPTH> CCS_INIT_S1(
@@ -363,6 +419,18 @@ SC_MODULE(CIMProcessor) {
     accum_to_wb_fifo.enq(accum_to_wb_enq);
     accum_to_wb_fifo.deq(accum_to_wb_deq);
 
+    accumulation_forwarding_commit_fifo.clk(clk);
+    accumulation_forwarding_commit_fifo.rst(rstn);
+    accumulation_forwarding_commit_fifo.enq(
+        accumulation_forwarding_commit_enq);
+    accumulation_forwarding_commit_fifo.deq(
+        accumulation_forwarding_commit_deq);
+
+    accumulation_forwarding_free_fifo.clk(clk);
+    accumulation_forwarding_free_fifo.rst(rstn);
+    accumulation_forwarding_free_fifo.enq(accumulation_forwarding_free_enq);
+    accumulation_forwarding_free_fifo.deq(accumulation_forwarding_free_deq);
+
     accum_output_fifo.clk(clk);
     accum_output_fifo.rst(rstn);
     accum_output_fifo.enq(accum_output_enq);
@@ -423,6 +491,10 @@ SC_MODULE(CIMProcessor) {
     async_reset_signal_is(rstn, false);
 
     SC_THREAD(complete_accumulation);
+    sensitive << clk.pos();
+    async_reset_signal_is(rstn, false);
+
+    SC_THREAD(recycle_accumulation_forwarding_slots);
     sensitive << clk.pos();
     async_reset_signal_is(rstn, false);
 
@@ -1146,6 +1218,7 @@ SC_MODULE(CIMProcessor) {
   void complete_accumulation() {
     accumulation_metadata_deq.ResetRead();
     accum_to_wb_enq.ResetWrite();
+    accumulation_forwarding_free_deq.ResetRead();
 #pragma hls_unroll yes
     for (int bank = 0; bank < ACCUM_BUFFER_BANKS; bank++) {
       accumulation_buffer_read_data[bank].Reset();
@@ -1153,10 +1226,19 @@ SC_MODULE(CIMProcessor) {
 
     wait();
 
-    Pack1D<Buffer, N> forwarded = Pack1D<Buffer, N>::zero();
-    ac_int<16, false> forwarded_address = 0;
-    ac_int<1, false> forwarded_bank = 0;
-    bool forwarded_valid = false;
+    Pack1D<Buffer, N>
+        forwarded_values[ACCUMULATION_FORWARDING_ENTRIES];
+    ac_int<16, false>
+        forwarded_addresses[ACCUMULATION_FORWARDING_ENTRIES];
+    ac_int<1, false> forwarded_banks[ACCUMULATION_FORWARDING_ENTRIES];
+    bool forwarded_lookup_valid[ACCUMULATION_FORWARDING_ENTRIES];
+#pragma hls_unroll yes
+    for (int entry = 0; entry < ACCUMULATION_FORWARDING_ENTRIES; entry++) {
+      forwarded_values[entry] = Pack1D<Buffer, N>::zero();
+      forwarded_addresses[entry] = 0;
+      forwarded_banks[entry] = 0;
+      forwarded_lookup_valid[entry] = false;
+    }
 
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
@@ -1172,10 +1254,17 @@ SC_MODULE(CIMProcessor) {
             buffered = accumulation_buffer_read_data[bank].Pop();
           }
         }
-        const bool forwards_previous = forwarded_valid &&
-                                       metadata.address == forwarded_address &&
-                                       metadata.buffer_bank == forwarded_bank;
-        previous = forwards_previous ? forwarded : buffered;
+        previous = buffered;
+        bool forwards_previous = false;
+#pragma hls_unroll yes
+        for (int entry = 0; entry < ACCUMULATION_FORWARDING_ENTRIES; entry++) {
+          if (!forwards_previous && forwarded_lookup_valid[entry] &&
+              metadata.address == forwarded_addresses[entry] &&
+              metadata.buffer_bank == forwarded_banks[entry]) {
+            previous = forwarded_values[entry];
+            forwards_previous = true;
+          }
+        }
       }
 
 #pragma hls_unroll yes
@@ -1183,15 +1272,53 @@ SC_MODULE(CIMProcessor) {
         previous[n] += static_cast<Buffer>(metadata.result[n]);
       }
 
-      if (metadata.stores_partial_sum) {
-        forwarded = previous;
-        forwarded_address = metadata.address;
-        forwarded_bank = metadata.buffer_bank;
-        forwarded_valid = true;
-      } else {
-        forwarded_valid = false;
+      AccumulationResult completed;
+      completed.value = previous;
+      completed.forwarding_slot = 0;
+#pragma hls_unroll yes
+      for (int entry = 0; entry < ACCUMULATION_FORWARDING_ENTRIES; entry++) {
+        if (forwarded_lookup_valid[entry] &&
+            forwarded_addresses[entry] == metadata.address &&
+            forwarded_banks[entry] == metadata.buffer_bank) {
+          forwarded_lookup_valid[entry] = false;
+        }
       }
-      accum_to_wb_enq.Push(previous);
+
+      if (metadata.stores_partial_sum) {
+        const AccumulationForwardingSlot allocation_slot =
+            accumulation_forwarding_free_deq.Pop();
+#pragma hls_unroll yes
+        for (int entry = 0; entry < ACCUMULATION_FORWARDING_ENTRIES; entry++) {
+          if (allocation_slot == entry) {
+            forwarded_values[entry] = previous;
+            forwarded_addresses[entry] = metadata.address;
+            forwarded_banks[entry] = metadata.buffer_bank;
+            forwarded_lookup_valid[entry] = true;
+          }
+        }
+        completed.forwarding_slot = allocation_slot;
+      }
+      accum_to_wb_enq.Push(completed);
+    }
+  }
+
+  // Seed and recycle accumulation forwarding slots independently of datapath
+  void recycle_accumulation_forwarding_slots() {
+    accumulation_forwarding_commit_deq.ResetRead();
+    accumulation_forwarding_free_enq.ResetWrite();
+
+    wait();
+
+    for (int entry = 0; entry < ACCUMULATION_FORWARDING_ENTRIES; entry++) {
+      accumulation_forwarding_free_enq.Push(
+          AccumulationForwardingSlot(entry));
+    }
+
+#pragma hls_pipeline_init_interval 1
+#pragma hls_pipeline_stall_mode flush
+    while (true) {
+      accumulation_forwarding_free_enq.Push(
+          accumulation_forwarding_commit_deq.Pop());
     }
   }
 
@@ -1200,6 +1327,7 @@ SC_MODULE(CIMProcessor) {
     write_back_params_deq.ResetRead();
     accum_to_wb_deq.ResetRead();
     accum_output_enq.ResetWrite();
+    accumulation_forwarding_commit_enq.ResetWrite();
 #pragma hls_unroll yes
     for (int bank = 0; bank < ACCUM_BUFFER_BANKS; bank++) {
       accumulation_buffer_write_request[bank].Reset();
@@ -1224,7 +1352,8 @@ SC_MODULE(CIMProcessor) {
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
       for (ac_int<32, false> step = 0; step < total_ops; step++) {
-        const Pack1D<Buffer, N> accumulated = accum_to_wb_deq.Pop();
+        const AccumulationResult completed = accum_to_wb_deq.Pop();
+        const Pack1D<Buffer, N> accumulated = completed.value;
         const bool store_partial_sum =
             stores_partial_sum(params, loop_counters);
 
@@ -1237,6 +1366,8 @@ SC_MODULE(CIMProcessor) {
           request.last = false;
           accumulation_buffer_write_request[accumulation_buffer_bank].Push(
               request);
+          accumulation_forwarding_commit_enq.Push(
+              completed.forwarding_slot);
         }
 
 #if DOUBLE_BUFFERED_ACCUM_BUFFER
