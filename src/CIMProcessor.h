@@ -257,8 +257,8 @@ SC_MODULE(CIMProcessor) {
   Connections::In<ac_int<Scale::width * N, false>> CCS_INIT_S1(
       weight_scale_channel);
 #endif
-
   Connections::SyncOut CCS_INIT_S1(start);
+
 
 #if ENABLE_PERF_COUNTERS
   sc_in<MatrixPerformance::CounterIndex> CCS_INIT_S1(perf_counter_select);
@@ -349,9 +349,11 @@ SC_MODULE(CIMProcessor) {
   using ResidentSetStateBits = ac_int<1, false>;
 
   Array CCS_INIT_S1(cim_array);
-  Connections::Combinational<MACRequest> CCS_INIT_S1(mac_request_channel);
+  Connections::Combinational<MACRequest, Connections::SYN_PORT> CCS_INIT_S1(
+      mac_request_channel);
   Connections::Combinational<WriteRequest> CCS_INIT_S1(write_request_channel);
-  Connections::Combinational<CBeat> CCS_INIT_S1(result_channel);
+  Connections::Combinational<CBeat, Connections::SYN_PORT> CCS_INIT_S1(
+      result_channel);
 #if ENABLE_PERF_COUNTERS
   sc_signal<bool> completion_storage_stall;
   sc_signal<bool> result_slot_stall;
@@ -406,7 +408,7 @@ SC_MODULE(CIMProcessor) {
   Connections::Combinational<ScheduledWeightDescriptor> CCS_INIT_S1(
       scheduled_weight_descriptor_deq);
 
-  // Buffer descriptors independently for the continuous programming loop
+  // Buffer descriptors independently for the continuous weight-load loop
   Connections::Fifo<ScheduledWeightDescriptor,
                     WEIGHT_DESCRIPTOR_FIFO_DEPTH> CCS_INIT_S1(
       loader_weight_descriptor_fifo);
@@ -1045,6 +1047,7 @@ SC_MODULE(CIMProcessor) {
         // Atomic request acceptance is the physical issue acknowledged by
         // CIMArray
         mac_request_channel.Push(request);
+
         advance_loop_counters(loop_counters, params);
         const bool finishes_set_run =
             step + 1 == total_ops ||
@@ -1461,12 +1464,12 @@ SC_MODULE(CIMProcessor) {
   }
 
 #if ENABLE_PERF_COUNTERS
-  // Count synthesized CIM handshakes and stalls without participating in
-  // datapath control
+  // Count CIM handshakes and stalls without participating in datapath control
   void monitor_performance() {
     MatrixPerformance::Counter
         counters[MatrixPerformance::PERFORMANCE_COUNTER_COUNT];
     ac_int<16, false> inflight = 0;
+    ac_int<16, false> weight_beat_idx = 0;
     MatrixPerformance::SnapshotSequence snapshot_sequence = 0;
     bool active = false;
     bool observed_completion_toggle = false;
@@ -1486,15 +1489,15 @@ SC_MODULE(CIMProcessor) {
       const bool completion_toggle = perf_completion_toggle.read();
       const bool completed = completion_toggle != observed_completion_toggle;
       const bool started = params_in.vld.read() && params_in.rdy.read();
-#ifdef __SYNTHESIS__
+      const bool weight_load_accepted =
+          weight_channel.vld.read() && weight_channel.rdy.read();
+      const bool weight_load_active = weight_load_accepted;
+      const bool set_filled =
+          weight_load_accepted && weight_beat_idx == K * WEIGHT_BEATS_PER_ROW - 1;
       const bool issue =
           mac_request_channel.vld.read() && mac_request_channel.rdy.read();
       const bool retire =
           result_channel.vld.read() && result_channel.rdy.read();
-#else
-      const bool issue = false;
-      const bool retire = false;
-#endif
 
       if (completed) {
         snapshot_sequence++;
@@ -1516,10 +1519,29 @@ SC_MODULE(CIMProcessor) {
           counters[i] = 0;
         }
         inflight = 0;
+        weight_beat_idx = 0;
         active = true;
       } else if (active && !completed) {
         counters[MatrixPerformance::storage_index(
             MatrixPerformance::PROCESSOR_ACTIVE_CYCLES)]++;
+
+        if (set_filled)
+          counters[MatrixPerformance::storage_index(
+              MatrixPerformance::CIM_SET_FILLS)]++;
+        if (weight_load_accepted)
+          counters[MatrixPerformance::storage_index(
+              MatrixPerformance::CIM_WEIGHT_LOAD_BYTES)] +=
+              (WEIGHT_WRITE_WIDTH + 7) / 8;
+        if (weight_load_active)
+          counters[MatrixPerformance::storage_index(
+              MatrixPerformance::CIM_WEIGHT_LOAD_CYCLES)]++;
+
+        if (weight_load_accepted) {
+          if (set_filled)
+            weight_beat_idx = 0;
+          else
+            weight_beat_idx++;
+        }
 
         if (inflight != 0 || issue)
           counters[MatrixPerformance::storage_index(
@@ -1531,7 +1553,6 @@ SC_MODULE(CIMProcessor) {
         if (input_channel.rdy.read() && !input_channel.vld.read())
           counters[MatrixPerformance::storage_index(
               MatrixPerformance::INPUT_UNAVAILABLE_CYCLES)]++;
-#ifdef __SYNTHESIS__
         const bool input_backpressured =
             mac_request_channel.vld.read() && !mac_request_channel.rdy.read();
         if (input_backpressured)
@@ -1546,18 +1567,15 @@ SC_MODULE(CIMProcessor) {
         if (completion_descriptor_stall.read())
           counters[MatrixPerformance::storage_index(
               MatrixPerformance::CIM_COMPLETION_DESCRIPTOR_STALL_CYCLES)]++;
-#endif
         if (weight_channel.rdy.read() && !weight_channel.vld.read())
           counters[MatrixPerformance::storage_index(
               MatrixPerformance::WEIGHT_UNAVAILABLE_CYCLES)]++;
-#ifdef __SYNTHESIS__
         if (weight_channel.vld.read() && !weight_channel.rdy.read())
           counters[MatrixPerformance::storage_index(
               MatrixPerformance::WEIGHT_BACKPRESSURE_CYCLES)]++;
         if (result_channel.vld.read() && !result_channel.rdy.read())
           counters[MatrixPerformance::storage_index(
               MatrixPerformance::RESULT_BACKPRESSURE_CYCLES)]++;
-#endif
 
         bool accumulation_stalled = false;
 #pragma hls_unroll yes
@@ -1572,24 +1590,9 @@ SC_MODULE(CIMProcessor) {
               !accumulation_buffer_write_request[i].rdy.read();
         }
 
-#ifdef __SYNTHESIS__
-        if (accum_to_wb_enq.vld.read() && !accum_to_wb_enq.rdy.read())
-          accumulation_stalled = true;
-#endif
-
-        bool final_output_stalled = false;
-#ifdef __SYNTHESIS__
-        final_output_stalled =
-            accum_output_enq.vld.read() && !accum_output_enq.rdy.read();
-#endif
         if (accumulation_stalled)
           counters[MatrixPerformance::storage_index(
               MatrixPerformance::ACCUMULATION_STALL_CYCLES)]++;
-#ifdef __SYNTHESIS__
-        if (final_output_stalled)
-          counters[MatrixPerformance::storage_index(
-              MatrixPerformance::OUTPUT_FIFO_FULL_CYCLES)]++;
-#endif
         if (output_channel.vld.read() && !output_channel.rdy.read())
           counters[MatrixPerformance::storage_index(
               MatrixPerformance::OUTPUT_BACKPRESSURE_CYCLES)]++;

@@ -32,16 +32,17 @@ struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
 
  private:
   InputSerializedSkewer<Input, rows> CCS_INIT_S1(input_skewer);
-  Connections::Combinational<Pack1D<PEInput<Input>, rows>> CCS_INIT_S1(
-      input_skewer_din);
+  Connections::Combinational<Pack1D<PEInput<Input>, rows>,
+                             Connections::SYN_PORT>
+      CCS_INIT_S1(input_skewer_din);
 
   WeightSerializedSkewer<Weight, cols> CCS_INIT_S1(weight_skewer);
   Connections::Combinational<Pack1D<PEWeight<Weight>, cols>> CCS_INIT_S1(
       weight_skewer_din);
 
   DeserializedSkewer<Psum, cols> CCS_INIT_S1(psum_out_skewer);
-  Connections::Combinational<Pack1D<Psum, cols>> CCS_INIT_S1(
-      psum_out_skewer_dout);
+  Connections::Combinational<Pack1D<Psum, cols>, Connections::SYN_PORT>
+      CCS_INIT_S1(psum_out_skewer_dout);
 
   SystolicArray<Input, Weight, Psum, rows, cols> CCS_INIT_S1(systolic_array);
 
@@ -791,8 +792,7 @@ struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
   }
 
 #if ENABLE_PERF_COUNTERS
-  // Count synthesized handshakes and stalls without participating in datapath
-  // control
+  // Count handshakes and stalls without participating in datapath control
   void monitor_performance() {
     MatrixPerformance::Counter
         counters[MatrixPerformance::PERFORMANCE_COUNTER_COUNT];
@@ -816,15 +816,10 @@ struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
       const bool completion_toggle = perf_completion_toggle.read();
       const bool completed = completion_toggle != observed_completion_toggle;
       const bool started = params_in.vld.read() && params_in.rdy.read();
-#ifdef __SYNTHESIS__
       const bool issue =
           input_skewer_din.vld.read() && input_skewer_din.rdy.read();
       const bool retire =
           psum_out_skewer_dout.vld.read() && psum_out_skewer_dout.rdy.read();
-#else
-      const bool issue = false;
-      const bool retire = false;
-#endif
 
       if (completed) {
         snapshot_sequence++;
@@ -858,22 +853,19 @@ struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
         if (input_channel.rdy.read() && !input_channel.vld.read())
           counters[MatrixPerformance::storage_index(
               MatrixPerformance::INPUT_UNAVAILABLE_CYCLES)]++;
-#ifdef __SYNTHESIS__
         if (input_skewer_din.vld.read() && !input_skewer_din.rdy.read())
           counters[MatrixPerformance::storage_index(
               MatrixPerformance::INPUT_BACKPRESSURE_CYCLES)]++;
-#endif
         if (weight_channel.rdy.read() && !weight_channel.vld.read())
           counters[MatrixPerformance::storage_index(
               MatrixPerformance::WEIGHT_UNAVAILABLE_CYCLES)]++;
-#ifdef __SYNTHESIS__
         if (weight_channel.vld.read() && !weight_channel.rdy.read())
           counters[MatrixPerformance::storage_index(
               MatrixPerformance::WEIGHT_BACKPRESSURE_CYCLES)]++;
-        if (psum_out_skewer_dout.vld.read() && !psum_out_skewer_dout.rdy.read())
+        if (psum_out_skewer_dout.vld.read() &&
+            !psum_out_skewer_dout.rdy.read())
           counters[MatrixPerformance::storage_index(
               MatrixPerformance::RESULT_BACKPRESSURE_CYCLES)]++;
-#endif
 
         bool accumulation_stalled = false;
 #pragma hls_unroll yes
@@ -888,18 +880,9 @@ struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
               !accumulation_buffer_write_request[i].rdy.read();
         }
 
-#ifdef __SYNTHESIS__
-        if (accum_to_wb_enq.vld.read() && !accum_to_wb_enq.rdy.read())
-          accumulation_stalled = true;
-#endif
         if (accumulation_stalled)
           counters[MatrixPerformance::storage_index(
               MatrixPerformance::ACCUMULATION_STALL_CYCLES)]++;
-#ifdef __SYNTHESIS__
-        if (accum_output_enq.vld.read() && !accum_output_enq.rdy.read())
-          counters[MatrixPerformance::storage_index(
-              MatrixPerformance::OUTPUT_FIFO_FULL_CYCLES)]++;
-#endif
         if (output_channel.vld.read() && !output_channel.rdy.read())
           counters[MatrixPerformance::storage_index(
               MatrixPerformance::OUTPUT_BACKPRESSURE_CYCLES)]++;

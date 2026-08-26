@@ -30,7 +30,8 @@ SC_MODULE(InputSerializedSkewer) {
   sc_in<bool> CCS_INIT_S1(clk);
   sc_in<bool> CCS_INIT_S1(rstn);
 
-  Connections::In<Pack1D<PEInput<T>, size>> CCS_INIT_S1(din);
+  Connections::In<Pack1D<PEInput<T>, size>, Connections::SYN_PORT> CCS_INIT_S1(
+      din);
   Connections::Out<PEInput<T>> dout[size];
 
 #define DECL_FIFO(z, i, data)                                               \
@@ -173,8 +174,7 @@ SC_MODULE(DeserializedSkewer) {
   sc_in<bool> CCS_INIT_S1(rstn);
 
   Connections::In<T> din[size];
-  Connections::Out<Pack1D<T, size>> CCS_INIT_S1(dout);
-
+  Connections::Out<Pack1D<T, size>, Connections::SYN_PORT> CCS_INIT_S1(dout);
 #define DECL_FIFO(z, i, data)                                        \
   Connections::Fifo<T, OC_DIMENSION - i + 2> GEN_NAMED_VAR(fifo, i); \
   Connections::Combinational<T> GEN_NAMED_VAR(fifo_din, i);          \

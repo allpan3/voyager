@@ -621,11 +621,13 @@ void Harness::print_matrix_performance() {
       "result_backpressure_cycles",
       "accumulation_stall_cycles",
       "output_backpressure_cycles",
-      "output_fifo_full_cycles",
       "mac_wait_weight_set_load_cycles",
       "cim_completion_storage_stall_cycles",
       "cim_result_slot_stall_cycles",
       "cim_completion_descriptor_stall_cycles",
+      "cim_set_fills",
+      "cim_weight_load_bytes",
+      "cim_weight_load_cycles",
   };
 
   MatrixPerformance::Counter values[MatrixPerformance::COUNTER_COUNT];

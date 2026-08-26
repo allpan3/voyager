@@ -36,7 +36,7 @@ export CIM_A_PORT_TILES ?= $(CIM_INPUT_AXIS_TILES)
 export CIM_B_PORT_TILES ?= $(CIM_OUTPUT_AXIS_TILES)
 export CIM_C_PORT_TILES ?= $(if $(filter 0,$(CIM_C_BEAT_LAYOUT)),$(CIM_INPUT_AXIS_TILES),$(CIM_OUTPUT_AXIS_TILES))
 export CIM_ARRAY_RESULT_SLOTS_PER_OUTPUT_LANE ?= $(CIM_INPUT_AXIS_TILES)
-export ENABLE_PERF_COUNTERS ?= 0
+export ENABLE_PERF_COUNTERS ?= 1
 
 # Check if the environment variable is set
 check_env_var:

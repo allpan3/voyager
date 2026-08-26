@@ -332,7 +332,7 @@ SC_MODULE(CIMArray) {
 
   ConnectionsSignal::In<MACRequest> CCS_INIT_S1(mac_request_channel);
   ConnectionsSignal::In<WriteRequest> CCS_INIT_S1(write_request_channel);
-  Connections::Out<CBeat> CCS_INIT_S1(result_channel);
+  Connections::Out<CBeat, Connections::SYN_PORT> CCS_INIT_S1(result_channel);
 #if ENABLE_PERF_COUNTERS
   sc_out<bool> CCS_INIT_S1(completion_storage_stall);
   sc_out<bool> CCS_INIT_S1(result_slot_stall);

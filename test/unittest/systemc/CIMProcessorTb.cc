@@ -491,7 +491,7 @@ SC_MODULE(CIMProcessorTb) {
     }
   }
 
-  // Queue one set without coupling its programming to input acceptance
+  // Queue one set without coupling its weight load to input acceptance
   int queue_weight_set(int weight_pattern) {
     pending_weight_sets.push_back(weight_pattern);
     queued_weight_sets++;
@@ -764,7 +764,7 @@ SC_MODULE(CIMProcessorTb) {
     std::cout << std::endl;
   }
 
-  // Require descriptor grouping to preserve resident-set programming cadence
+  // Require descriptor grouping to preserve resident-set load cadence
   void require_matching_weight_intervals(
       const std::vector<unsigned long> &split_cycles,
       const std::vector<unsigned long> &grouped_cycles) {
@@ -782,7 +782,7 @@ SC_MODULE(CIMProcessorTb) {
                 << " grouped=" << grouped_interval << std::endl;
       std::ostringstream message;
       message << "descriptor boundary changed set " << index
-              << " programming interval from " << grouped_interval << " to "
+              << " load interval from " << grouped_interval << " to "
               << split_interval;
       require(split_interval == grouped_interval, message.str());
     }
@@ -813,6 +813,12 @@ SC_MODULE(CIMProcessorTb) {
         read_performance_counter(MatrixPerformance::ARRAY_ISSUE_CYCLES);
     const MatrixPerformance::Counter input_backpressure_cycles =
         read_performance_counter(MatrixPerformance::INPUT_BACKPRESSURE_CYCLES);
+    const MatrixPerformance::Counter set_fills =
+        read_performance_counter(MatrixPerformance::CIM_SET_FILLS);
+    const MatrixPerformance::Counter weight_load_bytes =
+        read_performance_counter(MatrixPerformance::CIM_WEIGHT_LOAD_BYTES);
+    const MatrixPerformance::Counter weight_load_cycles =
+        read_performance_counter(MatrixPerformance::CIM_WEIGHT_LOAD_CYCLES);
     const MatrixPerformance::Counter completion_storage_stall_cycles =
         read_performance_counter(
             MatrixPerformance::CIM_COMPLETION_STORAGE_STALL_CYCLES);
@@ -829,11 +835,23 @@ SC_MODULE(CIMProcessorTb) {
               << " active_cycles=" << active_cycles
               << " issue_cycles=" << issue_cycles
               << " input_backpressure_cycles=" << input_backpressure_cycles
+              << " set_fills=" << set_fills
+              << " weight_load_bytes=" << weight_load_bytes
+              << " weight_load_cycles=" << weight_load_cycles
               << " completion_storage_stall_cycles="
               << completion_storage_stall_cycles
               << " result_slot_stall_cycles=" << result_slot_stall_cycles
               << " completion_descriptor_stall_cycles="
               << completion_descriptor_stall_cycles << std::endl;
+
+    const unsigned bytes_per_set = K * N * ((B_WIDTH + 7) / 8);
+    const unsigned bytes_per_beat =
+        (Processor::WEIGHT_WRITE_WIDTH + 7) / 8;
+    require(set_fills > 0, "hardware counter missed resident-set fills");
+    require(weight_load_bytes == set_fills * bytes_per_set,
+            "hardware weight-load byte count does not match completed sets");
+    require(weight_load_cycles >= weight_load_bytes / bytes_per_beat,
+            "hardware weight-load cycles are shorter than accepted transfers");
   }
 #endif
 

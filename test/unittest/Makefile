@@ -22,7 +22,7 @@ WAVEFORM_ARG := $(if $(WAVEFORM),--waveform,)
 DATATYPE ?= INT8
 IC_DIMENSION ?= 4
 OC_DIMENSION ?= 2
-ENABLE_PERF_COUNTERS ?= 0
+ENABLE_PERF_COUNTERS ?= 1
 
 SYSTEMC_CC ?= $(CATAPULT_ROOT)/bin/g++
 ifneq ($(wildcard $(CONDA_ENV)/bin/verilator),)

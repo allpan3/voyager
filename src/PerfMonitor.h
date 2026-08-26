@@ -3,13 +3,13 @@
 #include <ac_int.h>
 
 #ifndef ENABLE_PERF_COUNTERS
-#define ENABLE_PERF_COUNTERS 0
+#define ENABLE_PERF_COUNTERS 1
 #endif
 
 namespace MatrixPerformance {
 
 using Counter = ac_int<32, false>;
-using CounterIndex = ac_int<4, false>;
+using CounterIndex = ac_int<5, false>;
 using SnapshotSequence = ac_int<16, false>;
 
 // Stable indices for the optional synthesized matrix-performance counter bank
@@ -25,11 +25,13 @@ enum CounterId {
   RESULT_BACKPRESSURE_CYCLES,
   ACCUMULATION_STALL_CYCLES,
   OUTPUT_BACKPRESSURE_CYCLES,
-  OUTPUT_FIFO_FULL_CYCLES,
   MAC_WAIT_WEIGHT_SET_LOAD_CYCLES,
   CIM_COMPLETION_STORAGE_STALL_CYCLES,
   CIM_RESULT_SLOT_STALL_CYCLES,
   CIM_COMPLETION_DESCRIPTOR_STALL_CYCLES,
+  CIM_SET_FILLS,
+  CIM_WEIGHT_LOAD_BYTES,
+  CIM_WEIGHT_LOAD_CYCLES,
   COUNTER_COUNT
 };
 
