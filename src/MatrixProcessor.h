@@ -213,8 +213,7 @@ struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
       for (int i = 0; i < 2; i++) {
 #pragma hls_unroll yes
         for (int j = 0; j < 6; j++) {
-          loop_bounds[i][j] = matrix_loop_slot_bound(
-              params, matrix_loop_level_from_outer_first_index(i), j);
+          loop_bounds[i][j] = params.loops[i][j];
         }
       }
 
@@ -227,13 +226,9 @@ struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
       int rep_bound = 1;
 
       if (params.weight_transpose && cols > rows) {
-        if (loop_bounds[0][matrix_loop_position(params, MatrixLoopLevel::L2,
-                                                MatrixLoopParam::IC)] >=
-            (cols / rows)) {
+        if (loop_bounds[0][params.reduction_loop_idx[0]] >= (cols / rows)) {
           // we are able to reuse the weights already in the buffer
-          loop_bounds[0][matrix_loop_position(params, MatrixLoopLevel::L2,
-                                              MatrixLoopParam::IC)] /=
-              (cols / rows);
+          loop_bounds[0][params.reduction_loop_idx[0]] /= (cols / rows);
           rep_bound = (cols / rows);
         }
       }
@@ -344,18 +339,12 @@ struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
       // We can reuse weights and avoid reloading them if FY, FX, C1, and K1
       // are all 1 (e.g. 1x1 pointwise conv with C and K equal to IC and OC)
       // and either OX or OY is the innermost L2 loop
-      auto FY1 = matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                   MatrixLoopParam::FY);
-      auto C2 = matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                  MatrixLoopParam::IC);
-      auto FY0 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                   MatrixLoopParam::FY);
-      auto FX = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                  MatrixLoopParam::FX);
-      auto C1 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                  MatrixLoopParam::IC);
-      auto K1 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                  MatrixLoopParam::OC);
+      auto FY1 = params.loops[0][params.fy_loop_idx[0]];
+      auto C2 = params.loops[0][params.reduction_loop_idx[0]];
+      auto FY0 = params.loops[1][params.fy_loop_idx[1]];
+      auto FX = params.loops[1][params.fx_loop_idx];
+      auto C1 = params.loops[1][params.reduction_loop_idx[1]];
+      auto K1 = params.loops[1][params.weight_loop_idx[1]];
 
       bool x_inner = params.weight_loop_idx[0] < params.x_loop_idx[0];
       bool y_inner = params.weight_loop_idx[0] < params.y_loop_idx[0];
@@ -374,17 +363,10 @@ struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
       }
 
       ac_int<32, false> total_ops =
-          matrix_loop_slot_bound(params, MatrixLoopLevel::L2, 0) *
-          matrix_loop_slot_bound(params, MatrixLoopLevel::L2, 1) *
-          matrix_loop_slot_bound(params, MatrixLoopLevel::L2, 2) *
-          matrix_loop_slot_bound(params, MatrixLoopLevel::L2, 3) *
-          matrix_loop_slot_bound(params, MatrixLoopLevel::L2, 4) *
-          matrix_loop_slot_bound(params, MatrixLoopLevel::L1, 0) *
-          matrix_loop_slot_bound(params, MatrixLoopLevel::L1, 1) *
-          matrix_loop_slot_bound(params, MatrixLoopLevel::L1, 2) *
-          matrix_loop_slot_bound(params, MatrixLoopLevel::L1, 3) *
-          matrix_loop_slot_bound(params, MatrixLoopLevel::L1, 4) *
-          matrix_loop_slot_bound(params, MatrixLoopLevel::L1, 5);
+          params.loops[0][0] * params.loops[0][1] * params.loops[0][2] *
+          params.loops[0][3] * params.loops[0][4] * params.loops[1][0] *
+          params.loops[1][1] * params.loops[1][2] * params.loops[1][3] *
+          params.loops[1][4] * params.loops[1][5];
 
       ac_int<32, false> step = 0;
 
@@ -447,9 +429,7 @@ struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
         for (int i = 1; i >= 0; i--) {
 #pragma hls_unroll yes
           for (int j = 5; j >= 0; j--) {
-            if (loop_counters[i][j] ==
-                matrix_loop_slot_bound(
-                    params, matrix_loop_level_from_outer_first_index(i), j)) {
+            if (loop_counters[i][j] == params.loops[i][j]) {
               loop_counters[i][j] = 0;
               if (j > 0) {
                 loop_counters[i][j - 1]++;
@@ -497,71 +477,40 @@ struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
       }
 
       ac_int<32, false> total_ops =
-          matrix_loop_slot_bound(params, MatrixLoopLevel::L2, 0) *
-          matrix_loop_slot_bound(params, MatrixLoopLevel::L2, 1) *
-          matrix_loop_slot_bound(params, MatrixLoopLevel::L2, 2) *
-          matrix_loop_slot_bound(params, MatrixLoopLevel::L2, 3) *
-          matrix_loop_slot_bound(params, MatrixLoopLevel::L2, 4) *
-          matrix_loop_slot_bound(params, MatrixLoopLevel::L1, 0) *
-          matrix_loop_slot_bound(params, MatrixLoopLevel::L1, 1) *
-          matrix_loop_slot_bound(params, MatrixLoopLevel::L1, 2) *
-          matrix_loop_slot_bound(params, MatrixLoopLevel::L1, 3) *
-          matrix_loop_slot_bound(params, MatrixLoopLevel::L1, 4) *
-          matrix_loop_slot_bound(params, MatrixLoopLevel::L1, 5);
+          params.loops[0][0] * params.loops[0][1] * params.loops[0][2] *
+          params.loops[0][3] * params.loops[0][4] * params.loops[1][0] *
+          params.loops[1][1] * params.loops[1][2] * params.loops[1][3] *
+          params.loops[1][4] * params.loops[1][5];
 
       ac_int<32, false> step = 0;
 
       ac_int<LOOP_WIDTH, false> c2_bound =
-          matrix_loop_bound(params, MatrixLoopLevel::L2,
-                            MatrixLoopParam::IC) -
-          1;
+          params.loops[0][params.reduction_loop_idx[0]] - 1;
       ac_int<LOOP_WIDTH, false> c1_bound =
-          matrix_loop_bound(params, MatrixLoopLevel::L1,
-                            MatrixLoopParam::IC) -
-          1;
+          params.loops[1][params.reduction_loop_idx[1]] - 1;
       ac_int<LOOP_WIDTH, false> k1_bound =
-          matrix_loop_bound(params, MatrixLoopLevel::L1,
-                            MatrixLoopParam::OC) -
-          1;
+          params.loops[1][params.weight_loop_idx[1]] - 1;
       ac_int<LOOP_WIDTH, false> fx_bound =
-          matrix_loop_bound(params, MatrixLoopLevel::L1,
-                            MatrixLoopParam::FX) -
-          1;
+          params.loops[1][params.fx_loop_idx] - 1;
       ac_int<LOOP_WIDTH, false> fy0_bound =
-          matrix_loop_bound(params, MatrixLoopLevel::L2,
-                            MatrixLoopParam::FY) -
-          1;
+          params.loops[0][params.fy_loop_idx[0]] - 1;
       ac_int<LOOP_WIDTH, false> fy1_bound =
-          matrix_loop_bound(params, MatrixLoopLevel::L1,
-                            MatrixLoopParam::FY) -
-          1;
+          params.loops[1][params.fy_loop_idx[1]] - 1;
       ac_int<LOOP_WIDTH, false> y0_bound =
-          matrix_loop_bound(params, MatrixLoopLevel::L1,
-                            MatrixLoopParam::OY) -
-          1;
+          params.loops[1][params.y_loop_idx[1]] - 1;
       ac_int<LOOP_WIDTH, false> x0_bound =
-          matrix_loop_bound(params, MatrixLoopLevel::L1,
-                            MatrixLoopParam::OX) -
-          1;
+          params.loops[1][params.x_loop_idx[1]] - 1;
 
-      ac_int<LOOP_WIDTH, false> Y0 = matrix_loop_bound(
-          params, MatrixLoopLevel::L1, MatrixLoopParam::OY);
-      ac_int<LOOP_WIDTH, false> X0 = matrix_loop_bound(
-          params, MatrixLoopLevel::L1, MatrixLoopParam::OX);
+      ac_int<LOOP_WIDTH, false> Y0 = params.loops[1][params.y_loop_idx[1]];
+      ac_int<LOOP_WIDTH, false> X0 = params.loops[1][params.x_loop_idx[1]];
       ac_int<16, false> k_stride = Y0 * X0;
 
-      auto FY1 = matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                   MatrixLoopParam::FY);
-      auto C2 = matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                  MatrixLoopParam::IC);
-      auto FY0 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                   MatrixLoopParam::FY);
-      auto FX = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                  MatrixLoopParam::FX);
-      auto C1 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                  MatrixLoopParam::IC);
-      auto K1 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                  MatrixLoopParam::OC);
+      auto FY1 = params.loops[0][params.fy_loop_idx[0]];
+      auto C2 = params.loops[0][params.reduction_loop_idx[0]];
+      auto FY0 = params.loops[1][params.fy_loop_idx[1]];
+      auto FX = params.loops[1][params.fx_loop_idx];
+      auto C1 = params.loops[1][params.reduction_loop_idx[1]];
+      auto K1 = params.loops[1][params.weight_loop_idx[1]];
 
       bool x_inner = params.weight_loop_idx[0] < params.x_loop_idx[0];
       bool y_inner = params.weight_loop_idx[0] < params.y_loop_idx[0];
@@ -589,9 +538,7 @@ struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
 
       // loop indices that are used to determine when to read in a new bias
       int bias_reuse_indices[4] = {5, 5, 5, 5};
-      for (int i = 5; i > matrix_loop_position(params, MatrixLoopLevel::L1,
-                                               MatrixLoopParam::OC);
-           i--) {
+      for (int i = 5; i > params.weight_loop_idx[1]; i--) {
         bias_reuse_indices[5 - i] = i;
       }
 
@@ -622,16 +569,11 @@ struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
 #endif
 
         bool is_non_accumulating_tile =
-            loop_counters[0][matrix_loop_position(
-                params, MatrixLoopLevel::L2, MatrixLoopParam::IC)] == 0 &&
-            loop_counters[1][matrix_loop_position(
-                params, MatrixLoopLevel::L1, MatrixLoopParam::IC)] == 0 &&
-            loop_counters[1][matrix_loop_position(
-                params, MatrixLoopLevel::L1, MatrixLoopParam::FX)] == 0 &&
-            loop_counters[0][matrix_loop_position(
-                params, MatrixLoopLevel::L2, MatrixLoopParam::FY)] == 0 &&
-            loop_counters[1][matrix_loop_position(
-                params, MatrixLoopLevel::L1, MatrixLoopParam::FY)] == 0;
+            loop_counters[0][params.reduction_loop_idx[0]] == 0 &&
+            loop_counters[1][params.reduction_loop_idx[1]] == 0 &&
+            loop_counters[1][params.fx_loop_idx] == 0 &&
+            loop_counters[0][params.fy_loop_idx[0]] == 0 &&
+            loop_counters[1][params.fy_loop_idx[1]] == 0;
 
         Pack1D<Buffer, cols> previous_accumulation;
 
@@ -655,14 +597,9 @@ struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
           }
         } else {
           ac_int<16, false> address =
-              loop_counters[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                                    MatrixLoopParam::OC)] *
-                  k_stride +
-              loop_counters[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                                    MatrixLoopParam::OY)] *
-                  X0 +
-              loop_counters[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                                    MatrixLoopParam::OX)];
+              loop_counters[1][params.weight_loop_idx[1]] * k_stride +
+              loop_counters[1][params.y_loop_idx[1]] * X0 +
+              loop_counters[1][params.x_loop_idx[1]];
 
           accumulation_buffer_read_address[accumulation_buffer_bank].Push(
               address);
@@ -708,9 +645,7 @@ struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
         for (int i = 1; i >= 0; i--) {
 #pragma hls_unroll yes
           for (int j = 5; j >= 0; j--) {
-            if (loop_counters[i][j] ==
-                matrix_loop_slot_bound(
-                    params, matrix_loop_level_from_outer_first_index(i), j)) {
+            if (loop_counters[i][j] == params.loops[i][j]) {
               loop_counters[i][j] = 0;
               if (j > 0) {
                 loop_counters[i][j - 1]++;
@@ -757,57 +692,32 @@ struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
       }
 
       ac_int<32, false> total_ops =
-          matrix_loop_slot_bound(params, MatrixLoopLevel::L2, 0) *
-          matrix_loop_slot_bound(params, MatrixLoopLevel::L2, 1) *
-          matrix_loop_slot_bound(params, MatrixLoopLevel::L2, 2) *
-          matrix_loop_slot_bound(params, MatrixLoopLevel::L2, 3) *
-          matrix_loop_slot_bound(params, MatrixLoopLevel::L2, 4) *
-          matrix_loop_slot_bound(params, MatrixLoopLevel::L1, 0) *
-          matrix_loop_slot_bound(params, MatrixLoopLevel::L1, 1) *
-          matrix_loop_slot_bound(params, MatrixLoopLevel::L1, 2) *
-          matrix_loop_slot_bound(params, MatrixLoopLevel::L1, 3) *
-          matrix_loop_slot_bound(params, MatrixLoopLevel::L1, 4) *
-          matrix_loop_slot_bound(params, MatrixLoopLevel::L1, 5);
+          params.loops[0][0] * params.loops[0][1] * params.loops[0][2] *
+          params.loops[0][3] * params.loops[0][4] * params.loops[1][0] *
+          params.loops[1][1] * params.loops[1][2] * params.loops[1][3] *
+          params.loops[1][4] * params.loops[1][5];
 
       ac_int<32, false> step = 0;
 
       ac_int<LOOP_WIDTH, false> c2_bound =
-          matrix_loop_bound(params, MatrixLoopLevel::L2,
-                            MatrixLoopParam::IC) -
-          1;
+          params.loops[0][params.reduction_loop_idx[0]] - 1;
       ac_int<LOOP_WIDTH, false> c1_bound =
-          matrix_loop_bound(params, MatrixLoopLevel::L1,
-                            MatrixLoopParam::IC) -
-          1;
+          params.loops[1][params.reduction_loop_idx[1]] - 1;
       ac_int<LOOP_WIDTH, false> k1_bound =
-          matrix_loop_bound(params, MatrixLoopLevel::L1,
-                            MatrixLoopParam::OC) -
-          1;
+          params.loops[1][params.weight_loop_idx[1]] - 1;
       ac_int<LOOP_WIDTH, false> fx_bound =
-          matrix_loop_bound(params, MatrixLoopLevel::L1,
-                            MatrixLoopParam::FX) -
-          1;
+          params.loops[1][params.fx_loop_idx] - 1;
       ac_int<LOOP_WIDTH, false> fy0_bound =
-          matrix_loop_bound(params, MatrixLoopLevel::L2,
-                            MatrixLoopParam::FY) -
-          1;
+          params.loops[0][params.fy_loop_idx[0]] - 1;
       ac_int<LOOP_WIDTH, false> fy1_bound =
-          matrix_loop_bound(params, MatrixLoopLevel::L1,
-                            MatrixLoopParam::FY) -
-          1;
+          params.loops[1][params.fy_loop_idx[1]] - 1;
       ac_int<LOOP_WIDTH, false> y0_bound =
-          matrix_loop_bound(params, MatrixLoopLevel::L1,
-                            MatrixLoopParam::OY) -
-          1;
+          params.loops[1][params.y_loop_idx[1]] - 1;
       ac_int<LOOP_WIDTH, false> x0_bound =
-          matrix_loop_bound(params, MatrixLoopLevel::L1,
-                            MatrixLoopParam::OX) -
-          1;
+          params.loops[1][params.x_loop_idx[1]] - 1;
 
-      ac_int<LOOP_WIDTH, false> Y0 = matrix_loop_bound(
-          params, MatrixLoopLevel::L1, MatrixLoopParam::OY);
-      ac_int<LOOP_WIDTH, false> X0 = matrix_loop_bound(
-          params, MatrixLoopLevel::L1, MatrixLoopParam::OX);
+      ac_int<LOOP_WIDTH, false> Y0 = params.loops[1][params.y_loop_idx[1]];
+      ac_int<LOOP_WIDTH, false> X0 = params.loops[1][params.x_loop_idx[1]];
       ac_int<16, false> k_stride = Y0 * X0;
 
 #pragma hls_pipeline_init_interval 1
@@ -828,14 +738,9 @@ struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
           accum_output_enq.Push(previous_accumulation);
         } else {
           ac_int<16, false> address =
-              loop_counters[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                                    MatrixLoopParam::OC)] *
-                  k_stride +
-              loop_counters[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                                    MatrixLoopParam::OY)] *
-                  X0 +
-              loop_counters[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                                    MatrixLoopParam::OX)];
+              loop_counters[1][params.weight_loop_idx[1]] * k_stride +
+              loop_counters[1][params.y_loop_idx[1]] * X0 +
+              loop_counters[1][params.x_loop_idx[1]];
 
           BufferWriteRequest<Pack1D<Buffer, cols>> req;
           req.address = address;
@@ -868,9 +773,7 @@ struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
         for (int i = 1; i >= 0; i--) {
 #pragma hls_unroll yes
           for (int j = 5; j >= 0; j--) {
-            if (loop_counters[i][j] ==
-                matrix_loop_slot_bound(
-                    params, matrix_loop_level_from_outer_first_index(i), j)) {
+            if (loop_counters[i][j] == params.loops[i][j]) {
               loop_counters[i][j] = 0;
               if (j > 0) {
                 loop_counters[i][j - 1]++;

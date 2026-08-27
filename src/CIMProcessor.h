@@ -420,17 +420,10 @@ SC_MODULE(CIMProcessor) {
  private:
   // Return the operation volume; fixed-unit FX@L2 occupies omitted slot 5
   static ac_int<32, false> total_operations(const MatrixParams &params) {
-    return matrix_loop_slot_bound(params, MatrixLoopLevel::L2, 0) *
-           matrix_loop_slot_bound(params, MatrixLoopLevel::L2, 1) *
-           matrix_loop_slot_bound(params, MatrixLoopLevel::L2, 2) *
-           matrix_loop_slot_bound(params, MatrixLoopLevel::L2, 3) *
-           matrix_loop_slot_bound(params, MatrixLoopLevel::L2, 4) *
-           matrix_loop_slot_bound(params, MatrixLoopLevel::L1, 0) *
-           matrix_loop_slot_bound(params, MatrixLoopLevel::L1, 1) *
-           matrix_loop_slot_bound(params, MatrixLoopLevel::L1, 2) *
-           matrix_loop_slot_bound(params, MatrixLoopLevel::L1, 3) *
-           matrix_loop_slot_bound(params, MatrixLoopLevel::L1, 4) *
-           matrix_loop_slot_bound(params, MatrixLoopLevel::L1, 5);
+    return params.loops[0][0] * params.loops[0][1] * params.loops[0][2] *
+           params.loops[0][3] * params.loops[0][4] * params.loops[1][0] *
+           params.loops[1][1] * params.loops[1][2] * params.loops[1][3] *
+           params.loops[1][4] * params.loops[1][5];
   }
 
   // Reset both physical counter levels before walking one semantic schedule
@@ -454,10 +447,7 @@ SC_MODULE(CIMProcessor) {
     for (int level = LOOP_LEVEL_COUNT - 1; level >= 0; level--) {
 #pragma hls_unroll yes
       for (int slot = LOOP_SLOT_COUNT - 1; slot >= 0; slot--) {
-        if (loop_counters[level][slot] ==
-            matrix_loop_slot_bound(
-                params, matrix_loop_level_from_outer_first_index(level),
-                slot)) {
+        if (loop_counters[level][slot] == params.loops[level][slot]) {
           loop_counters[level][slot] = 0;
           if (slot > 0) {
             loop_counters[level][slot - 1]++;
@@ -476,16 +466,11 @@ SC_MODULE(CIMProcessor) {
   static bool weight_set_boundary(
       const MatrixParams &params,
       const ac_int<LOOP_WIDTH, false> loop_counters[2][6],
-      bool l1_ox_reuses_weights,
-      bool l1_oy_reuses_weights) {
+      bool l1_ox_reuses_weights, bool l1_oy_reuses_weights) {
     return (!l1_ox_reuses_weights ||
-            matrix_loop_counter(loop_counters[1], params,
-                                MatrixLoopLevel::L1,
-                                MatrixLoopParam::OX) == 0) &&
+            loop_counters[1][params.x_loop_idx[1]] == 0) &&
            (!l1_oy_reuses_weights ||
-            matrix_loop_counter(loop_counters[1], params,
-                                MatrixLoopLevel::L1,
-                                MatrixLoopParam::OY) == 0);
+            loop_counters[1][params.y_loop_idx[1]] == 0);
   }
 
   // Count live [OC@L1][OY][OX] partial sums required by the schedule
@@ -493,23 +478,19 @@ SC_MODULE(CIMProcessor) {
   // An outer output dimension contributes only when a reduction loop
   // encloses it because those coordinates remain live across later terms
   static ac_int<32, false> accumulation_footprint(const MatrixParams &params) {
-    const bool includes_outer_ox = matrix_loop_is_inside_reduction(
-        params, MatrixLoopLevel::L2, MatrixLoopParam::OX);
-    const bool includes_outer_oy = matrix_loop_is_inside_reduction(
-        params, MatrixLoopLevel::L2, MatrixLoopParam::OY);
-    ac_int<32, false> x_extent =
-        matrix_loop_bound(params, MatrixLoopLevel::L1, MatrixLoopParam::OX);
-    ac_int<32, false> y_extent =
-        matrix_loop_bound(params, MatrixLoopLevel::L1, MatrixLoopParam::OY);
-    if (includes_outer_ox)
-      x_extent *= matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                    MatrixLoopParam::OX);
-    if (includes_outer_oy)
-      y_extent *= matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                    MatrixLoopParam::OY);
-    return matrix_loop_bound(params, MatrixLoopLevel::L1,
-                             MatrixLoopParam::OC) *
-           y_extent * x_extent;
+    const auto l2_ic = params.loops[0][params.reduction_loop_idx[0]];
+    const auto l2_fy = params.loops[0][params.fy_loop_idx[0]];
+    const bool includes_outer_ox =
+        (l2_ic > 1 && params.reduction_loop_idx[0] < params.x_loop_idx[0]) ||
+        (l2_fy > 1 && params.fy_loop_idx[0] < params.x_loop_idx[0]);
+    const bool includes_outer_oy =
+        (l2_ic > 1 && params.reduction_loop_idx[0] < params.y_loop_idx[0]) ||
+        (l2_fy > 1 && params.fy_loop_idx[0] < params.y_loop_idx[0]);
+    ac_int<32, false> x_extent = params.loops[1][params.x_loop_idx[1]];
+    ac_int<32, false> y_extent = params.loops[1][params.y_loop_idx[1]];
+    if (includes_outer_ox) x_extent *= params.loops[0][params.x_loop_idx[0]];
+    if (includes_outer_oy) y_extent *= params.loops[0][params.y_loop_idx[0]];
+    return params.loops[1][params.weight_loop_idx[1]] * y_extent * x_extent;
   }
 
   // Commit one ordered weight-channel beat to the selected resident set
@@ -743,23 +724,25 @@ SC_MODULE(CIMProcessor) {
         SC_REPORT_FATAL("CIMProcessor",
                         "currently does not support MX or replicated operands");
       }
+      const auto l2_ic = params.loops[0][params.reduction_loop_idx[0]];
+      const auto l2_fy = params.loops[0][params.fy_loop_idx[0]];
       const bool outer_oc_partial_context =
-          matrix_loop_bound(params, MatrixLoopLevel::L2,
-                            MatrixLoopParam::OC) > 1 &&
-          matrix_loop_is_inside_reduction(params, MatrixLoopLevel::L2,
-                                          MatrixLoopParam::OC);
+          params.loops[0][params.weight_loop_idx[0]] > 1 &&
+          ((l2_ic > 1 &&
+            params.reduction_loop_idx[0] < params.weight_loop_idx[0]) ||
+           (l2_fy > 1 && params.fy_loop_idx[0] < params.weight_loop_idx[0]));
       if (outer_oc_partial_context) {
         SC_REPORT_FATAL("CIMProcessor",
                         "outer output-column partial contexts are unsupported");
       }
 #if DOUBLE_BUFFERED_ACCUM_BUFFER
       const bool l2_output_context =
-          matrix_loop_is_inside_reduction(params, MatrixLoopLevel::L2,
-                                          MatrixLoopParam::OX) ||
-          matrix_loop_is_inside_reduction(params, MatrixLoopLevel::L2,
-                                          MatrixLoopParam::OY);
-      if (l2_output_context &&
-          params.write_output_to_accum_buffer) {
+          (l2_ic > 1 &&
+           (params.reduction_loop_idx[0] < params.x_loop_idx[0] ||
+            params.reduction_loop_idx[0] < params.y_loop_idx[0])) ||
+          (l2_fy > 1 && (params.fy_loop_idx[0] < params.x_loop_idx[0] ||
+                         params.fy_loop_idx[0] < params.y_loop_idx[0]));
+      if (l2_output_context && params.write_output_to_accum_buffer) {
         SC_REPORT_FATAL(
             "CIMProcessor",
             "outer partial contexts cannot use banked accumulation output");
@@ -775,12 +758,20 @@ SC_MODULE(CIMProcessor) {
       reset_loop_counters(loop_counters);
 
       const ac_int<32, false> total_ops = total_operations(params);
+      const auto l1_oc = params.loops[1][params.weight_loop_idx[1]];
+      const auto l1_ic = params.loops[1][params.reduction_loop_idx[1]];
+      const auto l1_fy = params.loops[1][params.fy_loop_idx[1]];
+      const auto l1_fx = params.loops[1][params.fx_loop_idx];
       const bool l1_ox_reuses_weights =
-          matrix_loop_reuses_weights(
-              params, MatrixLoopLevel::L1, MatrixLoopParam::OX);
+          (l1_oc == 1 || params.weight_loop_idx[1] < params.x_loop_idx[1]) &&
+          (l1_ic == 1 || params.reduction_loop_idx[1] < params.x_loop_idx[1]) &&
+          (l1_fy == 1 || params.fy_loop_idx[1] < params.x_loop_idx[1]) &&
+          (l1_fx == 1 || params.fx_loop_idx < params.x_loop_idx[1]);
       const bool l1_oy_reuses_weights =
-          matrix_loop_reuses_weights(
-              params, MatrixLoopLevel::L1, MatrixLoopParam::OY);
+          (l1_oc == 1 || params.weight_loop_idx[1] < params.y_loop_idx[1]) &&
+          (l1_ic == 1 || params.reduction_loop_idx[1] < params.y_loop_idx[1]) &&
+          (l1_fy == 1 || params.fy_loop_idx[1] < params.y_loop_idx[1]) &&
+          (l1_fx == 1 || params.fx_loop_idx < params.y_loop_idx[1]);
       // Walk the current descriptor in [replay][set] order
       ScheduledWeightDescriptor descriptor;
       Set selected_weight_set = 0;
@@ -792,9 +783,8 @@ SC_MODULE(CIMProcessor) {
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
       for (ac_int<32, false> step = 0; step < total_ops; step++) {
-        if (weight_set_boundary(params, loop_counters,
-                                    l1_ox_reuses_weights,
-                                    l1_oy_reuses_weights)) {
+        if (weight_set_boundary(params, loop_counters, l1_ox_reuses_weights,
+                                l1_oy_reuses_weights)) {
           if (sequence_complete) {
             descriptor = scheduled_weight_descriptor_deq.Pop();
 
@@ -851,13 +841,11 @@ SC_MODULE(CIMProcessor) {
         // Atomic request acceptance is the physical issue acknowledged by
         // CIMArray
         mac_request_channel.Push(request);
-
         advance_loop_counters(loop_counters, params);
         const bool finishes_set_run =
             step + 1 == total_ops ||
-           weight_set_boundary(params, loop_counters,
-                                    l1_ox_reuses_weights,
-                                    l1_oy_reuses_weights);
+            weight_set_boundary(params, loop_counters, l1_ox_reuses_weights,
+                                l1_oy_reuses_weights);
         if (selected_set_is_on_final_replay && finishes_set_run) {
           // The array independently blocks same-set writes until this accepted
           // MAC closes its physical issue window
@@ -879,25 +867,6 @@ SC_MODULE(CIMProcessor) {
     }
   }
 
-  // Return whether one semantic loop is at its first iteration
-  static bool loop_at_start(const MatrixParams &params,
-                            const ac_int<LOOP_WIDTH, false> loop_counters[2][6],
-                            MatrixLoopLevel level,
-                            MatrixLoopParam loop_param) {
-    return matrix_loop_counter(loop_counters[matrix_loop_storage_level(level)],
-                               params, level, loop_param) == 0;
-  }
-
-  // Return whether one semantic loop is at its final iteration
-  static bool loop_at_end(const MatrixParams &params,
-                          const ac_int<LOOP_WIDTH, false> loop_counters[2][6],
-                          MatrixLoopLevel level,
-                          MatrixLoopParam loop_param) {
-    return matrix_loop_counter(loop_counters[matrix_loop_storage_level(level)],
-                               params, level, loop_param) ==
-           matrix_loop_bound(params, level, loop_param) - 1;
-  }
-
   // Address one live output as [OC@L1][combined OY][combined OX]
   //
   // Outer OX/OY participates only when nested inside an unfinished reduction;
@@ -906,37 +875,32 @@ SC_MODULE(CIMProcessor) {
   static ac_int<16, false> accumulation_address(
       const MatrixParams &params,
       const ac_int<LOOP_WIDTH, false> loop_counters[2][6]) {
-    const bool includes_outer_ox = matrix_loop_is_inside_reduction(
-        params, MatrixLoopLevel::L2, MatrixLoopParam::OX);
-    const bool includes_outer_oy = matrix_loop_is_inside_reduction(
-        params, MatrixLoopLevel::L2, MatrixLoopParam::OY);
-    const ac_int<16, false> x0_extent =
-        matrix_loop_bound(params, MatrixLoopLevel::L1, MatrixLoopParam::OX);
-    const ac_int<16, false> y0_extent =
-        matrix_loop_bound(params, MatrixLoopLevel::L1, MatrixLoopParam::OY);
+    // FX@L2 is fixed to one, so only IC/FY can keep an outer output live
+    const bool includes_outer_ox =
+        (params.loops[0][params.reduction_loop_idx[0]] > 1 &&
+         params.reduction_loop_idx[0] < params.x_loop_idx[0]) ||
+        (params.loops[0][params.fy_loop_idx[0]] > 1 &&
+         params.fy_loop_idx[0] < params.x_loop_idx[0]);
+    const bool includes_outer_oy =
+        (params.loops[0][params.reduction_loop_idx[0]] > 1 &&
+         params.reduction_loop_idx[0] < params.y_loop_idx[0]) ||
+        (params.loops[0][params.fy_loop_idx[0]] > 1 &&
+         params.fy_loop_idx[0] < params.y_loop_idx[0]);
+    const ac_int<16, false> x0_extent = params.loops[1][params.x_loop_idx[1]];
+    const ac_int<16, false> y0_extent = params.loops[1][params.y_loop_idx[1]];
     ac_int<16, false> x_extent = x0_extent;
     ac_int<16, false> y_extent = y0_extent;
-    ac_int<16, false> x = matrix_loop_counter(
-        loop_counters[1], params, MatrixLoopLevel::L1, MatrixLoopParam::OX);
-    ac_int<16, false> y = matrix_loop_counter(
-        loop_counters[1], params, MatrixLoopLevel::L1, MatrixLoopParam::OY);
+    ac_int<16, false> x = loop_counters[1][params.x_loop_idx[1]];
+    ac_int<16, false> y = loop_counters[1][params.y_loop_idx[1]];
     if (includes_outer_ox) {
-      x_extent *= matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                    MatrixLoopParam::OX);
-      x += matrix_loop_counter(loop_counters[0], params, MatrixLoopLevel::L2,
-                               MatrixLoopParam::OX) *
-           x0_extent;
+      x_extent *= params.loops[0][params.x_loop_idx[0]];
+      x += loop_counters[0][params.x_loop_idx[0]] * x0_extent;
     }
     if (includes_outer_oy) {
-      y_extent *= matrix_loop_bound(params, MatrixLoopLevel::L2,
-                                    MatrixLoopParam::OY);
-      y += matrix_loop_counter(loop_counters[0], params, MatrixLoopLevel::L2,
-                               MatrixLoopParam::OY) *
-           y0_extent;
+      y_extent *= params.loops[0][params.y_loop_idx[0]];
+      y += loop_counters[0][params.y_loop_idx[0]] * y0_extent;
     }
-    return matrix_loop_counter(loop_counters[1], params, MatrixLoopLevel::L1,
-                               MatrixLoopParam::OC) *
-               y_extent * x_extent +
+    return loop_counters[1][params.weight_loop_idx[1]] * y_extent * x_extent +
            y * x_extent + x;
   }
 
@@ -944,32 +908,27 @@ SC_MODULE(CIMProcessor) {
   static bool starts_output_reduction(
       const MatrixParams &params,
       const ac_int<LOOP_WIDTH, false> loop_counters[2][6]) {
-    return loop_at_start(params, loop_counters, MatrixLoopLevel::L2,
-                         MatrixLoopParam::IC) &&
-           loop_at_start(params, loop_counters, MatrixLoopLevel::L1,
-                         MatrixLoopParam::IC) &&
-           loop_at_start(params, loop_counters, MatrixLoopLevel::L1,
-                         MatrixLoopParam::FX) &&
-           loop_at_start(params, loop_counters, MatrixLoopLevel::L2,
-                         MatrixLoopParam::FY) &&
-           loop_at_start(params, loop_counters, MatrixLoopLevel::L1,
-                         MatrixLoopParam::FY);
+    return loop_counters[0][params.reduction_loop_idx[0]] == 0 &&
+           loop_counters[1][params.reduction_loop_idx[1]] == 0 &&
+           loop_counters[1][params.fx_loop_idx] == 0 &&
+           loop_counters[0][params.fy_loop_idx[0]] == 0 &&
+           loop_counters[1][params.fy_loop_idx[1]] == 0;
   }
 
   // Return whether this is the final IC/FX/FY contribution to one output
   static bool finishes_output_reduction(
       const MatrixParams &params,
       const ac_int<LOOP_WIDTH, false> loop_counters[2][6]) {
-    return loop_at_end(params, loop_counters, MatrixLoopLevel::L2,
-                       MatrixLoopParam::IC) &&
-           loop_at_end(params, loop_counters, MatrixLoopLevel::L1,
-                       MatrixLoopParam::IC) &&
-           loop_at_end(params, loop_counters, MatrixLoopLevel::L1,
-                       MatrixLoopParam::FX) &&
-           loop_at_end(params, loop_counters, MatrixLoopLevel::L2,
-                       MatrixLoopParam::FY) &&
-           loop_at_end(params, loop_counters, MatrixLoopLevel::L1,
-                       MatrixLoopParam::FY);
+    return loop_counters[0][params.reduction_loop_idx[0]] ==
+               params.loops[0][params.reduction_loop_idx[0]] - 1 &&
+           loop_counters[1][params.reduction_loop_idx[1]] ==
+               params.loops[1][params.reduction_loop_idx[1]] - 1 &&
+           loop_counters[1][params.fx_loop_idx] ==
+               params.loops[1][params.fx_loop_idx] - 1 &&
+           loop_counters[0][params.fy_loop_idx[0]] ==
+               params.loops[0][params.fy_loop_idx[0]] - 1 &&
+           loop_counters[1][params.fy_loop_idx[1]] ==
+               params.loops[1][params.fy_loop_idx[1]] - 1;
   }
 
   // Return whether the sum must remain in MatrixUnit's accumulation buffer
@@ -985,24 +944,32 @@ SC_MODULE(CIMProcessor) {
   static bool finishes_output_tile(
       const MatrixParams &params,
       const ac_int<LOOP_WIDTH, false> loop_counters[2][6]) {
+    const bool outer_ox_inside_reduction =
+        (params.loops[0][params.reduction_loop_idx[0]] > 1 &&
+         params.reduction_loop_idx[0] < params.x_loop_idx[0]) ||
+        (params.loops[0][params.fy_loop_idx[0]] > 1 &&
+         params.fy_loop_idx[0] < params.x_loop_idx[0]);
+    const bool outer_oy_inside_reduction =
+        (params.loops[0][params.reduction_loop_idx[0]] > 1 &&
+         params.reduction_loop_idx[0] < params.y_loop_idx[0]) ||
+        (params.loops[0][params.fy_loop_idx[0]] > 1 &&
+         params.fy_loop_idx[0] < params.y_loop_idx[0]);
     const bool finishes_x_context =
-        !matrix_loop_is_inside_reduction(params, MatrixLoopLevel::L2,
-                                         MatrixLoopParam::OX) ||
-        loop_at_end(params, loop_counters, MatrixLoopLevel::L2,
-                    MatrixLoopParam::OX);
+        !outer_ox_inside_reduction ||
+        loop_counters[0][params.x_loop_idx[0]] ==
+            params.loops[0][params.x_loop_idx[0]] - 1;
     const bool finishes_y_context =
-        !matrix_loop_is_inside_reduction(params, MatrixLoopLevel::L2,
-                                         MatrixLoopParam::OY) ||
-        loop_at_end(params, loop_counters, MatrixLoopLevel::L2,
-                    MatrixLoopParam::OY);
+        !outer_oy_inside_reduction ||
+        loop_counters[0][params.y_loop_idx[0]] ==
+            params.loops[0][params.y_loop_idx[0]] - 1;
     return finishes_output_reduction(params, loop_counters) &&
            finishes_x_context && finishes_y_context &&
-           loop_at_end(params, loop_counters, MatrixLoopLevel::L1,
-                       MatrixLoopParam::OC) &&
-           loop_at_end(params, loop_counters, MatrixLoopLevel::L1,
-                       MatrixLoopParam::OX) &&
-           loop_at_end(params, loop_counters, MatrixLoopLevel::L1,
-                       MatrixLoopParam::OY);
+           loop_counters[1][params.weight_loop_idx[1]] ==
+               params.loops[1][params.weight_loop_idx[1]] - 1 &&
+           loop_counters[1][params.x_loop_idx[1]] ==
+               params.loops[1][params.x_loop_idx[1]] - 1 &&
+           loop_counters[1][params.y_loop_idx[1]] ==
+               params.loops[1][params.y_loop_idx[1]] - 1;
   }
 
   // Return whether this operation begins a new N-lane bias vector
@@ -1011,8 +978,7 @@ SC_MODULE(CIMProcessor) {
       const ac_int<LOOP_WIDTH, false> inner_loop_counters[6]) {
     // Bias is indexed by OC only, so every loop nested inside OC@L1 must
     // restart
-    const auto inner_oc_position = matrix_loop_position(
-        params, MatrixLoopLevel::L1, MatrixLoopParam::OC);
+    const auto inner_oc_position = params.weight_loop_idx[1];
     bool starts = true;
 #pragma hls_unroll yes
     for (int slot = 0; slot < LOOP_SLOT_COUNT; slot++) {

@@ -77,6 +77,18 @@ bool check_loops(const int (&actual)[6], const std::array<int, 6>& expected,
   return true;
 }
 
+// Apply the controller's direct L1 semantic weight-reuse predicate
+bool l1_output_reuses_weights(const Tiling& tiling, int output_loop_idx) {
+  return (tiling.loops[1][tiling.weight_loop_idx[1]] == 1 ||
+          tiling.weight_loop_idx[1] < output_loop_idx) &&
+         (tiling.loops[1][tiling.reduction_loop_idx[1]] == 1 ||
+          tiling.reduction_loop_idx[1] < output_loop_idx) &&
+         (tiling.loops[1][tiling.fy_loop_idx[1]] == 1 ||
+          tiling.fy_loop_idx[1] < output_loop_idx) &&
+         (tiling.loops[1][tiling.fx_loop_idx] == 1 ||
+          tiling.fx_loop_idx < output_loop_idx);
+}
+
 // Check explicit factors and total order at both semantic levels
 bool test_semantic_normalization() {
   const auto normalized = normalize_tiling(
@@ -160,18 +172,16 @@ bool test_complete_lowering() {
   bool passed = true;
   passed &= check_loops(lowered.loops[0], {13, 12, 10, 9, 8, 1}, "L2");
   passed &= check_loops(lowered.loops[1], {7, 6, 5, 4, 3, 2}, "L1");
-  passed &=
-      require(lowered.x_loop_idx[0] == 4 && lowered.y_loop_idx[0] == 0 &&
-                  lowered.reduction_loop_idx[0] == 2 &&
-                  lowered.weight_loop_idx[0] == 1 &&
-                  lowered.fy_loop_idx[0] == 3,
-              "L2 positions must preserve order without fixed FX");
-  passed &=
-      require(lowered.x_loop_idx[1] == 2 && lowered.y_loop_idx[1] == 5 &&
-                  lowered.reduction_loop_idx[1] == 3 &&
-                  lowered.weight_loop_idx[1] == 0 &&
-                  lowered.fx_loop_idx == 4 && lowered.fy_loop_idx[1] == 1,
-              "L1 positions must preserve the complete source order");
+  passed &= require(lowered.x_loop_idx[0] == 4 && lowered.y_loop_idx[0] == 0 &&
+                        lowered.reduction_loop_idx[0] == 2 &&
+                        lowered.weight_loop_idx[0] == 1 &&
+                        lowered.fy_loop_idx[0] == 3,
+                    "L2 positions must preserve order without fixed FX");
+  passed &= require(lowered.x_loop_idx[1] == 2 && lowered.y_loop_idx[1] == 5 &&
+                        lowered.reduction_loop_idx[1] == 3 &&
+                        lowered.weight_loop_idx[1] == 0 &&
+                        lowered.fx_loop_idx == 4 && lowered.fy_loop_idx[1] == 1,
+                    "L1 positions must preserve the complete source order");
   return passed;
 }
 
@@ -184,6 +194,24 @@ bool test_partial_lowering() {
   bool passed = true;
   passed &= check_loops(lowered.loops[0], {1, 1, 1, 5, 4, 1}, "partial L2");
   passed &= check_loops(lowered.loops[1], {1, 1, 1, 1, 3, 2}, "partial L1");
+  passed &= require(lowered.x_loop_idx[0] == 4 && lowered.fy_loop_idx[0] == 3 &&
+                        lowered.y_loop_idx[1] == 5 && lowered.fx_loop_idx == 4,
+                    "omitted loop parameters must retain unique unit slots");
+  return passed;
+}
+
+// Preserve reuse across a unit weight loop outside an output loop
+bool test_unit_weight_loop_reuse() {
+  const auto lowered =
+      get_interstellar_tiling(make_tiling({{voyager::Loop::OY, 2},
+                                           {voyager::Loop::OC, 1},
+                                           {voyager::Loop::OX, 3},
+                                           {voyager::Loop::IC, 4},
+                                           {voyager::Loop::FX, 5},
+                                           {voyager::Loop::FY, 6}},
+                                          {}));
+
+  bool passed = true;
   passed &=
       check_loops(lowered.loops[1], {6, 5, 4, 3, 1, 2}, "unit-weight reuse L1");
   passed &=
@@ -285,11 +313,12 @@ bool test_outer_fx_rejected() {
 
 // Run the focused normalization and lowering checks
 int main() {
-  const int passed = test_semantic_normalization() +
-                     test_normalization_validation() +
-                     test_complete_lowering() + test_partial_lowering() +
-                     test_outer_fx_rejected();
-  std::cout << "Tiling lowering checks passed: " << passed << "/5"
-            << std::endl;
-  return passed == 5 ? 0 : 1;
+  const int passed =
+      test_semantic_normalization() + test_normalization_validation() +
+      test_complete_lowering() + test_partial_lowering() +
+      test_unit_weight_loop_reuse() + test_live_weight_loop_reload() +
+      test_mobilebert_selector_reuse() + test_distinct_conv_output_reuse() +
+      test_outer_fx_rejected();
+  std::cout << "Tiling lowering checks passed: " << passed << "/9" << std::endl;
+  return passed == 9 ? 0 : 1;
 }

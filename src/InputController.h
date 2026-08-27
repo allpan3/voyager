@@ -118,35 +118,25 @@ struct InputController<std::tuple<InputTypes...>, rows, port_width,
       for (int i = 0; i < 2; i++) {
 #pragma hls_unroll yes
         for (int j = 0; j < 6; j++) {
-          loop_bounds[i][j] = matrix_loop_slot_bound(
-              params, matrix_loop_level_from_outer_first_index(i), j);
+          loop_bounds[i][j] = params.loops[i][j];
         }
       }
 
       // set irrelevant loop bounds to 1
-      loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                          MatrixLoopParam::OC)] = 1;
-      loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                          MatrixLoopParam::FX)] = 1;
-      loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                          MatrixLoopParam::FY)] = 1;
+      loop_bounds[1][params.weight_loop_idx[1]] = 1;
+      loop_bounds[1][params.fx_loop_idx] = 1;
+      loop_bounds[1][params.fy_loop_idx[1]] = 1;
 
-      ac_int<LOOP_WIDTH, false> Y1 = matrix_loop_bound(
-          params, MatrixLoopLevel::L2, MatrixLoopParam::OY);
-      ac_int<LOOP_WIDTH, false> X1 = matrix_loop_bound(
-          params, MatrixLoopLevel::L2, MatrixLoopParam::OX);
-      ac_int<LOOP_WIDTH, false> C2 = matrix_loop_bound(
-          params, MatrixLoopLevel::L2, MatrixLoopParam::IC);
-      ac_int<LOOP_WIDTH, false> C1 = matrix_loop_bound(
-          params, MatrixLoopLevel::L1, MatrixLoopParam::IC);
-      ac_int<16, false> Y0 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                               MatrixLoopParam::OY);
-      ac_int<16, false> X0 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                               MatrixLoopParam::OX);
-      ac_int<4, false> FX = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                              MatrixLoopParam::FX);
-      ac_int<4, false> FY0 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                               MatrixLoopParam::FY);
+      ac_int<LOOP_WIDTH, false> Y1 = params.loops[0][params.y_loop_idx[0]];
+      ac_int<LOOP_WIDTH, false> X1 = params.loops[0][params.x_loop_idx[0]];
+      ac_int<LOOP_WIDTH, false> C2 =
+          params.loops[0][params.reduction_loop_idx[0]];
+      ac_int<LOOP_WIDTH, false> C1 =
+          params.loops[1][params.reduction_loop_idx[1]];
+      ac_int<16, false> Y0 = params.loops[1][params.y_loop_idx[1]];
+      ac_int<16, false> X0 = params.loops[1][params.x_loop_idx[1]];
+      ac_int<4, false> FX = params.loops[1][params.fx_loop_idx];
+      ac_int<4, false> FY0 = params.loops[1][params.fy_loop_idx[1]];
       ac_int<8, false> STRIDE = params.stride;
 
       if (params.is_resnet_replication) {
@@ -156,28 +146,20 @@ struct InputController<std::tuple<InputTypes...>, rows, port_width,
       ac_int<16, false> IY0 = Y0 * STRIDE;
       ac_int<16, false> IX0 = X0 * STRIDE;
 
-      loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                          MatrixLoopParam::OY)] =
-          (FY0 == 1 ? Y0 : IY0) + FY0 - 1;
+      loop_bounds[1][params.y_loop_idx[1]] = (FY0 == 1 ? Y0 : IY0) + FY0 - 1;
 
       if (params.is_resnet_replication) {
-        loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                            MatrixLoopParam::OX)] =
+        loop_bounds[1][params.x_loop_idx[1]] =
             IX0 / packing_factor + 2 * boundary_words;
       } else if (params.is_generic_replication) {
-        loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                            MatrixLoopParam::OX)] =
-            IX0 >> params.fx_unrolling_lg2;
+        loop_bounds[1][params.x_loop_idx[1]] = IX0 >> params.fx_unrolling_lg2;
       } else {
-        loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                            MatrixLoopParam::OX)] =
-            (FX == 1 ? X0 : IX0) + FX - 1;
+        loop_bounds[1][params.x_loop_idx[1]] = (FX == 1 ? X0 : IX0) + FX - 1;
       }
 
       // reduce the number of iterations by packing factor
       C1 = C1 >> params.input_pack_factor_lg2;
-      loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                          MatrixLoopParam::IC)] = C1;
+      loop_bounds[1][params.reduction_loop_idx[1]] = C1;
 
       ac_int<16, false> Y = params.input_y;
       ac_int<16, false> X = params.input_x;
@@ -204,33 +186,19 @@ struct InputController<std::tuple<InputTypes...>, rows, port_width,
                           for (loop_counters[1][5] = 0;;
                                loop_counters[1][5]++) {
                             ac_int<LOOP_WIDTH, false> y1 =
-                                loop_counters[0][matrix_loop_position(
-                                    params, MatrixLoopLevel::L2,
-                                    MatrixLoopParam::OY)];
+                                loop_counters[0][params.y_loop_idx[0]];
                             ac_int<LOOP_WIDTH, false> x1 =
-                                loop_counters[0][matrix_loop_position(
-                                    params, MatrixLoopLevel::L2,
-                                    MatrixLoopParam::OX)];
+                                loop_counters[0][params.x_loop_idx[0]];
                             ac_int<LOOP_WIDTH, false> c2 =
-                                loop_counters[0][matrix_loop_position(
-                                    params, MatrixLoopLevel::L2,
-                                    MatrixLoopParam::IC)];
+                                loop_counters[0][params.reduction_loop_idx[0]];
                             const ac_int<LOOP_WIDTH, false> y0 =
-                                loop_counters[1][matrix_loop_position(
-                                    params, MatrixLoopLevel::L1,
-                                    MatrixLoopParam::OY)];
+                                loop_counters[1][params.y_loop_idx[1]];
                             ac_int<LOOP_WIDTH, false> x0 =
-                                loop_counters[1][matrix_loop_position(
-                                    params, MatrixLoopLevel::L1,
-                                    MatrixLoopParam::OX)];
+                                loop_counters[1][params.x_loop_idx[1]];
                             ac_int<LOOP_WIDTH, false> c1 =
-                                loop_counters[1][matrix_loop_position(
-                                    params, MatrixLoopLevel::L1,
-                                    MatrixLoopParam::IC)];
+                                loop_counters[1][params.reduction_loop_idx[1]];
                             const ac_int<LOOP_WIDTH, false> fy1 =
-                                loop_counters[0][matrix_loop_position(
-                                    params, MatrixLoopLevel::L2,
-                                    MatrixLoopParam::FY)];
+                                loop_counters[0][params.fy_loop_idx[0]];
                             const ac_int<LOOP_WIDTH, false> input_y0 =
                                 project_input_y0<LOOP_WIDTH>(y0, fy1, FY0,
                                                              STRIDE);
@@ -340,33 +308,23 @@ struct InputController<std::tuple<InputTypes...>, rows, port_width,
       for (int i = 0; i < 2; i++) {
 #pragma hls_unroll yes
         for (int j = 0; j < 6; j++) {
-          loop_bounds[i][j] = matrix_loop_slot_bound(
-              params, matrix_loop_level_from_outer_first_index(i), j);
+          loop_bounds[i][j] = params.loops[i][j];
         }
       }
 
       // set irrelevant loop bounds to 1
-      loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                          MatrixLoopParam::OC)] = 1;
-      loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                          MatrixLoopParam::FX)] = 1;
-      loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                          MatrixLoopParam::FY)] = 1;
+      loop_bounds[1][params.weight_loop_idx[1]] = 1;
+      loop_bounds[1][params.fx_loop_idx] = 1;
+      loop_bounds[1][params.fy_loop_idx[1]] = 1;
 
-      ac_int<LOOP_WIDTH, false> Y1 = matrix_loop_bound(
-          params, MatrixLoopLevel::L2, MatrixLoopParam::OY);
-      ac_int<LOOP_WIDTH, false> X1 = matrix_loop_bound(
-          params, MatrixLoopLevel::L2, MatrixLoopParam::OX);
-      ac_int<LOOP_WIDTH, false> C1 = matrix_loop_bound(
-          params, MatrixLoopLevel::L1, MatrixLoopParam::IC);
-      ac_int<16, false> Y0 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                               MatrixLoopParam::OY);
-      ac_int<16, false> X0 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                               MatrixLoopParam::OX);
-      ac_int<4, false> FX = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                              MatrixLoopParam::FX);
-      ac_int<4, false> FY0 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                               MatrixLoopParam::FY);
+      ac_int<LOOP_WIDTH, false> Y1 = params.loops[0][params.y_loop_idx[0]];
+      ac_int<LOOP_WIDTH, false> X1 = params.loops[0][params.x_loop_idx[0]];
+      ac_int<LOOP_WIDTH, false> C1 =
+          params.loops[1][params.reduction_loop_idx[1]];
+      ac_int<16, false> Y0 = params.loops[1][params.y_loop_idx[1]];
+      ac_int<16, false> X0 = params.loops[1][params.x_loop_idx[1]];
+      ac_int<4, false> FX = params.loops[1][params.fx_loop_idx];
+      ac_int<4, false> FY0 = params.loops[1][params.fy_loop_idx[1]];
       ac_int<8, false> STRIDE = params.stride;
 
       if (params.is_resnet_replication) {
@@ -384,37 +342,26 @@ struct InputController<std::tuple<InputTypes...>, rows, port_width,
         IY0 = Y0 * STRIDE;
       }
 
-      loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                          MatrixLoopParam::OY)] =
-          IY0 + FY0 - 1;
+      loop_bounds[1][params.y_loop_idx[1]] = IY0 + FY0 - 1;
 
       if (params.is_resnet_replication) {
-        loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                            MatrixLoopParam::OX)] =
+        loop_bounds[1][params.x_loop_idx[1]] =
             IX0 / packing_factor + 2 * boundary_words;
       } else if (params.is_generic_replication) {
-        loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                            MatrixLoopParam::OX)] =
-            IX0 >> params.fx_unrolling_lg2;
+        loop_bounds[1][params.x_loop_idx[1]] = IX0 >> params.fx_unrolling_lg2;
       } else {
-        loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                            MatrixLoopParam::OX)] =
-            IX0 + FX - 1;
+        loop_bounds[1][params.x_loop_idx[1]] = IX0 + FX - 1;
       }
 
       // reduce the number of iterations by packing factor
       C1 = C1 >> params.input_pack_factor_lg2;
-      loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                          MatrixLoopParam::IC)] = C1;
+      loop_bounds[1][params.reduction_loop_idx[1]] = C1;
       ac_int<4, false> pack_offset_bound =
           (1 << params.input_pack_factor_lg2) - 1;
 
       ac_int<16, false> Y = params.input_y;
       ac_int<16, false> X = params.input_x;
-      ac_int<16, false> y_stride =
-          loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                              MatrixLoopParam::OX)] *
-          C1;
+      ac_int<16, false> y_stride = loop_bounds[1][params.x_loop_idx[1]] * C1;
 
       if (params.is_generic_replication) {
         Y = Y1 * IY0;
@@ -437,29 +384,18 @@ struct InputController<std::tuple<InputTypes...>, rows, port_width,
                                loop_counters[1][5]++) {
                             for (ac_int<4, false> pack = 0;; pack++) {
                               ac_int<LOOP_WIDTH, true> y1 =
-                                  loop_counters[0][matrix_loop_position(
-                                      params, MatrixLoopLevel::L2,
-                                      MatrixLoopParam::OY)];
+                                  loop_counters[0][params.y_loop_idx[0]];
                               ac_int<LOOP_WIDTH, true> x1 =
-                                  loop_counters[0][matrix_loop_position(
-                                      params, MatrixLoopLevel::L2,
-                                      MatrixLoopParam::OX)];
+                                  loop_counters[0][params.x_loop_idx[0]];
                               const ac_int<LOOP_WIDTH, false> y0 =
-                                  loop_counters[1][matrix_loop_position(
-                                      params, MatrixLoopLevel::L1,
-                                      MatrixLoopParam::OY)];
+                                  loop_counters[1][params.y_loop_idx[1]];
                               ac_int<LOOP_WIDTH, true> x0 =
-                                  loop_counters[1][matrix_loop_position(
-                                      params, MatrixLoopLevel::L1,
-                                      MatrixLoopParam::OX)];
+                                  loop_counters[1][params.x_loop_idx[1]];
                               ac_int<LOOP_WIDTH, true> c1 =
-                                  loop_counters[1][matrix_loop_position(
-                                      params, MatrixLoopLevel::L1,
-                                      MatrixLoopParam::IC)];
+                                  loop_counters[1]
+                                               [params.reduction_loop_idx[1]];
                               const ac_int<LOOP_WIDTH, false> fy1 =
-                                  loop_counters[0][matrix_loop_position(
-                                      params, MatrixLoopLevel::L2,
-                                      MatrixLoopParam::FY)];
+                                  loop_counters[0][params.fy_loop_idx[0]];
                               const ac_int<LOOP_WIDTH, false> input_y0 =
                                   project_input_y0<LOOP_WIDTH>(y0, fy1, FY0,
                                                                STRIDE);
@@ -485,9 +421,7 @@ struct InputController<std::tuple<InputTypes...>, rows, port_width,
                               }
 
                               ac_int<LOOP_WIDTH> orig_x0 =
-                                  loop_counters[1][matrix_loop_position(
-                                      params, MatrixLoopLevel::L1,
-                                      MatrixLoopParam::OX)];
+                                  loop_counters[1][params.x_loop_idx[1]];
                               ac_int<16, false> address =
                                   y0 * y_stride + orig_x0 * C1 + c1;
                               address =
@@ -565,37 +499,28 @@ struct InputController<std::tuple<InputTypes...>, rows, port_width,
       for (int i = 0; i < 2; i++) {
 #pragma hls_unroll yes
         for (int j = 0; j < 6; j++) {
-          loop_bounds[i][j] = matrix_loop_slot_bound(
-              params, matrix_loop_level_from_outer_first_index(i), j);
+          loop_bounds[i][j] = params.loops[i][j];
         }
       }
 
       if (params.is_resnet_replication && rows >= 16) {
-        loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                            MatrixLoopParam::OX)] =
-            (loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                                 MatrixLoopParam::OX)] *
-             params.stride / packing_factor) +
+        loop_bounds[1][params.x_loop_idx[1]] =
+            (loop_bounds[1][params.x_loop_idx[1]] * params.stride /
+             packing_factor) +
             2;
       } else if (params.is_resnet_replication && rows == 8) {
-        loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                            MatrixLoopParam::OX)] =
-            (loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                                 MatrixLoopParam::OX)] *
-             params.stride / packing_factor) +
+        loop_bounds[1][params.x_loop_idx[1]] =
+            (loop_bounds[1][params.x_loop_idx[1]] * params.stride /
+             packing_factor) +
             1;
       }
 
-      ac_int<LOOP_WIDTH, false> Y0 = matrix_loop_bound(
-          params, MatrixLoopLevel::L1, MatrixLoopParam::OY);
-      ac_int<LOOP_WIDTH, false> X0 = matrix_loop_bound(
-          params, MatrixLoopLevel::L1, MatrixLoopParam::OX);
-      ac_int<LOOP_WIDTH, false> C1 = matrix_loop_bound(
-          params, MatrixLoopLevel::L1, MatrixLoopParam::IC);
-      ac_int<4, false> FX = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                              MatrixLoopParam::FX);
-      ac_int<4, false> FY0 = matrix_loop_bound(params, MatrixLoopLevel::L1,
-                                               MatrixLoopParam::FY);
+      ac_int<LOOP_WIDTH, false> Y0 = params.loops[1][params.y_loop_idx[1]];
+      ac_int<LOOP_WIDTH, false> X0 = params.loops[1][params.x_loop_idx[1]];
+      ac_int<LOOP_WIDTH, false> C1 =
+          params.loops[1][params.reduction_loop_idx[1]];
+      ac_int<4, false> FX = params.loops[1][params.fx_loop_idx];
+      ac_int<4, false> FY0 = params.loops[1][params.fy_loop_idx[1]];
       ac_int<8, false> STRIDE = params.stride;
 
       bool is_downsample = FX == 1 && FY0 == 1;
@@ -628,25 +553,15 @@ struct InputController<std::tuple<InputTypes...>, rows, port_width,
                           for (loop_counters[1][5] = 0;;
                                loop_counters[1][5]++) {
                             ac_int<LOOP_WIDTH, false> x0 =
-                                loop_counters[1][matrix_loop_position(
-                                    params, MatrixLoopLevel::L1,
-                                    MatrixLoopParam::OX)];
+                                loop_counters[1][params.x_loop_idx[1]];
                             ac_int<LOOP_WIDTH, false> y0 =
-                                loop_counters[1][matrix_loop_position(
-                                    params, MatrixLoopLevel::L1,
-                                    MatrixLoopParam::OY)];
+                                loop_counters[1][params.y_loop_idx[1]];
                             ac_int<LOOP_WIDTH, false> fx =
-                                loop_counters[1][matrix_loop_position(
-                                    params, MatrixLoopLevel::L1,
-                                    MatrixLoopParam::FX)];
+                                loop_counters[1][params.fx_loop_idx];
                             ac_int<LOOP_WIDTH, false> fy0 =
-                                loop_counters[1][matrix_loop_position(
-                                    params, MatrixLoopLevel::L1,
-                                    MatrixLoopParam::FY)];
+                                loop_counters[1][params.fy_loop_idx[1]];
                             ac_int<LOOP_WIDTH, false> c1 =
-                                loop_counters[1][matrix_loop_position(
-                                    params, MatrixLoopLevel::L1,
-                                    MatrixLoopParam::IC)];
+                                loop_counters[1][params.reduction_loop_idx[1]];
 
                             ac_int<16, false> x = STRIDE * x0 + fx;
                             ac_int<16, false> y = STRIDE * y0 + fy0;
@@ -731,8 +646,7 @@ struct InputController<std::tuple<InputTypes...>, rows, port_width,
       for (int i = 0; i < 2; i++) {
 #pragma hls_unroll yes
         for (int j = 0; j < 6; j++) {
-          loop_bounds[i][j] = matrix_loop_slot_bound(
-              params, matrix_loop_level_from_outer_first_index(i), j);
+          loop_bounds[i][j] = params.loops[i][j];
         }
       }
 
@@ -982,18 +896,14 @@ struct InputController<std::tuple<InputTypes...>, rows, port_width,
       for (int i = 0; i < 2; i++) {
 #pragma hls_unroll yes
         for (int j = 0; j < 6; j++) {
-          loop_bounds[i][j] = matrix_loop_slot_bound(
-              params, matrix_loop_level_from_outer_first_index(i), j);
+          loop_bounds[i][j] = params.loops[i][j];
         }
       }
 
       // set irrelevant loop bounds to 1
-      loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                          MatrixLoopParam::OC)] = 1;
-      loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                          MatrixLoopParam::FX)] = 1;
-      loop_bounds[1][matrix_loop_position(params, MatrixLoopLevel::L1,
-                                          MatrixLoopParam::FY)] = 1;
+      loop_bounds[1][params.weight_loop_idx[1]] = 1;
+      loop_bounds[1][params.fx_loop_idx] = 1;
+      loop_bounds[1][params.fy_loop_idx[1]] = 1;
 
       if (params.input_transpose && rows <= 32) {
         ac_int<DATA_WIDTH> transpose_buffer[rows][rows];
