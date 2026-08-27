@@ -45,7 +45,8 @@ enum MatrixJob {
   MATRIX_PARTIAL,
   MATRIX_SET_MAJOR_REPLAY,
   MATRIX_L1_OX_GROUP_REPLAY,
-  MATRIX_L1_OY_GROUP_REPLAY
+  MATRIX_L1_OY_GROUP_REPLAY,
+  MATRIX_L1_OX_GROUP_REPLAY_CROSS_SPATIAL
 };
 
 // Exercise serialized parameters and all native MatrixUnit memory boundaries
@@ -163,7 +164,7 @@ SC_MODULE(MatrixUnitTb) {
 
   // Stop a serialized-parameter, memory, or completion deadlock
   void watchdog() {
-    wait(500, SC_US);
+    wait(2, SC_MS);
     require(false, "timed out waiting for MatrixUnit completion");
     sc_stop();
   }
@@ -175,7 +176,8 @@ SC_MODULE(MatrixUnitTb) {
     if (job == MATRIX_SET_MAJOR_REPLAY) return 4;
     if (is_conv(job)) {
       return spatial_y_extent(job) * spatial_x_extent(job) *
-             conv_set_count(job);
+             conv_set_count(job) * c2_extent(job) * outer_fy_extent(job) *
+             k2_extent(job);
     }
     if (job == MATRIX_PARTIAL) return 1;
     return 4;
@@ -184,7 +186,7 @@ SC_MODULE(MatrixUnitTb) {
   // Return the number of completed output vectors in one job
   static int output_count(MatrixJob job) {
     if (is_conv(job)) {
-      return spatial_y_extent(job) * spatial_x_extent(job);
+      return spatial_y_extent(job) * spatial_x_extent(job) * k2_extent(job);
     }
     if (job == MATRIX_SET_MAJOR_REPLAY) {
       return spatial_x_extent(job);
@@ -195,15 +197,35 @@ SC_MODULE(MatrixUnitTb) {
 
   // Return the exact number of direct bias-vector requests in one job
   static int bias_request_count_for_job(MatrixJob job) {
+    if (is_cross_spatial_group_replay(job)) return k2_extent(job);
     if (job == MATRIX_ACCUMULATION) return 1;
     return job == MATRIX_SET_MAJOR_REPLAY ? spatial_x_extent(job) : 0;
   }
 
   // Return the exact number of distinct input vectors in one job
   static int input_request_count_for_job(MatrixJob job) {
+    if (is_cross_spatial_group_replay(job)) {
+      int count = 0;
+      const int input_y = fy_extent(job) + spatial_y_extent(job) - 1;
+      const int input_x = fx_extent(job) + spatial_x_extent(job) - 1;
+      for (int outer_fy = 0; outer_fy < outer_fy_extent(job); outer_fy++) {
+        for (int x = 0; x < input_x; x++) {
+          for (int y = 0; y < input_y; y++) {
+            const int source_x = x - padding(job);
+            const int source_y = y + outer_fy - padding(job);
+            if (source_x >= 0 && source_x < tensor_input_x_extent(job) &&
+                source_y >= 0 && source_y < tensor_input_y_extent(job)) {
+              count += c2_extent(job) * c1_extent(job);
+            }
+          }
+        }
+      }
+      return count * k2_extent(job);
+    }
     if (is_l1_group_replay(job)) {
       return (fy_extent(job) + spatial_y_extent(job) - 1) *
-             (fx_extent(job) + spatial_x_extent(job) - 1) * c1_extent(job);
+             (fx_extent(job) + spatial_x_extent(job) - 1) * c1_extent(job) *
+             c2_extent(job) * outer_fy_extent(job);
     }
     return job == MATRIX_MULTISET ? 2 : operation_count(job);
   }
@@ -216,11 +238,21 @@ SC_MODULE(MatrixUnitTb) {
 
   // Identify L1 spatial loops that replay one resident reduction sequence
   static bool is_l1_group_replay(MatrixJob job) {
-    return job == MATRIX_L1_OX_GROUP_REPLAY || job == MATRIX_L1_OY_GROUP_REPLAY;
+    return job == MATRIX_L1_OX_GROUP_REPLAY ||
+           job == MATRIX_L1_OY_GROUP_REPLAY ||
+           job == MATRIX_L1_OX_GROUP_REPLAY_CROSS_SPATIAL;
+  }
+
+  // Identify group replay with a non-unit spatial loop inside each set use
+  static bool is_cross_spatial_group_replay(MatrixJob job) {
+    return job == MATRIX_L1_OX_GROUP_REPLAY_CROSS_SPATIAL;
   }
 
   // Return the K2 extent in one job
-  static int k2_extent(MatrixJob job) { return job == MATRIX_RELOAD ? 4 : 1; }
+  static int k2_extent(MatrixJob job) {
+    if (is_cross_spatial_group_replay(job)) return 8;
+    return job == MATRIX_RELOAD ? 4 : 1;
+  }
 
   // Return the K1 extent in one job
   static int k1_extent(MatrixJob job) {
@@ -229,7 +261,30 @@ SC_MODULE(MatrixUnitTb) {
 
   // Return the C2 extent in one job
   static int c2_extent(MatrixJob job) {
+    if (is_cross_spatial_group_replay(job)) return 4;
     return job == MATRIX_ACCUMULATION || job == MATRIX_SET_MAJOR_REPLAY ? 2 : 1;
+  }
+
+  // Return the outer-FY extent in one job
+  static int outer_fy_extent(MatrixJob job) {
+    return is_cross_spatial_group_replay(job) ? 3 : 1;
+  }
+
+  // Return the convolution padding in one job
+  static int padding(MatrixJob job) {
+    return is_cross_spatial_group_replay(job) ? 1 : 0;
+  }
+
+  // Return the source tensor width in one job
+  static int tensor_input_x_extent(MatrixJob job) {
+    if (is_cross_spatial_group_replay(job)) return spatial_x_extent(job);
+    return is_conv(job) ? fx_extent(job) + spatial_x_extent(job) - 1 : 1;
+  }
+
+  // Return the source tensor height in one job
+  static int tensor_input_y_extent(MatrixJob job) {
+    if (is_cross_spatial_group_replay(job)) return spatial_y_extent(job);
+    return is_conv(job) ? fy_extent(job) + spatial_y_extent(job) - 1 : 1;
   }
 
   // Return the C1 extent in one job
@@ -237,15 +292,20 @@ SC_MODULE(MatrixUnitTb) {
 
   // Return the FX extent in one job
   static int fx_extent(MatrixJob job) {
+    if (is_cross_spatial_group_replay(job)) return 3;
     if (is_l1_group_replay(job)) return 2;
     return is_conv(job) ? 3 : 1;
   }
 
   // Return the FY extent in one job
-  static int fy_extent(MatrixJob job) { return is_conv(job) ? 2 : 1; }
+  static int fy_extent(MatrixJob job) {
+    if (is_cross_spatial_group_replay(job)) return 1;
+    return is_conv(job) ? 2 : 1;
+  }
 
   // Return the number of L0 output-X positions in one job
   static int spatial_x_extent(MatrixJob job) {
+    if (is_cross_spatial_group_replay(job)) return 7;
     return job == MATRIX_CONV_SPATIAL || job == MATRIX_SET_MAJOR_REPLAY ||
                    job == MATRIX_L1_OX_GROUP_REPLAY
                ? 2
@@ -254,6 +314,7 @@ SC_MODULE(MatrixUnitTb) {
 
   // Return the number of L1 output-Y positions in one job
   static int spatial_y_extent(MatrixJob job) {
+    if (is_cross_spatial_group_replay(job)) return 7;
     return job == MATRIX_L1_OY_GROUP_REPLAY ? 2 : 1;
   }
 
@@ -269,7 +330,8 @@ SC_MODULE(MatrixUnitTb) {
     if (job == MATRIX_SET_MAJOR_REPLAY) return c2_extent(job);
     if ((job == MATRIX_CONV_SPATIAL || is_l1_group_replay(job)) &&
         conv_set_count(job) <= CIM_B_SETS) {
-      return conv_set_count(job);
+      return conv_set_count(job) * c2_extent(job) * outer_fy_extent(job) *
+             k2_extent(job);
     }
     return operation_count(job);
   }
@@ -344,12 +406,29 @@ SC_MODULE(MatrixUnitTb) {
     } else if (is_conv(job)) {
       if (is_l1_group_replay(job)) {
         // Replay the complete inner IC/FX/FY set sequence across L1 OX or OY
-        params.weight_loop_idx[1] = 0;
-        params.x_loop_idx[1] = job == MATRIX_L1_OX_GROUP_REPLAY ? 2 : 1;
-        params.y_loop_idx[1] = job == MATRIX_L1_OY_GROUP_REPLAY ? 2 : 1;
-        params.fy_loop_idx[1] = 3;
-        params.fx_loop_idx = 4;
-        params.reduction_loop_idx[1] = 5;
+        if (is_cross_spatial_group_replay(job)) {
+          params.weight_loop_idx[0] = 0;
+          params.y_loop_idx[0] = 1;
+          params.x_loop_idx[0] = 2;
+          params.fy_loop_idx[0] = 3;
+          params.reduction_loop_idx[0] = 4;
+          params.loops[0][params.weight_loop_idx[0]] = k2_extent(job);
+          params.loops[0][params.fy_loop_idx[0]] = outer_fy_extent(job);
+          params.loops[0][params.reduction_loop_idx[0]] = c2_extent(job);
+          params.weight_loop_idx[1] = 0;
+          params.x_loop_idx[1] = 1;
+          params.fy_loop_idx[1] = 2;
+          params.fx_loop_idx = 3;
+          params.reduction_loop_idx[1] = 4;
+          params.y_loop_idx[1] = 5;
+        } else {
+          params.weight_loop_idx[1] = 0;
+          params.x_loop_idx[1] = job == MATRIX_L1_OX_GROUP_REPLAY ? 2 : 1;
+          params.y_loop_idx[1] = job == MATRIX_L1_OY_GROUP_REPLAY ? 2 : 1;
+          params.fy_loop_idx[1] = 3;
+          params.fx_loop_idx = 4;
+          params.reduction_loop_idx[1] = 5;
+        }
         params.loops[1][params.x_loop_idx[1]] = spatial_x_extent(job);
         params.loops[1][params.y_loop_idx[1]] = spatial_y_extent(job);
       } else {
@@ -399,6 +478,8 @@ SC_MODULE(MatrixUnitTb) {
         k2_extent(job);
     params.weight_addr_loops[0][params.weight_addr_reduction_loop_idx[0]] =
         c2_extent(job);
+    params.weight_addr_loops[0][params.weight_addr_fy_idx[0]] =
+        outer_fy_extent(job);
     params.weight_addr_loops[1][params.weight_addr_reduction_loop_idx[1]] =
         c1_extent(job);
     params.weight_addr_loops[1][params.weight_addr_fy_idx[1]] = fy_extent(job);
@@ -421,19 +502,18 @@ SC_MODULE(MatrixUnitTb) {
     params.weight_num_beats = 1;
     params.weight_pack_factor_lg2 = 0;
     // Spatial conv uses overlapping stride-one windows in each live dimension
-    params.input_y =
-        is_conv(job) ? fy_extent(job) + spatial_y_extent(job) - 1 : 1;
+    params.input_y = tensor_input_y_extent(job);
     params.input_x =
         job == MATRIX_REUSE
             ? 4
             : (job == MATRIX_MULTISET || job == MATRIX_SET_MAJOR_REPLAY
                    ? 2
-                   : (is_conv(job) ? fx_extent(job) + spatial_x_extent(job) - 1
-                                   : 1));
+                   : tensor_input_x_extent(job));
     params.stride = 1;
-    params.padding = 0;
-    params.has_bias =
-        job == MATRIX_ACCUMULATION || job == MATRIX_SET_MAJOR_REPLAY;
+    params.padding = padding(job);
+    params.has_bias = job == MATRIX_ACCUMULATION ||
+                      job == MATRIX_SET_MAJOR_REPLAY ||
+                      is_cross_spatial_group_replay(job);
     params.output_to_memory = false;
     params.use_input_codebook = false;
     params.use_weight_codebook = false;
@@ -468,16 +548,30 @@ SC_MODULE(MatrixUnitTb) {
       return input_offset(job) + element_address * INPUT_DTYPE_WIDTH / 8;
     }
     if (is_conv(job)) {
-      const int set = operation % conv_set_count(job);
-      const int spatial = operation / conv_set_count(job);
-      const int spatial_x = spatial % spatial_x_extent(job);
-      const int spatial_y = spatial / spatial_x_extent(job);
+      int spatial_x = 0;
+      int spatial_y = 0;
+      if (is_cross_spatial_group_replay(job)) {
+        spatial_x =
+            (operation / (conv_set_count(job) * spatial_y_extent(job))) %
+            spatial_x_extent(job);
+        spatial_y = operation % spatial_y_extent(job);
+      } else {
+        const int spatial = operation / conv_set_count(job);
+        spatial_x = spatial % spatial_x_extent(job);
+        spatial_y = spatial / spatial_x_extent(job);
+      }
       const int c1 = operation_c1(job, operation);
-      const int fy = operation_fy(job, operation);
+      const int fy = operation_outer_fy(job, operation) * fy_extent(job) +
+                     operation_fy(job, operation);
       const int fx = operation_fx(job, operation);
-      const int input_x = fx_extent(job) + spatial_x_extent(job) - 1;
+      const int input_x = tensor_input_x_extent(job);
+      const int source_x = spatial_x + fx - padding(job);
+      const int source_y = spatial_y + fy - padding(job);
       const int element_address =
-          ((spatial_y + fy) * input_x + spatial_x + fx) * c1_extent(job) + c1;
+          ((source_y * input_x + source_x) * c2_extent(job) +
+           operation_c2(job, operation)) *
+              c1_extent(job) +
+          c1;
       return input_offset(job) + element_address * ROWS * INPUT_DTYPE_WIDTH / 8;
     }
     return input_offset(job) + operation * ROWS * INPUT_DTYPE_WIDTH / 8;
@@ -485,18 +579,46 @@ SC_MODULE(MatrixUnitTb) {
 
   // Return the K2 coordinate used by one operation
   static int operation_k2(MatrixJob job, int operation) {
+    if (is_cross_spatial_group_replay(job)) {
+      const int operations_per_output_tile =
+          outer_fy_extent(job) * c2_extent(job) * spatial_x_extent(job) *
+          conv_set_count(job) * spatial_y_extent(job);
+      return operation / operations_per_output_tile;
+    }
     return job == MATRIX_RELOAD ? operation : 0;
   }
 
   // Return the C2 coordinate used by one operation
   static int operation_c2(MatrixJob job, int operation) {
     if (job == MATRIX_ACCUMULATION) return operation;
+    if (is_cross_spatial_group_replay(job)) {
+      const int operations_per_outer_reduction =
+          spatial_x_extent(job) * conv_set_count(job) * spatial_y_extent(job);
+      return (operation / operations_per_outer_reduction) % c2_extent(job);
+    }
     return job == MATRIX_SET_MAJOR_REPLAY ? operation / spatial_x_extent(job)
                                           : 0;
   }
 
+  // Return the outer-FY coordinate used by one operation
+  static int operation_outer_fy(MatrixJob job, int operation) {
+    if (!is_cross_spatial_group_replay(job)) return 0;
+    const int operations_per_outer_reduction =
+        spatial_x_extent(job) * conv_set_count(job) * spatial_y_extent(job);
+    return (operation / operations_per_outer_reduction / c2_extent(job)) %
+           outer_fy_extent(job);
+  }
+
   // Return the MAC operation that represents one distinct resident-set fill
   static int weight_fill_operation(MatrixJob job, int fill) {
+    if (is_cross_spatial_group_replay(job)) {
+      const int outer_group = fill / conv_set_count(job);
+      const int set = fill % conv_set_count(job);
+      const int operations_per_outer_reduction =
+          spatial_x_extent(job) * conv_set_count(job) * spatial_y_extent(job);
+      return outer_group * operations_per_outer_reduction +
+             set * spatial_y_extent(job);
+    }
     return job == MATRIX_SET_MAJOR_REPLAY ? fill * spatial_x_extent(job) : fill;
   }
 
@@ -505,16 +627,24 @@ SC_MODULE(MatrixUnitTb) {
     return job == MATRIX_MULTISET ? operation % k1_extent(job) : 0;
   }
 
+  // Return the convolution-set coordinate used by one operation
+  static int operation_set(MatrixJob job, int operation) {
+    if (is_cross_spatial_group_replay(job)) {
+      return (operation / spatial_y_extent(job)) % conv_set_count(job);
+    }
+    return is_conv(job) ? operation % conv_set_count(job) : operation;
+  }
+
   // Return the C1 coordinate used by one operation
   static int operation_c1(MatrixJob job, int operation) {
-    const int set = is_conv(job) ? operation % conv_set_count(job) : operation;
+    const int set = operation_set(job, operation);
     if (is_l1_group_replay(job)) return set % c1_extent(job);
     return is_conv(job) ? set / (fy_extent(job) * fx_extent(job)) : 0;
   }
 
   // Return the FY coordinate used by one operation
   static int operation_fy(MatrixJob job, int operation) {
-    const int set = is_conv(job) ? operation % conv_set_count(job) : operation;
+    const int set = operation_set(job, operation);
     if (is_l1_group_replay(job)) {
       return set / (c1_extent(job) * fx_extent(job));
     }
@@ -523,11 +653,34 @@ SC_MODULE(MatrixUnitTb) {
 
   // Return the FX coordinate used by one operation
   static int operation_fx(MatrixJob job, int operation) {
-    const int set = is_conv(job) ? operation % conv_set_count(job) : operation;
+    const int set = operation_set(job, operation);
     if (is_l1_group_replay(job)) {
       return (set / c1_extent(job)) % fx_extent(job);
     }
     return is_conv(job) ? set % fx_extent(job) : 0;
+  }
+
+  // Identify an operation whose source coordinate is zero padding
+  static bool operation_reads_padding(MatrixJob job, int operation) {
+    if (!is_cross_spatial_group_replay(job)) return false;
+    const int spatial_x =
+        (operation / (conv_set_count(job) * spatial_y_extent(job))) %
+        spatial_x_extent(job);
+    const int spatial_y = operation % spatial_y_extent(job);
+    const int fy = operation_outer_fy(job, operation) * fy_extent(job) +
+                   operation_fy(job, operation);
+    const int source_x =
+        spatial_x + operation_fx(job, operation) - padding(job);
+    const int source_y = spatial_y + fy - padding(job);
+    return source_x < 0 || source_x >= tensor_input_x_extent(job) ||
+           source_y < 0 || source_y >= tensor_input_y_extent(job);
+  }
+
+  // Return one operation's input element, including zero padding
+  static int operation_input_value(MatrixJob job, int operation, int row) {
+    return operation_reads_padding(job, operation)
+               ? 0
+               : input_value(input_address(job, operation), row);
   }
 
   // Return the direct weight-row request address used by one operation
@@ -536,7 +689,8 @@ SC_MODULE(MatrixUnitTb) {
     const int k1 = operation_k1(job, operation);
     const int c2 = operation_c2(job, operation);
     const int c1 = operation_c1(job, operation);
-    const int fy = operation_fy(job, operation);
+    const int fy = operation_outer_fy(job, operation) * fy_extent(job) +
+                   operation_fy(job, operation);
     const int fx = operation_fx(job, operation);
     const uint64_t k_stride = COLS;
     const uint64_t c_stride = k2_extent(job) * k1_extent(job) * k_stride;
@@ -571,6 +725,37 @@ SC_MODULE(MatrixUnitTb) {
   static int expected_value(MatrixJob job, int result, int output) {
     if (output >= valid_cols(job)) return 0;
 
+    if (is_cross_spatial_group_replay(job)) {
+      const int results_per_output_tile =
+          spatial_x_extent(job) * spatial_y_extent(job);
+      const int k2 = result / results_per_output_tile;
+      const int spatial = result % results_per_output_tile;
+      const int spatial_x = spatial / spatial_y_extent(job);
+      const int spatial_y = spatial % spatial_y_extent(job);
+      int expected =
+          bias_value(bias_offset(job) + k2 * COLS * Buffer::width / 8, output);
+      for (int outer_fy = 0; outer_fy < outer_fy_extent(job); outer_fy++) {
+        for (int c2 = 0; c2 < c2_extent(job); c2++) {
+          for (int set = 0; set < conv_set_count(job); set++) {
+            const int outer_group =
+                (k2 * outer_fy_extent(job) + outer_fy) * c2_extent(job) + c2;
+            const int operation =
+                ((outer_group * spatial_x_extent(job) + spatial_x) *
+                     conv_set_count(job) +
+                 set) *
+                    spatial_y_extent(job) +
+                spatial_y;
+            for (int row = 0; row < valid_rows(job); row++) {
+              expected +=
+                  operation_input_value(job, operation, row) *
+                  weight_value(weight_address(job, operation, row), output);
+            }
+          }
+        }
+      }
+      return expected;
+    }
+
     int first_operation = result;
     int contributions = 1;
     if (job == MATRIX_ACCUMULATION) {
@@ -603,7 +788,37 @@ SC_MODULE(MatrixUnitTb) {
   // Queue all expected memory requests before releasing reset
   void append_expected_requests(MatrixJob job) {
     // The reload job refetches its unchanged input once per L0 weight set
-    if (job == MATRIX_L1_OY_GROUP_REPLAY) {
+    if (is_cross_spatial_group_replay(job)) {
+      const int input_y = fy_extent(job) + spatial_y_extent(job) - 1;
+      const int input_x = fx_extent(job) + spatial_x_extent(job) - 1;
+      for (int k2 = 0; k2 < k2_extent(job); k2++) {
+        for (int outer_fy = 0; outer_fy < outer_fy_extent(job); outer_fy++) {
+          for (int c2 = 0; c2 < c2_extent(job); c2++) {
+            for (int x = 0; x < input_x; x++) {
+              for (int c1 = 0; c1 < c1_extent(job); c1++) {
+                for (int y = 0; y < input_y; y++) {
+                  const int source_x = x - padding(job);
+                  const int source_y = y + outer_fy - padding(job);
+                  if (source_x < 0 || source_x >= tensor_input_x_extent(job) ||
+                      source_y < 0 || source_y >= tensor_input_y_extent(job)) {
+                    continue;
+                  }
+                  const int element =
+                      ((source_y * tensor_input_x_extent(job) + source_x) *
+                           c2_extent(job) +
+                       c2) *
+                          c1_extent(job) +
+                      c1;
+                  expected_input_addresses.push_back(input_offset(job) +
+                                                     element * ROWS *
+                                                         INPUT_DTYPE_WIDTH / 8);
+                }
+              }
+            }
+          }
+        }
+      }
+    } else if (job == MATRIX_L1_OY_GROUP_REPLAY) {
       const int input_y = fy_extent(job) + spatial_y_extent(job) - 1;
       const int input_x = fx_extent(job) + spatial_x_extent(job) - 1;
       for (int x = 0; x < input_x; x++) {
@@ -641,7 +856,10 @@ SC_MODULE(MatrixUnitTb) {
     }
     for (int request = 0; request < bias_request_count_for_job(job);
          request++) {
-      expected_bias_addresses.push_back(bias_offset(job));
+      expected_bias_addresses.push_back(
+          bias_offset(job) + (is_cross_spatial_group_replay(job)
+                                  ? request * COLS * Buffer::width / 8
+                                  : 0));
     }
   }
 
@@ -838,6 +1056,7 @@ SC_MODULE(MatrixUnitTb) {
     append_expected_requests(MATRIX_SET_MAJOR_REPLAY);
     append_expected_requests(MATRIX_L1_OX_GROUP_REPLAY);
     append_expected_requests(MATRIX_L1_OY_GROUP_REPLAY);
+    append_expected_requests(MATRIX_L1_OX_GROUP_REPLAY_CROSS_SPATIAL);
 
     rstn.write(false);
     tick();
@@ -855,6 +1074,7 @@ SC_MODULE(MatrixUnitTb) {
     run_job(MATRIX_SET_MAJOR_REPLAY);
     run_job(MATRIX_L1_OX_GROUP_REPLAY);
     run_job(MATRIX_L1_OY_GROUP_REPLAY);
+    run_job(MATRIX_L1_OX_GROUP_REPLAY_CROSS_SPATIAL);
     require(reuse_utilization > reload_utilization,
             "resident-weight reuse must outperform four direct reloads");
 
@@ -877,7 +1097,8 @@ SC_MODULE(MatrixUnitTb) {
         input_request_count_for_job(MATRIX_PARTIAL) +
         input_request_count_for_job(MATRIX_SET_MAJOR_REPLAY) +
         input_request_count_for_job(MATRIX_L1_OX_GROUP_REPLAY) +
-        input_request_count_for_job(MATRIX_L1_OY_GROUP_REPLAY);
+        input_request_count_for_job(MATRIX_L1_OY_GROUP_REPLAY) +
+        input_request_count_for_job(MATRIX_L1_OX_GROUP_REPLAY_CROSS_SPATIAL);
     require(input_request_count == expected_input_requests,
             "received the exact native input-vector request count");
     const int expected_weight_requests =
@@ -890,7 +1111,8 @@ SC_MODULE(MatrixUnitTb) {
         weight_request_count_for_job(MATRIX_PARTIAL) +
         weight_request_count_for_job(MATRIX_SET_MAJOR_REPLAY) +
         weight_request_count_for_job(MATRIX_L1_OX_GROUP_REPLAY) +
-        weight_request_count_for_job(MATRIX_L1_OY_GROUP_REPLAY);
+        weight_request_count_for_job(MATRIX_L1_OY_GROUP_REPLAY) +
+        weight_request_count_for_job(MATRIX_L1_OX_GROUP_REPLAY_CROSS_SPATIAL);
     require(weight_request_count == expected_weight_requests,
             "received the exact direct weight-row request count");
     const int expected_bias_requests =
@@ -903,7 +1125,8 @@ SC_MODULE(MatrixUnitTb) {
         bias_request_count_for_job(MATRIX_PARTIAL) +
         bias_request_count_for_job(MATRIX_SET_MAJOR_REPLAY) +
         bias_request_count_for_job(MATRIX_L1_OX_GROUP_REPLAY) +
-        bias_request_count_for_job(MATRIX_L1_OY_GROUP_REPLAY);
+        bias_request_count_for_job(MATRIX_L1_OY_GROUP_REPLAY) +
+        bias_request_count_for_job(MATRIX_L1_OX_GROUP_REPLAY_CROSS_SPATIAL);
     require(bias_request_count == expected_bias_requests,
             "received the exact direct bias-vector request count");
 

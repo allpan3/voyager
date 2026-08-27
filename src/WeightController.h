@@ -1269,6 +1269,25 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
   }
 #endif
 
+  // Restrict bias traversal to the points where the processor loads its cache
+  static void set_bias_loop_bounds(
+      const MatrixParams &params,
+      ac_int<LOOP_WIDTH, false> loop_bounds[2][LOOP_SLOT_COUNT]) {
+    loop_bounds[0][params.reduction_loop_idx[0]] = 0;
+    loop_bounds[0][params.fy_loop_idx[0]] = 0;
+    loop_bounds[1][params.fx_loop_idx] = 0;
+    loop_bounds[1][params.fy_loop_idx[1]] = 0;
+    loop_bounds[1][params.reduction_loop_idx[1]] = 0;
+
+    // The processor retains bias while loops nested inside L1 OC advance
+#pragma hls_unroll yes
+    for (int slot = 0; slot < LOOP_SLOT_COUNT; slot++) {
+      if (slot > params.weight_loop_idx[1]) {
+        loop_bounds[1][slot] = 0;
+      }
+    }
+  }
+
   void bias_fetcher() {
     bias_fetcher_params.ResetRead();
     bias_req.Reset();
@@ -1289,37 +1308,7 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
         }
       }
 
-      // Omit loops whose bias value is already held by MatrixProcessor
-      loop_bounds[0][params.reduction_loop_idx[0]] = 0;
-      loop_bounds[0][params.fy_loop_idx[0]] = 0;
-#if MATRIX_BACKEND == MATRIX_BACKEND_CIM
-      const auto l1_oc = params.loops[1][params.weight_loop_idx[1]];
-      const auto l1_ic = params.loops[1][params.reduction_loop_idx[1]];
-      const auto l1_fy = params.loops[1][params.fy_loop_idx[1]];
-      const auto l1_fx = params.loops[1][params.fx_loop_idx];
-      const bool l1_ox_reuses_weights =
-          (l1_oc == 1 || params.weight_loop_idx[1] < params.x_loop_idx[1]) &&
-          (l1_ic == 1 || params.reduction_loop_idx[1] < params.x_loop_idx[1]) &&
-          (l1_fy == 1 || params.fy_loop_idx[1] < params.x_loop_idx[1]) &&
-          (l1_fx == 1 || params.fx_loop_idx < params.x_loop_idx[1]);
-      const bool l1_oy_reuses_weights =
-          (l1_oc == 1 || params.weight_loop_idx[1] < params.y_loop_idx[1]) &&
-          (l1_ic == 1 || params.reduction_loop_idx[1] < params.y_loop_idx[1]) &&
-          (l1_fy == 1 || params.fy_loop_idx[1] < params.y_loop_idx[1]) &&
-          (l1_fx == 1 || params.fx_loop_idx < params.y_loop_idx[1]);
-      if (l1_ox_reuses_weights) {
-        loop_bounds[1][params.x_loop_idx[1]] = 0;
-      }
-      if (l1_oy_reuses_weights) {
-        loop_bounds[1][params.y_loop_idx[1]] = 0;
-      }
-#else
-      loop_bounds[1][params.weight_reuse_idx[0]] = 0;
-      loop_bounds[1][params.weight_reuse_idx[1]] = 0;
-#endif
-      loop_bounds[1][params.fx_loop_idx] = 0;
-      loop_bounds[1][params.fy_loop_idx[1]] = 0;
-      loop_bounds[1][params.reduction_loop_idx[1]] = 0;
+      set_bias_loop_bounds(params, loop_bounds);
 
       ac_int<LOOP_WIDTH, false> K2 = params.loops[0][params.weight_loop_idx[0]];
       ac_int<LOOP_WIDTH, false> K1 = params.loops[1][params.weight_loop_idx[1]];
@@ -1398,37 +1387,7 @@ struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
         }
       }
 
-      // Omit loops whose bias value is already held by MatrixProcessor
-      loop_bounds[0][params.reduction_loop_idx[0]] = 0;
-      loop_bounds[0][params.fy_loop_idx[0]] = 0;
-#if MATRIX_BACKEND == MATRIX_BACKEND_CIM
-      const auto l1_oc = params.loops[1][params.weight_loop_idx[1]];
-      const auto l1_ic = params.loops[1][params.reduction_loop_idx[1]];
-      const auto l1_fy = params.loops[1][params.fy_loop_idx[1]];
-      const auto l1_fx = params.loops[1][params.fx_loop_idx];
-      const bool l1_ox_reuses_weights =
-          (l1_oc == 1 || params.weight_loop_idx[1] < params.x_loop_idx[1]) &&
-          (l1_ic == 1 || params.reduction_loop_idx[1] < params.x_loop_idx[1]) &&
-          (l1_fy == 1 || params.fy_loop_idx[1] < params.x_loop_idx[1]) &&
-          (l1_fx == 1 || params.fx_loop_idx < params.x_loop_idx[1]);
-      const bool l1_oy_reuses_weights =
-          (l1_oc == 1 || params.weight_loop_idx[1] < params.y_loop_idx[1]) &&
-          (l1_ic == 1 || params.reduction_loop_idx[1] < params.y_loop_idx[1]) &&
-          (l1_fy == 1 || params.fy_loop_idx[1] < params.y_loop_idx[1]) &&
-          (l1_fx == 1 || params.fx_loop_idx < params.y_loop_idx[1]);
-      if (l1_ox_reuses_weights) {
-        loop_bounds[1][params.x_loop_idx[1]] = 0;
-      }
-      if (l1_oy_reuses_weights) {
-        loop_bounds[1][params.y_loop_idx[1]] = 0;
-      }
-#else
-      loop_bounds[1][params.weight_reuse_idx[0]] = 0;
-      loop_bounds[1][params.weight_reuse_idx[1]] = 0;
-#endif
-      loop_bounds[1][params.fx_loop_idx] = 0;
-      loop_bounds[1][params.fy_loop_idx[1]] = 0;
-      loop_bounds[1][params.reduction_loop_idx[1]] = 0;
+      set_bias_loop_bounds(params, loop_bounds);
 
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
