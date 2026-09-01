@@ -6,6 +6,13 @@
 
 #include <type_traits>
 
+#ifndef __SYNTHESIS__
+#include <deque>
+#include <sstream>
+#include <stdexcept>
+#include <vector>
+#endif
+
 #include "AccelTypes.h"
 #include "ArchitectureParams.h"
 #include "CIMArray.h"
@@ -29,7 +36,8 @@ template <typename InputTypeTuple, typename WeightTypeTuple, typename Input,
           int TILE_INPUT_AXIS_ELEMENTS, int TILE_OUTPUT_AXIS_ELEMENTS,
           int INPUT_AXIS_TILES, int OUTPUT_AXIS_TILES, int A_PORT_TILES,
           int B_PORT_TILES, int C_PORT_TILES, int C_BEAT_LAYOUT,
-          int RESULT_SLOTS_PER_OUTPUT_LANE = INPUT_AXIS_TILES>
+          int RESULT_SLOTS_PER_OUTPUT_LANE = INPUT_AXIS_TILES,
+          int LOCAL_ACCUM_CONTEXTS = CIM_LOCAL_ACCUM_CONTEXTS>
 SC_MODULE(CIMProcessor) {
  public:
   static constexpr int K = rows;
@@ -53,30 +61,46 @@ SC_MODULE(CIMProcessor) {
   using Set = typename Array::Set;
   using MACRequest = typename Array::MACRequest;
   using WriteRequest = typename Array::WriteRequest;
+  using AccumulationWriteRequest = BufferWriteRequest<Pack1D<Buffer, N>>;
 
   static constexpr int LOOP_WIDTH = 10;
   static constexpr int LOOP_LEVEL_COUNT = 2;
   static constexpr int LOOP_SLOT_COUNT = 6;
-  // Carry one ordered accumulator transaction between read issue and completion
+  static constexpr int LOCAL_ACCUM_CONTEXT_WIDTH =
+      ac::nbits<(LOCAL_ACCUM_CONTEXTS > 1
+                     ? LOCAL_ACCUM_CONTEXTS - 1
+                     : 1)>::val;
+  using LocalAccumContext = ac_int<LOCAL_ACCUM_CONTEXT_WIDTH, false>;
+
+  // Carry arithmetic inputs and storage selection into the accumulation datapath
+  //
+  // A matrix command is one accepted MatrixParams command and its full semantic
+  // loop. The boundary bit resets every statically assigned local accum context
+  // before the command's first operation
   struct AccumulationMetadata {
     Pack1D<Psum, N> result;
     Pack1D<Buffer, N> initial_value;
-    ac_int<16, false> address;
     ac_int<1, false> starts_reduction;
-    ac_int<1, false> stores_partial_sum;
+    ac_int<1, false> finishes_reduction;
+    ac_int<1, false> uses_local_accum_context;
+    LocalAccumContext local_accum_context;
     ac_int<1, false> buffer_bank;
+    ac_int<1, false> begins_matrix_command;
 
     static const unsigned int width =
-        Pack1D<Psum, N>::width + Pack1D<Buffer, N>::width + 19;
+        Pack1D<Psum, N>::width + Pack1D<Buffer, N>::width + 5 +
+        LocalAccumContext::width;
 
     template <unsigned int Size>
     void Marshall(Marshaller<Size> &m) {
       m & result;
       m & initial_value;
-      m & address;
       m & starts_reduction;
-      m & stores_partial_sum;
+      m & finishes_reduction;
+      m & uses_local_accum_context;
+      m & local_accum_context;
       m & buffer_bank;
+      m & begins_matrix_command;
     }
 
     inline friend void sc_trace(sc_trace_file *tf,
@@ -84,20 +108,27 @@ SC_MODULE(CIMProcessor) {
                                 const std::string &name) {
       sc_trace(tf, metadata.result, name + ".result");
       sc_trace(tf, metadata.initial_value, name + ".initial_value");
-      sc_trace(tf, metadata.address, name + ".address");
       sc_trace(tf, metadata.starts_reduction, name + ".starts_reduction");
-      sc_trace(tf, metadata.stores_partial_sum, name + ".stores_partial_sum");
+      sc_trace(tf, metadata.finishes_reduction,
+               name + ".finishes_reduction");
+      sc_trace(tf, metadata.uses_local_accum_context,
+               name + ".uses_local_accum_context");
+      sc_trace(tf, metadata.local_accum_context, name + ".local_accum_context");
       sc_trace(tf, metadata.buffer_bank, name + ".buffer_bank");
+      sc_trace(tf, metadata.begins_matrix_command,
+               name + ".begins_matrix_command");
     }
 
     inline friend std::ostream &operator<<(
         std::ostream &os, const AccumulationMetadata &metadata) {
       os << metadata.result << " ";
       os << metadata.initial_value << " ";
-      os << metadata.address << " ";
       os << metadata.starts_reduction << " ";
-      os << metadata.stores_partial_sum << " ";
-      os << metadata.buffer_bank;
+      os << metadata.finishes_reduction << " ";
+      os << metadata.uses_local_accum_context << " ";
+      os << metadata.local_accum_context << " ";
+      os << metadata.buffer_bank << " ";
+      os << metadata.begins_matrix_command;
       return os;
     }
 
@@ -105,10 +136,12 @@ SC_MODULE(CIMProcessor) {
                                   const AccumulationMetadata &rhs) {
       return lhs.result == rhs.result &&
              lhs.initial_value == rhs.initial_value &&
-             lhs.address == rhs.address &&
              lhs.starts_reduction == rhs.starts_reduction &&
-             lhs.stores_partial_sum == rhs.stores_partial_sum &&
-             lhs.buffer_bank == rhs.buffer_bank;
+             lhs.finishes_reduction == rhs.finishes_reduction &&
+             lhs.uses_local_accum_context == rhs.uses_local_accum_context &&
+             lhs.local_accum_context == rhs.local_accum_context &&
+             lhs.buffer_bank == rhs.buffer_bank &&
+             lhs.begins_matrix_command == rhs.begins_matrix_command;
     }
   };
 
@@ -120,43 +153,9 @@ SC_MODULE(CIMProcessor) {
   static constexpr int WEIGHT_BEATS_PER_ROW = OUTPUT_AXIS_TILES / B_PORT_TILES;
 
   static constexpr int ACCUM_TO_WB_FIFO_DEPTH = SUPPORT_MX ? 8 : 1;
-  // II=1 produces one partial sum per cycle, so the three-cycle FIFO,
-  // write-request, and buffer-write path requires three bypass entries
-  static constexpr int ACCUMULATION_FORWARDING_ENTRIES = 3;
-  using AccumulationForwardingSlot = ac_int<2, false>;
 
-  // Carry an accumulated value and its pending-write forwarding slot
-  struct AccumulationResult {
-    Pack1D<Buffer, N> value;
-    AccumulationForwardingSlot forwarding_slot;
-
-    static const unsigned int width = Pack1D<Buffer, N>::width + 2;
-
-    template <unsigned int Size>
-    void Marshall(Marshaller<Size> &m) {
-      m & value;
-      m & forwarding_slot;
-    }
-
-    inline friend void sc_trace(sc_trace_file *tf,
-                                const AccumulationResult &result,
-                                const std::string &name) {
-      sc_trace(tf, result.value, name + ".value");
-      sc_trace(tf, result.forwarding_slot, name + ".forwarding_slot");
-    }
-
-    inline friend std::ostream &operator<<(std::ostream &os,
-                                           const AccumulationResult &result) {
-      os << result.value << " " << result.forwarding_slot;
-      return os;
-    }
-
-    inline friend bool operator==(const AccumulationResult &lhs,
-                                  const AccumulationResult &rhs) {
-      return lhs.value == rhs.value &&
-             lhs.forwarding_slot == rhs.forwarding_slot;
-    }
-  };
+  // Carry only the accumulated value; write_back rederives retirement actions
+  using AccumulationResult = Pack1D<Buffer, N>;
 
   static constexpr int OUTPUT_FIFO_DEPTH = 8;
   static constexpr int RESIDENT_SET_COUNT = B_SETS;
@@ -201,6 +200,10 @@ SC_MODULE(CIMProcessor) {
   static_assert(B_SETS > 0, "CIMProcessor requires a resident weight set");
   static_assert(B_SETS <= 0xFFFF,
                 "CIM resident set count exceeds schedule metadata");
+  static_assert(LOCAL_ACCUM_CONTEXTS > 0,
+                "CIMProcessor requires at least one local accum context");
+  static_assert(LOCAL_ACCUM_CONTEXTS <= buffer_size,
+                "local accum contexts cannot exceed live-output capacity");
   static_assert(K == Array::K, "CIMProcessor K must match the CIM input axis");
   static_assert(K == CIM_ARRAY_K_DIMENSION,
                 "CIMProcessor rows must match the CIM array K dimension");
@@ -245,7 +248,7 @@ SC_MODULE(CIMProcessor) {
       accumulation_buffer_read_address[ACCUM_BUFFER_BANKS];
   Connections::In<Pack1D<Buffer, N>>
       accumulation_buffer_read_data[ACCUM_BUFFER_BANKS];
-  Connections::Out<BufferWriteRequest<Pack1D<Buffer, N>>>
+  Connections::Out<AccumulationWriteRequest>
       accumulation_buffer_write_request[ACCUM_BUFFER_BANKS];
 
 #if DOUBLE_BUFFERED_ACCUM_BUFFER
@@ -378,21 +381,18 @@ SC_MODULE(CIMProcessor) {
   Connections::Combinational<AccumulationResult> CCS_INIT_S1(accum_to_wb_enq);
   Connections::Combinational<AccumulationResult> CCS_INIT_S1(accum_to_wb_deq);
 
-  // Retire forwarding slots only after their accumulation writes are accepted
-  Connections::Fifo<AccumulationForwardingSlot, ACCUMULATION_FORWARDING_ENTRIES>
-      CCS_INIT_S1(accumulation_forwarding_commit_fifo);
-  Connections::Combinational<AccumulationForwardingSlot> CCS_INIT_S1(
-      accumulation_forwarding_commit_enq);
-  Connections::Combinational<AccumulationForwardingSlot> CCS_INIT_S1(
-      accumulation_forwarding_commit_deq);
-
-  // Isolate slot-credit recycling from a blocked accumulation operation
-  Connections::Fifo<AccumulationForwardingSlot, ACCUMULATION_FORWARDING_ENTRIES>
-      CCS_INIT_S1(accumulation_forwarding_free_fifo);
-  Connections::Combinational<AccumulationForwardingSlot> CCS_INIT_S1(
-      accumulation_forwarding_free_enq);
-  Connections::Combinational<AccumulationForwardingSlot> CCS_INIT_S1(
-      accumulation_forwarding_free_deq);
+#ifndef __SYNTHESIS__
+  // Diagnose read-after-write hazards at the SRAM feedback boundary in simulation
+  // This reference exists only to localize stale partial-sum reads, not to replace
+  // final-output checking or synthesize hardware dependency checks
+  struct AccumulationReadCheck {
+    unsigned address;
+    unsigned bank;
+    Pack1D<Buffer, N> previous;
+  };
+  std::vector<Pack1D<Buffer, N>> simulation_partial_sums[ACCUM_BUFFER_BANKS];
+  std::deque<AccumulationReadCheck> simulation_accumulation_reads;
+#endif
 
   // Match MatrixProcessor's final-output decoupling after accumulation
   Connections::Fifo<Pack1D<Buffer, N>, OUTPUT_FIFO_DEPTH> CCS_INIT_S1(
@@ -468,16 +468,6 @@ SC_MODULE(CIMProcessor) {
     accum_to_wb_fifo.enq(accum_to_wb_enq);
     accum_to_wb_fifo.deq(accum_to_wb_deq);
 
-    accumulation_forwarding_commit_fifo.clk(clk);
-    accumulation_forwarding_commit_fifo.rst(rstn);
-    accumulation_forwarding_commit_fifo.enq(accumulation_forwarding_commit_enq);
-    accumulation_forwarding_commit_fifo.deq(accumulation_forwarding_commit_deq);
-
-    accumulation_forwarding_free_fifo.clk(clk);
-    accumulation_forwarding_free_fifo.rst(rstn);
-    accumulation_forwarding_free_fifo.enq(accumulation_forwarding_free_enq);
-    accumulation_forwarding_free_fifo.deq(accumulation_forwarding_free_deq);
-
     accum_output_fifo.clk(clk);
     accum_output_fifo.rst(rstn);
     accum_output_fifo.enq(accum_output_enq);
@@ -538,10 +528,6 @@ SC_MODULE(CIMProcessor) {
     async_reset_signal_is(rstn, false);
 
     SC_THREAD(complete_accumulation);
-    sensitive << clk.pos();
-    async_reset_signal_is(rstn, false);
-
-    SC_THREAD(recycle_accumulation_forwarding_slots);
     sensitive << clk.pos();
     async_reset_signal_is(rstn, false);
 
@@ -1077,12 +1063,16 @@ SC_MODULE(CIMProcessor) {
     }
   }
 
-  // Address one live output as [OC@L1][combined OY][combined OX]
+  // Flatten the live semantic loop as [OC@L1][combined OY][combined OX]
+  //
+  // OX is innermost, OY is next, and OC@L1 is outermost, so the index is
+  // ((oc * combined_oy_extent) + oy) * combined_ox_extent + ox. Local accum
+  // contexts 0..R-1 use this index directly and need no address search
   //
   // Outer OX/OY participates only when nested inside an unfinished reduction;
   // otherwise that outer loop completes one output before starting the next and
   // may reuse the same accumulation-buffer address
-  static ac_int<16, false> accumulation_address(
+  static ac_int<16, false> output_context_index(
       const MatrixParams &params,
       const ac_int<LOOP_WIDTH, false> loop_counters[2][6]) {
     // FX@L2 is fixed to one, so only IC/FY can keep an outer output live
@@ -1141,12 +1131,15 @@ SC_MODULE(CIMProcessor) {
                params.loops[1][params.fy_loop_idx[1]] - 1;
   }
 
-  // Return whether the sum must remain in MatrixUnit's accumulation buffer
-  static bool stores_partial_sum(
+  // Select actual accumulation-buffer writes after static local assignment
+  static bool writes_accumulation_buffer(
       const MatrixParams &params,
-      const ac_int<LOOP_WIDTH, false> loop_counters[2][6]) {
-    return !finishes_output_reduction(params, loop_counters) ||
-           (DOUBLE_BUFFERED_ACCUM_BUFFER &&
+      const ac_int<LOOP_WIDTH, false> loop_counters[2][6],
+      bool uses_local_accum_context) {
+    const bool finishes_reduction =
+        finishes_output_reduction(params, loop_counters);
+    return (!finishes_reduction && !uses_local_accum_context) ||
+           (finishes_reduction && DOUBLE_BUFFERED_ACCUM_BUFFER &&
             params.write_output_to_accum_buffer);
   }
 
@@ -1235,7 +1228,8 @@ SC_MODULE(CIMProcessor) {
     }
   }
 
-  // Issue ordered accumulator reads and preserve their partial-result metadata
+  // Issue SRAM reads directly and rely on local contexts to separate reductions
+  // The schedule and context count must cover the SRAM feedback latency
   void issue_accumulation_reads() {
     process_accumulation_params_deq.ResetRead();
     result_to_accum_channel.ResetRead();
@@ -1245,8 +1239,13 @@ SC_MODULE(CIMProcessor) {
     for (int bank = 0; bank < ACCUM_BUFFER_BANKS; bank++) {
       accumulation_buffer_read_address[bank].Reset();
     }
-
     bool accumulation_buffer_bank = false;
+#ifndef __SYNTHESIS__
+    for (int bank = 0; bank < ACCUM_BUFFER_BANKS; bank++) {
+      simulation_partial_sums[bank].assign(buffer_size, Pack1D<Buffer, N>::zero());
+    }
+    simulation_accumulation_reads.clear();
+#endif
     wait();
 
     while (true) {
@@ -1263,10 +1262,17 @@ SC_MODULE(CIMProcessor) {
         metadata.result = result_to_accum_channel.Pop();
         metadata.starts_reduction =
             starts_output_reduction(params, loop_counters);
+        metadata.finishes_reduction =
+            finishes_output_reduction(params, loop_counters);
         metadata.initial_value = Pack1D<Buffer, N>::zero();
-        metadata.address = accumulation_address(params, loop_counters);
-        metadata.stores_partial_sum = stores_partial_sum(params, loop_counters);
+        const ac_int<16, false> address =
+            output_context_index(params, loop_counters);
+        metadata.uses_local_accum_context = address < LOCAL_ACCUM_CONTEXTS;
+        metadata.local_accum_context =
+            metadata.uses_local_accum_context ? LocalAccumContext(address)
+                                              : LocalAccumContext(0);
         metadata.buffer_bank = accumulation_buffer_bank;
+        metadata.begins_matrix_command = step == 0;
 
         if (metadata.starts_reduction) {
           if (params.has_bias) {
@@ -1275,10 +1281,29 @@ SC_MODULE(CIMProcessor) {
             }
             metadata.initial_value = bias;
           }
-        } else {
+        } else if (!metadata.uses_local_accum_context) {
           accumulation_buffer_read_address[accumulation_buffer_bank].Push(
-              metadata.address);
+              address);
         }
+
+#ifndef __SYNTHESIS__
+        if (!metadata.uses_local_accum_context) {
+          if (address >= buffer_size) {
+            throw std::runtime_error("CIM accumulation address exceeds buffer capacity");
+          }
+          auto &expected = simulation_partial_sums[accumulation_buffer_bank]
+                                                  [address.to_uint()];
+          if (metadata.starts_reduction) {
+            expected = metadata.initial_value;
+          } else {
+            simulation_accumulation_reads.push_back(
+                {address.to_uint(), unsigned(accumulation_buffer_bank), expected});
+          }
+          for (int n = 0; n < N; n++) {
+            expected[n] += static_cast<Buffer>(metadata.result[n]);
+          }
+        }
+#endif
 
         accumulation_metadata_enq.Push(metadata);
 
@@ -1294,11 +1319,10 @@ SC_MODULE(CIMProcessor) {
     }
   }
 
-  // Complete accumulator reads and enqueue lane additions in issue order
+  // Accumulate once while local accum contexts retain temporal partial sums
   void complete_accumulation() {
     accumulation_metadata_deq.ResetRead();
     accum_to_wb_enq.ResetWrite();
-    accumulation_forwarding_free_deq.ResetRead();
 #pragma hls_unroll yes
     for (int bank = 0; bank < ACCUM_BUFFER_BANKS; bank++) {
       accumulation_buffer_read_data[bank].Reset();
@@ -1306,105 +1330,97 @@ SC_MODULE(CIMProcessor) {
 
     wait();
 
-    Pack1D<Buffer, N> forwarded_values[ACCUMULATION_FORWARDING_ENTRIES];
-    ac_int<16, false> forwarded_addresses[ACCUMULATION_FORWARDING_ENTRIES];
-    ac_int<1, false> forwarded_banks[ACCUMULATION_FORWARDING_ENTRIES];
-    bool forwarded_lookup_valid[ACCUMULATION_FORWARDING_ENTRIES];
+    Pack1D<Buffer, N>
+        local_accum_context_values[LOCAL_ACCUM_CONTEXTS];
 #pragma hls_unroll yes
-    for (int entry = 0; entry < ACCUMULATION_FORWARDING_ENTRIES; entry++) {
-      forwarded_values[entry] = Pack1D<Buffer, N>::zero();
-      forwarded_addresses[entry] = 0;
-      forwarded_banks[entry] = 0;
-      forwarded_lookup_valid[entry] = false;
+    for (int context = 0; context < LOCAL_ACCUM_CONTEXTS; context++) {
+      local_accum_context_values[context] = Pack1D<Buffer, N>::zero();
     }
 
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
     while (true) {
       const AccumulationMetadata metadata = accumulation_metadata_deq.Pop();
+      if (metadata.begins_matrix_command) {
+#pragma hls_unroll yes
+        for (int context = 0; context < LOCAL_ACCUM_CONTEXTS; context++) {
+          local_accum_context_values[context] = Pack1D<Buffer, N>::zero();
+        }
+      }
+
       Pack1D<Buffer, N> previous = metadata.initial_value;
 
-      if (!metadata.starts_reduction) {
-        Pack1D<Buffer, N> buffered = Pack1D<Buffer, N>::zero();
+      if (!metadata.starts_reduction && metadata.uses_local_accum_context) {
+#pragma hls_unroll yes
+        for (int context = 0; context < LOCAL_ACCUM_CONTEXTS; context++) {
+          if (metadata.local_accum_context == context) {
+            previous = local_accum_context_values[context];
+          }
+        }
+      } else if (!metadata.starts_reduction) {
 #pragma hls_unroll yes
         for (int bank = 0; bank < ACCUM_BUFFER_BANKS; bank++) {
           if (metadata.buffer_bank == bank) {
-            buffered = accumulation_buffer_read_data[bank].Pop();
-          }
-        }
-        previous = buffered;
-        bool forwards_previous = false;
-#pragma hls_unroll yes
-        for (int entry = 0; entry < ACCUMULATION_FORWARDING_ENTRIES; entry++) {
-          if (!forwards_previous && forwarded_lookup_valid[entry] &&
-              metadata.address == forwarded_addresses[entry] &&
-              metadata.buffer_bank == forwarded_banks[entry]) {
-            previous = forwarded_values[entry];
-            forwards_previous = true;
+            previous = accumulation_buffer_read_data[bank].Pop();
+#ifndef __SYNTHESIS__
+            const auto check = simulation_accumulation_reads.front();
+            simulation_accumulation_reads.pop_front();
+            if (check.bank != unsigned(bank)) {
+              throw std::runtime_error(
+                  "CIM RAW diagnostic bookkeeping error: unexpected read bank");
+            }
+            // Check before adding the current contribution to localize a stale read
+            for (int lane = 0; lane < N; lane++) {
+              if (!(previous[lane] == check.previous[lane])) {
+                std::ostringstream message;
+                message << "CIM RAW diagnostic: SRAM feedback partial-sum mismatch"
+                        << " at bank " << bank << " address " << check.address
+                        << " lane " << lane
+                        << ", expected prior partial sum " << check.previous[lane]
+                        << ", read " << previous[lane]
+                        << "; possible read-after-write hazard: the read may have"
+                        << " preceded visibility of its required write"
+                        << "; detected before adding the current contribution,"
+                        << " independently of final-output validation"
+                        << "; verify local-context spacing and SRAM feedback timing";
+                throw std::runtime_error(message.str());
+              }
+            }
+#endif
           }
         }
       }
 
+      // This is the sole temporal accumulation arithmetic datapath
 #pragma hls_unroll yes
       for (int n = 0; n < N; n++) {
         previous[n] += static_cast<Buffer>(metadata.result[n]);
       }
 
-      AccumulationResult completed;
-      completed.value = previous;
-      completed.forwarding_slot = 0;
+      if (metadata.uses_local_accum_context) {
 #pragma hls_unroll yes
-      for (int entry = 0; entry < ACCUMULATION_FORWARDING_ENTRIES; entry++) {
-        if (forwarded_lookup_valid[entry] &&
-            forwarded_addresses[entry] == metadata.address &&
-            forwarded_banks[entry] == metadata.buffer_bank) {
-          forwarded_lookup_valid[entry] = false;
-        }
-      }
-
-      if (metadata.stores_partial_sum) {
-        const AccumulationForwardingSlot allocation_slot =
-            accumulation_forwarding_free_deq.Pop();
-#pragma hls_unroll yes
-        for (int entry = 0; entry < ACCUMULATION_FORWARDING_ENTRIES; entry++) {
-          if (allocation_slot == entry) {
-            forwarded_values[entry] = previous;
-            forwarded_addresses[entry] = metadata.address;
-            forwarded_banks[entry] = metadata.buffer_bank;
-            forwarded_lookup_valid[entry] = true;
+        for (int context = 0; context < LOCAL_ACCUM_CONTEXTS; context++) {
+          if (metadata.local_accum_context == context) {
+            if (metadata.finishes_reduction) {
+              local_accum_context_values[context] =
+                  Pack1D<Buffer, N>::zero();
+            } else {
+              // Local accum contexts avoid all intermediate buffer traffic
+              local_accum_context_values[context] = previous;
+            }
           }
         }
-        completed.forwarding_slot = allocation_slot;
       }
-      accum_to_wb_enq.Push(completed);
+
+      accum_to_wb_enq.Push(previous);
     }
   }
 
-  // Seed and recycle accumulation forwarding slots independently of datapath
-  void recycle_accumulation_forwarding_slots() {
-    accumulation_forwarding_commit_deq.ResetRead();
-    accumulation_forwarding_free_enq.ResetWrite();
-
-    wait();
-
-    for (int entry = 0; entry < ACCUMULATION_FORWARDING_ENTRIES; entry++) {
-      accumulation_forwarding_free_enq.Push(AccumulationForwardingSlot(entry));
-    }
-
-#pragma hls_pipeline_init_interval 1
-#pragma hls_pipeline_stall_mode flush
-    while (true) {
-      accumulation_forwarding_free_enq.Push(
-          accumulation_forwarding_commit_deq.Pop());
-    }
-  }
-
-  // Write accumulated values to the buffer or final-output FIFO
+  // Rederive retirement from synchronized loop state and write completed values
   void write_back() {
     write_back_params_deq.ResetRead();
     accum_to_wb_deq.ResetRead();
     accum_output_enq.ResetWrite();
-    accumulation_forwarding_commit_enq.ResetWrite();
 #pragma hls_unroll yes
     for (int bank = 0; bank < ACCUM_BUFFER_BANKS; bank++) {
       accumulation_buffer_write_request[bank].Reset();
@@ -1429,21 +1445,25 @@ SC_MODULE(CIMProcessor) {
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
       for (ac_int<32, false> step = 0; step < total_ops; step++) {
-        const AccumulationResult completed = accum_to_wb_deq.Pop();
-        const Pack1D<Buffer, N> accumulated = completed.value;
-        const bool store_partial_sum =
-            stores_partial_sum(params, loop_counters);
+        const Pack1D<Buffer, N> accumulated = accum_to_wb_deq.Pop();
+        const ac_int<16, false> address =
+            output_context_index(params, loop_counters);
+        const bool uses_local_accum_context =
+            address < LOCAL_ACCUM_CONTEXTS;
+        const bool writes_buffer = writes_accumulation_buffer(
+            params, loop_counters, uses_local_accum_context);
+        const bool emits_output =
+            finishes_output_reduction(params, loop_counters) && !writes_buffer;
 
-        if (!store_partial_sum) {
+        if (emits_output) {
           accum_output_enq.Push(accumulated);
-        } else {
-          BufferWriteRequest<Pack1D<Buffer, N>> request;
-          request.address = accumulation_address(params, loop_counters);
+        } else if (writes_buffer) {
+          AccumulationWriteRequest request;
+          request.address = address;
           request.data = accumulated;
           request.last = false;
           accumulation_buffer_write_request[accumulation_buffer_bank].Push(
               request);
-          accumulation_forwarding_commit_enq.Push(completed.forwarding_slot);
         }
 
 #if DOUBLE_BUFFERED_ACCUM_BUFFER

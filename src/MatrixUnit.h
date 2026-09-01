@@ -49,7 +49,8 @@ SC_MODULE(MatrixUnit) {
                    CIM_TILE_OUTPUT_AXIS_ELEMENTS, CIM_INPUT_AXIS_TILES,
                    CIM_OUTPUT_AXIS_TILES, CIM_A_PORT_TILES, CIM_B_PORT_TILES,
                    CIM_C_PORT_TILES, CIM_C_BEAT_LAYOUT,
-                   CIM_ARRAY_RESULT_SLOTS_PER_OUTPUT_LANE>;
+                   CIM_ARRAY_RESULT_SLOTS_PER_OUTPUT_LANE,
+                   CIM_LOCAL_ACCUM_CONTEXTS>;
   // Assemble complete rows before slicing them into physical B-port beats
   static constexpr int WEIGHT_BUFFER_WORD_WIDTH =
       ActiveMatrixProcessor::WEIGHT_ROW_WIDTH;

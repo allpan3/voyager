@@ -76,7 +76,7 @@ foreach name {
   CIM_TILE_INPUT_AXIS_ELEMENTS CIM_TILE_OUTPUT_AXIS_ELEMENTS
   CIM_INPUT_AXIS_TILES CIM_OUTPUT_AXIS_TILES
   CIM_A_PORT_TILES CIM_B_PORT_TILES CIM_C_PORT_TILES CIM_C_BEAT_LAYOUT
-  CIM_ARRAY_RESULT_SLOTS_PER_OUTPUT_LANE
+  CIM_ARRAY_RESULT_SLOTS_PER_OUTPUT_LANE CIM_LOCAL_ACCUM_CONTEXTS
 } {
   if {[info exists ::env($name)]} {
     append cim_geometry_flags " -D$name=$::env($name)"
@@ -201,6 +201,13 @@ directive set -CLOCK_OVERHEAD 0
 
 # --- Schedule / extract RTL --------------------------------------------------
 go assembly
+
+# Keep statically indexed local accum context values as registers in HLS
+if {$BLOCK eq "CIMProcessor"} {
+  set top_stripped [string map {" " ""} $TOP]
+  set local_accum_context_values_path "/$top_stripped/$top_stripped:complete_accumulation/complete_accumulation/local_accum_context_values.value.int_val:rsc"
+  directive set $local_accum_context_values_path -MAP_TO_MODULE {[Register]}
+}
 
 go architect
 
