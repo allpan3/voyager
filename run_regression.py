@@ -567,11 +567,9 @@ def run_accuracy(model, dataset, num_processes, output_folder):
     codegen_network_dir = (
         f"{env_vars['CODEGEN_DIR']}/networks/{model}/{env_vars['DATATYPE']}/{backend_geometry}"
     )
-    tiling_dir = (
-        f"{codegen_network_dir}/{ic_unroll}x{oc_unroll}_"
-        f"{env_vars['INPUT_BUFFER_SIZE']}x{env_vars['WEIGHT_BUFFER_SIZE']}x"
-        f"{env_vars['ACCUM_BUFFER_SIZE']}_{env_vars['DOUBLE_BUFFERED_ACCUM_BUFFER']}"
-    )
+    tiling_root_dir = f"{build_folder}/tilings"
+    tiling_dir = f"{tiling_root_dir}/{model}"
+    env_vars["TILING_ROOT_DIR"] = tiling_root_dir
 
     if env_vars["DATATYPE"] == "E4M3":
         quantization_args = [
@@ -668,35 +666,15 @@ def run_accuracy(model, dataset, num_processes, output_folder):
         ]
     )
 
-    subprocess.run(
-        [
-            "protoc",
-            "--proto_path=test/compiler/proto/",
-            "--python_out=test/compiler/proto/",
-            f"test/compiler/proto/tiling.proto",
-        ]
-    )
-
+    # Export the same resolved configuration consumed by AccuracyTester
+    subprocess.run(["make", "mapping-target", f"BUILD_DIR={build_folder}"], env=env_vars, check=True)
+    mapping_env = dict(env_vars)
+    mapping_env["PYTHONPATH"] = "voyager-compiler/src:interstellar/src:" + env_vars.get("PYTHONPATH", "")
     with open(f"{output_folder}/{model}_{dataset}_tiler.log", "w") as stdout_file:
         subprocess.run(
-            [
-                "python",
-                "test/compiler/run_tiler.py",
-                "--codegen_dir",
-                codegen_network_dir,
-                "--IC_dimension",
-                env_vars["IC_DIMENSION"],
-                "--OC_dimension",
-                env_vars["OC_DIMENSION"],
-                "--input_buffer_size",
-                env_vars["INPUT_BUFFER_SIZE"],
-                "--weight_buffer_size",
-                env_vars["WEIGHT_BUFFER_SIZE"],
-                "--accum_buffer_size",
-                env_vars["ACCUM_BUFFER_SIZE"],
-            ],
-            stdout=stdout_file,
-            stderr=subprocess.STDOUT,
+            ["python", "test/compiler/run_tiler.py", "--codegen_dir", codegen_network_dir,
+             "--target", f"{build_folder}/mapping-target.json", "--output_dir", tiling_dir],
+            env=mapping_env, stdout=stdout_file, stderr=subprocess.STDOUT, check=True,
         )
 
     # Run accuracy test

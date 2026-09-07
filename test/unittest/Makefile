@@ -124,7 +124,7 @@ TILING_LOWERING_BUILD := $(SYSTEMC_BUILD)/tiling_lowering
 TILING_LOWERING_GENERATED := $(TILING_LOWERING_BUILD)/generated
 TILING_LOWERING_PROTO_DIR := $(TILING_LOWERING_GENERATED)/test/compiler/proto
 TILING_LOWERING_PARAM_PROTO := $(REPO_ROOT)/voyager-compiler/src/voyager_compiler/codegen/param.proto
-TILING_LOWERING_TILING_PROTO := $(REPO_ROOT)/test/compiler/proto/tiling.proto
+TILING_LOWERING_TILING_PROTO := $(REPO_ROOT)/voyager-compiler/src/voyager_compiler/codegen/tiling.proto
 TILING_LOWERING_PARAM_PB := $(TILING_LOWERING_PROTO_DIR)/param.pb.cc
 TILING_LOWERING_TILING_PB := $(TILING_LOWERING_PROTO_DIR)/tiling.pb.cc
 ifneq ($(wildcard $(CONDA_ENV)/bin/protoc),)

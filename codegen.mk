@@ -27,80 +27,90 @@ ifeq ($(CONV2D_IM2COL),1)
 COMMON_FLAGS += --conv2d_im2col
 endif
 
+CODEGEN_SOURCES = voyager-compiler/test/test_codegen.py \
+    voyager-compiler/src/voyager_compiler/codegen/param_pb2.py
+
 ################################################################################
-$(CODEGEN_DIR)/networks/resnet18/%/$(CODEGEN_BACKEND_GEOMETRY)/model.txt: voyager-compiler/test/test_codegen.py
+$(CODEGEN_DIR)/networks/resnet18/%/$(CODEGEN_BACKEND_GEOMETRY)/model.txt: $(CODEGEN_SOURCES)
 	mkdir -p $(dir $@)
 	python voyager-compiler/test/test_codegen.py resnet18 $($*_FLAGS) $(EXTRA_COMPILER_FLAGS) --model_output_dir $(dir $@) $(COMMON_FLAGS) > $(dir $@)/codegen.log 2>&1
 
-$(CODEGEN_DIR)/networks/resnet50/%/$(CODEGEN_BACKEND_GEOMETRY)/model.txt: voyager-compiler/test/test_codegen.py
+$(CODEGEN_DIR)/networks/resnet50/%/$(CODEGEN_BACKEND_GEOMETRY)/model.txt: $(CODEGEN_SOURCES)
 	mkdir -p $(dir $@)
 	python voyager-compiler/test/test_codegen.py resnet50 $($*_FLAGS) $(EXTRA_COMPILER_FLAGS) --model_output_dir $(dir $@) $(COMMON_FLAGS) > $(dir $@)/codegen.log 2>&1
 
-$(CODEGEN_DIR)/networks/mobilebert/%/$(CODEGEN_BACKEND_GEOMETRY)/model.txt: voyager-compiler/test/test_codegen.py
+$(CODEGEN_DIR)/networks/mobilebert/%/$(CODEGEN_BACKEND_GEOMETRY)/model.txt: $(CODEGEN_SOURCES)
 	mkdir -p $(dir $@)
 	python voyager-compiler/test/test_codegen.py mobilebert $($*_FLAGS) --model_name_or_path models/mobilebert/mobilebert-tiny-sst2-bf16 $(EXTRA_COMPILER_FLAGS) --model_output_dir $(dir $@) $(COMMON_FLAGS) > $(dir $@)/codegen.log 2>&1
 
-$(CODEGEN_DIR)/networks/mobilebert_encoder/%/$(CODEGEN_BACKEND_GEOMETRY)/model.txt: voyager-compiler/test/test_codegen.py
+$(CODEGEN_DIR)/networks/mobilebert_encoder/%/$(CODEGEN_BACKEND_GEOMETRY)/model.txt: $(CODEGEN_SOURCES)
 	mkdir -p $(dir $@)
 	python voyager-compiler/test/test_codegen.py mobilebert $($*_FLAGS) --model_name_or_path models/mobilebert/mobilebert-tiny-sst2-bf16 $(EXTRA_COMPILER_FLAGS) --model_output_dir $(dir $@) $(COMMON_FLAGS) --compile_single_layer > $(dir $@)/codegen.log 2>&1
 
-$(CODEGEN_DIR)/networks/bert/%/$(CODEGEN_BACKEND_GEOMETRY)/model.txt: voyager-compiler/test/test_codegen.py
+$(CODEGEN_DIR)/networks/bert/%/$(CODEGEN_BACKEND_GEOMETRY)/model.txt: $(CODEGEN_SOURCES)
 	mkdir -p $(dir $@)
 	python voyager-compiler/test/test_codegen.py bert $($*_FLAGS) $(EXTRA_COMPILER_FLAGS) --model_output_dir $(dir $@) $(COMMON_FLAGS) &> $(dir $@)codegen.log
 
-$(CODEGEN_DIR)/networks/llama_prefill/%/$(CODEGEN_BACKEND_GEOMETRY)/model.txt: voyager-compiler/test/test_codegen.py
+$(CODEGEN_DIR)/networks/llama_prefill/%/$(CODEGEN_BACKEND_GEOMETRY)/model.txt: $(CODEGEN_SOURCES)
 	mkdir -p $(dir $@)
 	python voyager-compiler/test/test_codegen.py llm_prefill $($*_FLAGS) $(EXTRA_COMPILER_FLAGS) --model_output_dir $(dir $@) $(COMMON_FLAGS) $(LLM_FLAGS) &> $(dir $@)codegen.log
 
-$(CODEGEN_DIR)/networks/llama_decode/%/$(CODEGEN_BACKEND_GEOMETRY)/model.txt: voyager-compiler/test/test_codegen.py
+$(CODEGEN_DIR)/networks/llama_decode/%/$(CODEGEN_BACKEND_GEOMETRY)/model.txt: $(CODEGEN_SOURCES)
 	mkdir -p $(dir $@)
 	python voyager-compiler/test/test_codegen.py llm_decode $($*_FLAGS) $(EXTRA_COMPILER_FLAGS) --model_output_dir $(dir $@) $(COMMON_FLAGS) $(LLM_FLAGS) &> $(dir $@)codegen.log
 
-$(CODEGEN_DIR)/networks/llama_decode_kivi/%/$(CODEGEN_BACKEND_GEOMETRY)/model.txt: voyager-compiler/test/test_codegen.py
+$(CODEGEN_DIR)/networks/llama_decode_kivi/%/$(CODEGEN_BACKEND_GEOMETRY)/model.txt: $(CODEGEN_SOURCES)
 	mkdir -p $(dir $@)
 	python voyager-compiler/test/test_codegen.py llm_kivi $($*_FLAGS) $(EXTRA_COMPILER_FLAGS) --model_output_dir $(dir $@) $(COMMON_FLAGS) $(LLM_FLAGS) &> $(dir $@)codegen.log
 
-$(CODEGEN_DIR)/networks/llama_prefill_mp/%/$(CODEGEN_BACKEND_GEOMETRY)/model.txt: voyager-compiler/test/test_codegen.py
+$(CODEGEN_DIR)/networks/llama_prefill_mp/%/$(CODEGEN_BACKEND_GEOMETRY)/model.txt: $(CODEGEN_SOURCES)
 	mkdir -p $(dir $@)
 	python voyager-compiler/test/test_codegen.py llm_prefill $($*_FLAGS) $(EXTRA_COMPILER_FLAGS) --model_output_dir $(dir $@) $(COMMON_FLAGS) $(LLM_FLAGS) --enable_mixed_precision &> $(dir $@)codegen.log
 
-$(CODEGEN_DIR)/networks/llama_prefill_spmm/%/$(CODEGEN_BACKEND_GEOMETRY)/model.txt: voyager-compiler/test/test_codegen.py
+$(CODEGEN_DIR)/networks/llama_prefill_spmm/%/$(CODEGEN_BACKEND_GEOMETRY)/model.txt: $(CODEGEN_SOURCES)
 	mkdir -p $(dir $@)
 	python voyager-compiler/test/test_codegen.py llm_prefill $($*_FLAGS) $(EXTRA_COMPILER_FLAGS) --model_output_dir $(dir $@) $(COMMON_FLAGS) $(LLM_FLAGS) --enable_mixed_precision --outlier_pct 0.01 &> $(dir $@)codegen.log
 
-$(CODEGEN_DIR)/networks/llama_decode_mp/%/$(CODEGEN_BACKEND_GEOMETRY)/model.txt: voyager-compiler/test/test_codegen.py
+$(CODEGEN_DIR)/networks/llama_decode_mp/%/$(CODEGEN_BACKEND_GEOMETRY)/model.txt: $(CODEGEN_SOURCES)
 	mkdir -p $(dir $@)
 	python voyager-compiler/test/test_codegen.py llm_decode $($*_FLAGS) $(EXTRA_COMPILER_FLAGS) --model_output_dir $(dir $@) $(COMMON_FLAGS) $(LLM_FLAGS) --enable_mixed_precision &> $(dir $@)codegen.log
 
-$(CODEGEN_DIR)/networks/vit/%/$(CODEGEN_BACKEND_GEOMETRY)/model.txt: voyager-compiler/test/test_codegen.py
+$(CODEGEN_DIR)/networks/vit/%/$(CODEGEN_BACKEND_GEOMETRY)/model.txt: $(CODEGEN_SOURCES)
 	mkdir -p $(dir $@)
 	python voyager-compiler/test/test_codegen.py vit $($*_FLAGS) $(EXTRA_COMPILER_FLAGS) --model_output_dir $(dir $@) $(COMMON_FLAGS) &> $(dir $@)codegen.log
 
-$(CODEGEN_DIR)/networks/segformer/%/$(CODEGEN_BACKEND_GEOMETRY)/model.txt: voyager-compiler/test/test_codegen.py
+$(CODEGEN_DIR)/networks/segformer/%/$(CODEGEN_BACKEND_GEOMETRY)/model.txt: $(CODEGEN_SOURCES)
 	mkdir -p $(dir $@)
 	python -u voyager-compiler/test/test_codegen.py segformer $($*_FLAGS) $(EXTRA_COMPILER_FLAGS) --model_output_dir $(dir $@) $(COMMON_FLAGS) &> $(dir $@)codegen.log
 
-$(CODEGEN_DIR)/networks/mobilenet_v2/%/$(CODEGEN_BACKEND_GEOMETRY)/model.txt: voyager-compiler/test/test_codegen.py
+$(CODEGEN_DIR)/networks/mobilenet_v2/%/$(CODEGEN_BACKEND_GEOMETRY)/model.txt: $(CODEGEN_SOURCES)
 	mkdir -p $(dir $@)
 	python voyager-compiler/test/test_codegen.py mobilenet_v2 $($*_FLAGS) $(EXTRA_COMPILER_FLAGS) --model_output_dir $(dir $@) $(COMMON_FLAGS) &> $(dir $@)codegen.log
 
 ################################################################################
 # Gesture
 ################################################################################
-$(CODEGEN_DIR)/networks/gesture/CFLOAT/$(CODEGEN_BACKEND_GEOMETRY)/model.txt: voyager-compiler/test/test_codegen.py
+$(CODEGEN_DIR)/networks/gesture/CFLOAT/$(CODEGEN_BACKEND_GEOMETRY)/model.txt: $(CODEGEN_SOURCES)
 	mkdir -p $(dir $@)
 	python voyager-compiler/test/test_codegen.py gesture --model_name_or_path models/gesture/model.pth --model_output_dir $(dir $@) > $(dir $@)/codegen.log 2>&1
 
 ################################################################################
 # Layer Tests
 ################################################################################
-test/compiler/networks/layertest/CFLOAT/$(CODEGEN_BACKEND_GEOMETRY)/model.txt: voyager-compiler/test/test_codegen.py
+test/compiler/networks/layertest/CFLOAT/$(CODEGEN_BACKEND_GEOMETRY)/model.txt: $(CODEGEN_SOURCES)
 	mkdir -p $(dir $@)
 	python voyager-compiler/test/test_codegen.py layertest --model_output_dir $(dir $@) > $(dir $@)/codegen.log 2>&1
 
 ################################################################################
 # Tilings
 ################################################################################
-$(CODEGEN_DIR)/networks/$(NETWORK)/$(DATATYPE)/$(CODEGEN_BACKEND_GEOMETRY)/$(IC_DIMENSION)x$(OC_DIMENSION)_$(INPUT_BUFFER_SIZE)x$(WEIGHT_BUFFER_SIZE)x$(ACCUM_BUFFER_SIZE)_$(DOUBLE_BUFFERED_ACCUM_BUFFER)/tilings.txtpb: $(CODEGEN_DIR)/networks/$(NETWORK)/$(DATATYPE)/$(CODEGEN_BACKEND_GEOMETRY)/model.txt test/compiler/run_tiler.py test/compiler/proto/tiling_pb2.py
+# Map either backend through one resolved target and report workflow
+ifneq ($(strip $(MAPPING_ENERGY_COSTS)),)
+$(error MAPPING_ENERGY_COSTS is unsupported: Voyager energy requires hardware characterization)
+endif
+MAPPING_FLAGS = $(if $(MAPPING_TIMING_OPTIONS),--timing_options $(MAPPING_TIMING_OPTIONS))
+MAPPING_SOURCES = $(shell find voyager-compiler/src/voyager_compiler/mapping interstellar/src/interstellar -name '*.py')
+
+$(TILING_DIR)/tilings.txtpb: $(CODEGEN_DIR)/networks/$(NETWORK)/$(DATATYPE)/$(CODEGEN_BACKEND_GEOMETRY)/model.txt test/compiler/run_tiler.py $(MAPPING_SOURCES) voyager-compiler/src/voyager_compiler/codegen/tiling_pb2.py voyager-compiler/src/voyager_compiler/codegen/param_pb2.py $(MAPPING_TARGET) FORCE_MAPPING_TARGET
 	mkdir -p $(dir $@)
-	python test/compiler/run_tiler.py --codegen_dir $(dir $<) --IC_dimension $(IC_DIMENSION) --OC_dimension $(OC_DIMENSION) --input_buffer_size $(INPUT_BUFFER_SIZE) --weight_buffer_size $(WEIGHT_BUFFER_SIZE) --accum_buffer_size $(ACCUM_BUFFER_SIZE) $(if $(filter true,$(DOUBLE_BUFFERED_ACCUM_BUFFER)), --double_buffered_accum_buffer) > $(dir $@)/tiler.log 2>&1
+	$(MAPPING_PYTHON) test/compiler/run_tiler.py --backend $(CODEGEN_BACKEND) --target $(MAPPING_TARGET) --output_dir $(dir $@) --codegen_dir $(dir $<) $(MAPPING_FLAGS) > $(dir $@)/tiler.log 2>&1

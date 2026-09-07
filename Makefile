@@ -59,7 +59,8 @@ INC := \
 	-Ilib/spdlog/include \
 	-Isrc/ \
 	-I$(CONDA_PREFIX)/include \
-	-I.
+	-I. \
+	-I$(BUILD_DIR)
 
 # TODO(fpedd): Fix code and remove Wno-* flags step by step
 override BASE_FLAGS += \
@@ -182,6 +183,10 @@ CC_BUILD_DIR = $(BUILD_DIR)/cc
 MAPPING_PYTHON = PYTHONPATH=voyager-compiler/src:interstellar/src:test/compiler:$(PYTHONPATH) python
 export MAPPING_TARGET = $(BUILD_DIR)/mapping-target.json
 MAPPING_TARGET_HEADER = $(BUILD_DIR)/mapping-target.h
+
+# Each backend uses the tilings for its selected hardware build.
+export TILING_ROOT_DIR = $(BUILD_DIR)/tilings
+TILING_DIR = $(TILING_ROOT_DIR)/$(NETWORK)
 
 # Report the effective build directory so external tools stay consistent with
 # this Makefile instead of duplicating the naming scheme
@@ -443,12 +448,12 @@ $(ACCELERATOR_RTL): $(HLS_BUILD_DEPENDENCIES) \
 # Run RTL simulation
 .PHONY: rtl-sim
 rtl-sim: rtl network-proto
-	$(MAPPING_PYTHON) test/compiler/mapping_target.py check --target $(MAPPING_TARGET) --artifact $(ACCELERATOR_RTL) --setting CLOCK_PERIOD=$(CLOCK_PERIOD) --setting TECHNOLOGY=$(TECHNOLOGY)
+	$(MAPPING_PYTHON) test/compiler/mapping_target.py check --target $(MAPPING_TARGET) --tilings $(TILING_DIR)/tilings.txtpb --artifact $(ACCELERATOR_RTL) --setting CLOCK_PERIOD=$(CLOCK_PERIOD) --setting TECHNOLOGY=$(TECHNOLOGY)
 	cd $(CATAPULT_BUILD_DIR)/Accelerator/Accelerator.v1 && LD_PRELOAD=$(CONDA_PREFIX)/lib/libstdc++.so.6 make -f ./scverify/$(SCVERIFY_RTL_MK) SIMTOOL=vcs $(SCVERIFY_RTL_ARGS) sim
 
 .PHONY: rtl-sim-debug
 rtl-sim-debug: rtl network-proto
-	$(MAPPING_PYTHON) test/compiler/mapping_target.py check --target $(MAPPING_TARGET) --artifact $(ACCELERATOR_RTL) --setting CLOCK_PERIOD=$(CLOCK_PERIOD) --setting TECHNOLOGY=$(TECHNOLOGY)
+	$(MAPPING_PYTHON) test/compiler/mapping_target.py check --target $(MAPPING_TARGET) --tilings $(TILING_DIR)/tilings.txtpb --artifact $(ACCELERATOR_RTL) --setting CLOCK_PERIOD=$(CLOCK_PERIOD) --setting TECHNOLOGY=$(TECHNOLOGY)
 	cd $(CATAPULT_BUILD_DIR)/Accelerator/Accelerator.v1 && LD_PRELOAD=$(CONDA_PREFIX)/lib/libstdc++.so.6 SIM_DUMP_FSDB=1 make -f ./scverify/$(SCVERIFY_RTL_MK) SIMTOOL=vcs $(SCVERIFY_RTL_ARGS) sim
 
 ###########################################################
@@ -565,14 +570,11 @@ $(MAPPING_TARGET): FORCE_MAPPING_TARGET voyager-compiler/src/voyager_compiler/co
 ###########################################################
 # Networks
 ###########################################################
-$(CC_BUILD_DIR)/Network.o: test/common/Network.cc test/compiler/proto/param.pb.cc
+$(CC_BUILD_DIR)/Network.o: test/common/Network.cc test/common/Network.h test/common/Utils.h test/compiler/proto/param.pb.cc test/compiler/proto/tiling.pb.cc $(MAPPING_TARGET)
 	$(CC) $(C17FLAGS) -c -o $@ $<
 
 test/compiler/proto/param.pb.cc: voyager-compiler/src/voyager_compiler/codegen/param.proto
 	protoc -I=voyager-compiler/src/voyager_compiler/codegen --cpp_out=test/compiler/proto $<
-
-test/compiler/proto/tiling_pb2.py: test/compiler/proto/tiling.proto
-	protoc --proto_path=test/compiler/proto/ --python_out=test/compiler/proto $<
 
 voyager-compiler/src/voyager_compiler/codegen/tiling_pb2.py: voyager-compiler/src/voyager_compiler/codegen/tiling.proto
 	protoc -I=voyager-compiler/src/voyager_compiler/codegen --python_out=voyager-compiler/src/voyager_compiler/codegen $<
@@ -580,8 +582,8 @@ voyager-compiler/src/voyager_compiler/codegen/tiling_pb2.py: voyager-compiler/sr
 voyager-compiler/src/voyager_compiler/codegen/param_pb2.py: voyager-compiler/src/voyager_compiler/codegen/param.proto
 	protoc -I=voyager-compiler/src/voyager_compiler/codegen --python_out=voyager-compiler/src/voyager_compiler/codegen $<
 
-test/compiler/proto/tiling.pb.cc: test/compiler/proto/tiling.proto
-	protoc -I=test/compiler/proto --cpp_out=test/compiler/proto $<
+test/compiler/proto/tiling.pb.cc: voyager-compiler/src/voyager_compiler/codegen/tiling.proto
+	protoc -I=voyager-compiler/src/voyager_compiler/codegen --cpp_out=test/compiler/proto $<
 
 $(CC_BUILD_DIR)/param.pb.o: test/compiler/proto/param.pb.cc
 	$(CC) $(C17FLAGS) -c -o $@ $<
@@ -593,9 +595,10 @@ $(CC_BUILD_DIR)/tiling.pb.o: test/compiler/proto/tiling.pb.cc
 network-proto: \
     $(CODEGEN_DIR)/networks/$(NETWORK)/$(DATATYPE)/$(CODEGEN_BACKEND_GEOMETRY)/model.txt \
     test/compiler/proto/param.pb.cc \
-    test/compiler/proto/tiling_pb2.py \
+    voyager-compiler/src/voyager_compiler/codegen/tiling_pb2.py \
+    voyager-compiler/src/voyager_compiler/codegen/param_pb2.py \
     test/compiler/proto/tiling.pb.cc \
-    $(CODEGEN_DIR)/networks/$(NETWORK)/$(DATATYPE)/$(CODEGEN_BACKEND_GEOMETRY)/$(IC_DIMENSION)x$(OC_DIMENSION)_$(INPUT_BUFFER_SIZE)x$(WEIGHT_BUFFER_SIZE)x$(ACCUM_BUFFER_SIZE)_$(DOUBLE_BUFFERED_ACCUM_BUFFER)/tilings.txtpb
+    $(TILING_DIR)/tilings.txtpb
 
 include codegen.mk
 

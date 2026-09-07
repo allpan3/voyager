@@ -6,10 +6,12 @@
 
 #include "spdlog/spdlog.h"
 #include "test/common/Utils.h"
+#include "mapping-target.h"
 
 using namespace std;
 using namespace google::protobuf;
 
+// Load compiler operations and tilings for the active backend build
 Network::Network(std::string& model_name) {
   project_root = std::string(getenv("PROJECT_ROOT"));
 
@@ -30,13 +32,7 @@ Network::Network(std::string& model_name) {
   }
 
   std::map<std::string, voyager::Tiling> tiling_map;
-  filename = codegen_network_dir + "/" + std::string(getenv("IC_DIMENSION")) +
-             "x" + std::string(getenv("OC_DIMENSION")) + "_" +
-             std::string(getenv("INPUT_BUFFER_SIZE", "1024")) + "x" +
-             std::string(getenv("WEIGHT_BUFFER_SIZE", "1024")) + "x" +
-             std::string(getenv("ACCUM_BUFFER_SIZE", "1024")) + "_" +
-             std::string(getenv("DOUBLE_BUFFERED_ACCUM_BUFFER", "false")) +
-             "/tilings.txtpb";
+  filename = get_tiling_path(model_name);
 
   bool tilings_exist = std::filesystem::exists(filename);
   if (tilings_exist) {
@@ -45,14 +41,19 @@ Network::Network(std::string& model_name) {
                                       std::istreambuf_iterator<char>());
     voyager::ModelTiling model_tiling;
     if (!TextFormat::ParseFromString(content, &model_tiling)) {
-      spdlog::error("Failed to parse text file.\n");
+      throw std::runtime_error("Invalid tilings; run make network-proto: " + filename);
+    }
+
+    // Reject tilings generated for different resolved hardware parameters
+    if (model_tiling.target_configuration() != MAPPING_TARGET_CONFIGURATION) {
+      throw std::runtime_error("Tilings do not match this hardware build; run make network-proto");
     }
 
     for (const auto& tiling : model_tiling.tilings()) {
       tiling_map[tiling.name()] = tiling;
     }
   } else {
-    spdlog::error("Tilings file does not exist: {} \n", filename);
+    throw std::runtime_error("Tilings do not exist; run make network-proto: " + filename);
   }
 
   for (const auto& op : model.ops()) {

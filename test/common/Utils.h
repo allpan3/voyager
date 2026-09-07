@@ -229,6 +229,19 @@ inline int getenv_int(const std::string& name, int default_value = 0) {
   }
 }
 
+// Resolve tilings within the selected hardware build
+inline std::string get_tiling_path(const std::string& model_name) {
+  const auto directory = getenv("TILING_ROOT_DIR", "");
+  if (directory.empty()) {
+    throw std::runtime_error("TILING_ROOT_DIR is required; run make network-proto");
+  }
+  std::filesystem::path root(directory);
+  if (root.is_relative()) {
+    root = std::filesystem::path(std::getenv("PROJECT_ROOT")) / root;
+  }
+  return (root / model_name / "tilings.txtpb").string();
+}
+
 inline uint64_t get_address(const codegen::Tensor& tensor) {
   if (is_soc_sim() && tensor.has_scratchpad()) {
     std::string offset = getenv("SOC_MEM_OFFSET", "0");

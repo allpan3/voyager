@@ -52,6 +52,11 @@ jobs:
       
       - name: Setup Environment
         uses: ./.github/actions/setup-cad-env
+
+      - name: Check generated protobuf bindings
+        run: |
+          source load_env.sh
+          make -C voyager-compiler check-generated-protos
       
       - name: Build HLS Checks & Run Clang Tidy
         run: |
