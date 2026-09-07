@@ -16,6 +16,12 @@ source scripts/blocks/$BLOCK.tcl
 # Setup project setting and folder
 source scripts/utils/setup_project.tcl
 
+# Record the target configuration and resolved HLS inputs before synthesis
+set mapping_artifact "$project_folder/$BLOCK.v1/concat_rtl.v"
+set mapping_command [list exec env "PYTHONPATH=$ROOT/voyager-compiler/src:$ROOT/interstellar/src:$ROOT/test/compiler" python "$ROOT/test/compiler/mapping_target.py"]
+set mapping_settings [list --setting "IC_PORT_WIDTH=$IC_PORT_WIDTH" --setting "OC_PORT_WIDTH=$OC_PORT_WIDTH" --setting "CLOCK_PERIOD=$CLOCK_PERIOD" --setting "TECHNOLOGY=$TECHNOLOGY" --setting "CompilerFlags=$mapping_compiler_flags"]
+{*}$mapping_command begin --target $::env(MAPPING_TARGET) --artifact $mapping_artifact {*}$mapping_settings 2>@1
+
 pre_analyze
 go analyze
 
@@ -48,3 +54,9 @@ go architect
 
 pre_extract
 go extract
+
+# Publish the build settings after synthesis produces the RTL artifact
+if {![file isfile $mapping_artifact] && [file isfile "[file rootname $mapping_artifact].sv"]} {
+  set mapping_artifact "[file rootname $mapping_artifact].sv"
+}
+{*}$mapping_command finish --target $::env(MAPPING_TARGET) --artifact $mapping_artifact 2>@1

@@ -292,89 +292,94 @@ MulAddTree: $(CATAPULT_BUILD_DIR)/MulAddTree/MulAddTree.v1/concat_rtl.v
 DwCUnit: $(CATAPULT_BUILD_DIR)/DwCUnit/DwCUnit.v1/concat_rtl.v
 Accelerator: $(ACCELERATOR_RTL)
 
-$(CATAPULT_BUILD_DIR)/InputController/InputController.v1/concat_rtl.v: src/InputController.h $(PROTOS_DEPENDENCY)
+# Each Catapult target uses these inputs; the backend selects its RTL graph.
+HLS_BUILD_DEPENDENCIES = $(MAPPING_TARGET) \
+    scripts/main.tcl \
+    scripts/utils/read_env_vars.tcl \
+    scripts/architecture.tcl \
+    scripts/utils/setup_project.tcl
+
+$(CATAPULT_BUILD_DIR)/InputController/InputController.v1/concat_rtl.v: $(HLS_BUILD_DEPENDENCIES) src/InputController.h $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=InputController catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/InputController.log
 
-$(CATAPULT_BUILD_DIR)/WeightController/WeightController.v1/concat_rtl.v: src/WeightController.h $(PROTOS_DEPENDENCY)
+$(CATAPULT_BUILD_DIR)/WeightController/WeightController.v1/concat_rtl.v: $(HLS_BUILD_DEPENDENCIES) src/WeightController.h $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=WeightController catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/WeightController.log
 
-$(CATAPULT_BUILD_DIR)/ProcessingElement/ProcessingElement.v1/concat_rtl.v: src/ProcessingElement.h $(PROTOS_DEPENDENCY)
+$(CATAPULT_BUILD_DIR)/ProcessingElement/ProcessingElement.v1/concat_rtl.v: $(HLS_BUILD_DEPENDENCIES) src/ProcessingElement.h $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=ProcessingElement catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/ProcessingElement.log
 
-$(CATAPULT_BUILD_DIR)/CIMElement/CIMElement.v1/concat_rtl.v: src/CIMElement.h src/CIM/cim_typedefs.svh src/CIM/cim_macro_wrapper.sv src/CIM/cim_macro_model.sv src/CIM/cim_macro_1.sv src/CIM/cim_element.sv
+$(CATAPULT_BUILD_DIR)/CIMElement/CIMElement.v1/concat_rtl.v: $(HLS_BUILD_DEPENDENCIES) src/CIMElement.h src/CIM/cim_typedefs.svh src/CIM/cim_macro_wrapper.sv src/CIM/cim_macro_model.sv src/CIM/cim_macro_1.sv src/CIM/cim_element.sv
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=CIMElement catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/CIMElement.log
 
-$(CATAPULT_BUILD_DIR)/CIMUnit/CIMUnit.v1/concat_rtl.v: src/CIMUnit.h src/CIMElement.h src/CIM/cim_typedefs.svh src/CIM/cim_macro_wrapper.sv src/CIM/cim_macro_model.sv src/CIM/cim_macro_1.sv src/CIM/cim_element.sv
+$(CATAPULT_BUILD_DIR)/CIMUnit/CIMUnit.v1/concat_rtl.v: $(HLS_BUILD_DEPENDENCIES) src/CIMUnit.h src/CIMElement.h src/CIM/cim_typedefs.svh src/CIM/cim_macro_wrapper.sv src/CIM/cim_macro_model.sv src/CIM/cim_macro_1.sv src/CIM/cim_element.sv
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=CIMUnit catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/CIMUnit.log
 
-$(CATAPULT_BUILD_DIR)/SystolicArrayRow/SystolicArrayRow.v1/concat_rtl.v: src/SystolicArray.h $(CATAPULT_BUILD_DIR)/ProcessingElement/ProcessingElement.v1/concat_rtl.v $(PROTOS_DEPENDENCY)
+$(CATAPULT_BUILD_DIR)/SystolicArrayRow/SystolicArrayRow.v1/concat_rtl.v: $(HLS_BUILD_DEPENDENCIES) src/SystolicArray.h $(CATAPULT_BUILD_DIR)/ProcessingElement/ProcessingElement.v1/concat_rtl.v $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=SystolicArrayRow catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/SystolicArrayRow.log
 
-$(CATAPULT_BUILD_DIR)/SystolicArray/SystolicArray.v1/concat_rtl.v: src/SystolicArray.h $(CATAPULT_BUILD_DIR)/SystolicArrayRow/SystolicArrayRow.v1/concat_rtl.v $(PROTOS_DEPENDENCY)
+$(CATAPULT_BUILD_DIR)/SystolicArray/SystolicArray.v1/concat_rtl.v: $(HLS_BUILD_DEPENDENCIES) src/SystolicArray.h $(CATAPULT_BUILD_DIR)/SystolicArrayRow/SystolicArrayRow.v1/concat_rtl.v $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=SystolicArray catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/SystolicArray.log
 
-$(CATAPULT_BUILD_DIR)/MatrixProcessor/MatrixProcessor.v1/concat_rtl.v: src/MatrixProcessor.h src/SystolicArray.h src/Skewer.h $(CATAPULT_BUILD_DIR)/SystolicArray/SystolicArray.v1/concat_rtl.v $(PROTOS_DEPENDENCY)
+$(CATAPULT_BUILD_DIR)/MatrixProcessor/MatrixProcessor.v1/concat_rtl.v: $(HLS_BUILD_DEPENDENCIES) src/MatrixProcessor.h src/SystolicArray.h src/Skewer.h $(CATAPULT_BUILD_DIR)/SystolicArray/SystolicArray.v1/concat_rtl.v $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=MatrixProcessor catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/MatrixProcessor.log
 
-$(CATAPULT_BUILD_DIR)/CIMArray/CIMArray.v1/concat_rtl.sv: src/CIMArray.h src/CIMTile.h src/CIMElement.h src/CIM/cim_macro_wrapper.sv src/CIM/cim_macro_model.sv src/CIM/cim_macro_1.sv src/CIM/cim_element.sv scripts/blocks/CIMArray.tcl scripts/architecture.tcl scripts/utils/setup_project.tcl $(PROTOS_DEPENDENCY)
+$(CATAPULT_BUILD_DIR)/CIMArray/CIMArray.v1/concat_rtl.sv: $(HLS_BUILD_DEPENDENCIES) src/CIMArray.h src/CIMTile.h src/CIMElement.h src/CIM/cim_macro_wrapper.sv src/CIM/cim_macro_model.sv src/CIM/cim_macro_1.sv src/CIM/cim_element.sv scripts/blocks/CIMArray.tcl $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=CIMArray catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/CIMArray.log
 
-$(CATAPULT_BUILD_DIR)/CIMProcessor/CIMProcessor.v1/concat_rtl.sv: \
+$(CATAPULT_BUILD_DIR)/CIMProcessor/CIMProcessor.v1/concat_rtl.sv: $(HLS_BUILD_DEPENDENCIES) \
 	src/CIMProcessor.h \
 	src/ArchitectureParams.h \
 	src/Params.h \
 	src/TypeToBits.h \
 	src/Utils.h \
 	scripts/blocks/CIMProcessor.tcl \
-	scripts/architecture.tcl \
-	scripts/utils/setup_project.tcl \
 	$(CIM_ARRAY_RTL) \
 	$(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=CIMProcessor catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/CIMProcessor.log
 
-$(CATAPULT_BUILD_DIR)/MatrixParamsDeserializer/MatrixParamsDeserializer.v1/concat_rtl.v: src/ParamsDeserializer.h $(PROTOS_DEPENDENCY)
+$(CATAPULT_BUILD_DIR)/MatrixParamsDeserializer/MatrixParamsDeserializer.v1/concat_rtl.v: $(HLS_BUILD_DEPENDENCIES) src/ParamsDeserializer.h $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=MatrixParamsDeserializer catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/MatrixParamsDeserializer.log
 
-$(CATAPULT_BUILD_DIR)/VectorFetchUnit/VectorFetchUnit.v1/concat_rtl.v: src/vector_unit/VectorFetch.h $(PROTOS_DEPENDENCY)
+$(CATAPULT_BUILD_DIR)/VectorFetchUnit/VectorFetchUnit.v1/concat_rtl.v: $(HLS_BUILD_DEPENDENCIES) src/vector_unit/VectorFetch.h $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=VectorFetchUnit catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/VectorFetchUnit.log
 
-$(CATAPULT_BUILD_DIR)/VectorParamsDeserializer/VectorParamsDeserializer.v1/concat_rtl.v: src/ParamsDeserializer.h $(PROTOS_DEPENDENCY)
+$(CATAPULT_BUILD_DIR)/VectorParamsDeserializer/VectorParamsDeserializer.v1/concat_rtl.v: $(HLS_BUILD_DEPENDENCIES) src/ParamsDeserializer.h $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=VectorParamsDeserializer catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/VectorParamsDeserializer.log
 
-$(CATAPULT_BUILD_DIR)/OutlierFilter/OutlierFilter.v1/concat_rtl.v: src/vector_unit/OutlierFilter.h $(PROTOS_DEPENDENCY)
+$(CATAPULT_BUILD_DIR)/OutlierFilter/OutlierFilter.v1/concat_rtl.v: $(HLS_BUILD_DEPENDENCIES) src/vector_unit/OutlierFilter.h $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=OutlierFilter catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/OutlierFilter.log
 
-$(CATAPULT_BUILD_DIR)/VectorPipeline/VectorPipeline.v1/concat_rtl.v: $(VU_RTL_DEPENDENCIES) src/vector_unit/VectorPipeline.h $(PROTOS_DEPENDENCY)
+$(CATAPULT_BUILD_DIR)/VectorPipeline/VectorPipeline.v1/concat_rtl.v: $(HLS_BUILD_DEPENDENCIES) $(VU_RTL_DEPENDENCIES) src/vector_unit/VectorPipeline.h $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=VectorPipeline catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/VectorPipeline.log
 
-$(CATAPULT_BUILD_DIR)/VectorReducer/VectorReducer.v1/concat_rtl.v: src/vector_unit/Reducer.h $(PROTOS_DEPENDENCY)
+$(CATAPULT_BUILD_DIR)/VectorReducer/VectorReducer.v1/concat_rtl.v: $(HLS_BUILD_DEPENDENCIES) src/vector_unit/Reducer.h $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=VectorReducer catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/VectorReducer.log
 
-$(CATAPULT_BUILD_DIR)/VectorAccumulator/VectorAccumulator.v1/concat_rtl.v: src/vector_unit/Accumulator.h $(PROTOS_DEPENDENCY)
+$(CATAPULT_BUILD_DIR)/VectorAccumulator/VectorAccumulator.v1/concat_rtl.v: $(HLS_BUILD_DEPENDENCIES) src/vector_unit/Accumulator.h $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=VectorAccumulator catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/VectorAccumulator.log
 
-$(CATAPULT_BUILD_DIR)/OutputController/OutputController.v1/concat_rtl.v: src/vector_unit/OutputController.h $(PROTOS_DEPENDENCY)
+$(CATAPULT_BUILD_DIR)/OutputController/OutputController.v1/concat_rtl.v: $(HLS_BUILD_DEPENDENCIES) src/vector_unit/OutputController.h $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=OutputController catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/OutputController.log
 
-$(CATAPULT_BUILD_DIR)/VectorUnit/VectorUnit.v1/concat_rtl.v: \
+$(CATAPULT_BUILD_DIR)/VectorUnit/VectorUnit.v1/concat_rtl.v: $(HLS_BUILD_DEPENDENCIES) \
     $(CATAPULT_BUILD_DIR)/VectorFetchUnit/VectorFetchUnit.v1/concat_rtl.v \
     $(CATAPULT_BUILD_DIR)/VectorPipeline/VectorPipeline.v1/concat_rtl.v \
 	$(CATAPULT_BUILD_DIR)/VectorReducer/VectorReducer.v1/concat_rtl.v \
@@ -385,33 +390,31 @@ $(CATAPULT_BUILD_DIR)/VectorUnit/VectorUnit.v1/concat_rtl.v: \
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=VectorUnit catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/VectorUnit.log
 
-$(CATAPULT_BUILD_DIR)/VectorMacUnit/VectorMacUnit.v1/concat_rtl.v: src/matrix_vector_unit/VectorMacUnit.h $(PROTOS_DEPENDENCY)
+$(CATAPULT_BUILD_DIR)/VectorMacUnit/VectorMacUnit.v1/concat_rtl.v: $(HLS_BUILD_DEPENDENCIES) src/matrix_vector_unit/VectorMacUnit.h $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=VectorMacUnit catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/VectorMacUnit.log
 
-$(CATAPULT_BUILD_DIR)/MatrixVectorUnit/MatrixVectorUnit.v1/concat_rtl.v: \
+$(CATAPULT_BUILD_DIR)/MatrixVectorUnit/MatrixVectorUnit.v1/concat_rtl.v: $(HLS_BUILD_DEPENDENCIES) \
 	$(CATAPULT_BUILD_DIR)/VectorMacUnit/VectorMacUnit.v1/concat_rtl.v \
 	src/matrix_vector_unit/main.h $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=MatrixVectorUnit catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/MatrixVectorUnit.log
 
-$(CATAPULT_BUILD_DIR)/SpMMUnit/SpMMUnit.v1/concat_rtl.v: src/SpMMUnit.h $(PROTOS_DEPENDENCY)
+$(CATAPULT_BUILD_DIR)/SpMMUnit/SpMMUnit.v1/concat_rtl.v: $(HLS_BUILD_DEPENDENCIES) src/SpMMUnit.h $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=SpMMUnit catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/SpMMUnit.log
 
-$(CATAPULT_BUILD_DIR)/MulAddTree/MulAddTree.v1/concat_rtl.v: src/MulAddTree.h $(PROTOS_DEPENDENCY)
+$(CATAPULT_BUILD_DIR)/MulAddTree/MulAddTree.v1/concat_rtl.v: $(HLS_BUILD_DEPENDENCIES) src/MulAddTree.h $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=MulAddTree catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/MulAddTree.log
-$(CATAPULT_BUILD_DIR)/DwCUnit/DwCUnit.v1/concat_rtl.v: src/DwCUnit.h $(CATAPULT_BUILD_DIR)/MulAddTree/MulAddTree.v1/concat_rtl.v $(PROTOS_DEPENDENCY)
+$(CATAPULT_BUILD_DIR)/DwCUnit/DwCUnit.v1/concat_rtl.v: $(HLS_BUILD_DEPENDENCIES) src/DwCUnit.h $(CATAPULT_BUILD_DIR)/MulAddTree/MulAddTree.v1/concat_rtl.v $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=DwCUnit catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/DwCUnit.log
 
-$(MATRIX_UNIT_RTL): \
+$(MATRIX_UNIT_RTL): $(HLS_BUILD_DEPENDENCIES) \
 	src/MatrixUnit.h \
 	src/DoubleBuffer.h \
 	scripts/blocks/MatrixUnit.tcl \
-	scripts/architecture.tcl \
-	scripts/utils/setup_project.tcl \
 	$(CATAPULT_BUILD_DIR)/InputController/InputController.v1/concat_rtl.v \
 	$(CATAPULT_BUILD_DIR)/WeightController/WeightController.v1/concat_rtl.v \
 	$(CATAPULT_BUILD_DIR)/MatrixParamsDeserializer/MatrixParamsDeserializer.v1/concat_rtl.v \
@@ -420,13 +423,11 @@ $(MATRIX_UNIT_RTL): \
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=MatrixUnit catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/MatrixUnit.log
 
-$(ACCELERATOR_RTL): \
+$(ACCELERATOR_RTL): $(HLS_BUILD_DEPENDENCIES) \
 	src/Accelerator.h \
 	src/DoubleBuffer.h \
 	src/MatrixUnit.h \
 	scripts/blocks/Accelerator.tcl \
-	scripts/architecture.tcl \
-	scripts/utils/setup_project.tcl \
 	$(CATAPULT_BUILD_DIR)/InputController/InputController.v1/concat_rtl.v \
 	$(CATAPULT_BUILD_DIR)/WeightController/WeightController.v1/concat_rtl.v \
 	$(MATRIX_BACKEND_RTL) \
@@ -442,10 +443,12 @@ $(ACCELERATOR_RTL): \
 # Run RTL simulation
 .PHONY: rtl-sim
 rtl-sim: rtl network-proto
+	$(MAPPING_PYTHON) test/compiler/mapping_target.py check --target $(MAPPING_TARGET) --artifact $(ACCELERATOR_RTL) --setting CLOCK_PERIOD=$(CLOCK_PERIOD) --setting TECHNOLOGY=$(TECHNOLOGY)
 	cd $(CATAPULT_BUILD_DIR)/Accelerator/Accelerator.v1 && LD_PRELOAD=$(CONDA_PREFIX)/lib/libstdc++.so.6 make -f ./scverify/$(SCVERIFY_RTL_MK) SIMTOOL=vcs $(SCVERIFY_RTL_ARGS) sim
 
 .PHONY: rtl-sim-debug
 rtl-sim-debug: rtl network-proto
+	$(MAPPING_PYTHON) test/compiler/mapping_target.py check --target $(MAPPING_TARGET) --artifact $(ACCELERATOR_RTL) --setting CLOCK_PERIOD=$(CLOCK_PERIOD) --setting TECHNOLOGY=$(TECHNOLOGY)
 	cd $(CATAPULT_BUILD_DIR)/Accelerator/Accelerator.v1 && LD_PRELOAD=$(CONDA_PREFIX)/lib/libstdc++.so.6 SIM_DUMP_FSDB=1 make -f ./scverify/$(SCVERIFY_RTL_MK) SIMTOOL=vcs $(SCVERIFY_RTL_ARGS) sim
 
 ###########################################################
