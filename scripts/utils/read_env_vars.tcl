@@ -6,3 +6,10 @@ foreach var $ENV_VARS {
 }
 
 set ROOT [file normalize $::env(PROJ_ROOT)]
+
+# Empty Make values retain the architecture defaults; explicit widths reach HLS
+foreach var {IC_PORT_WIDTH OC_PORT_WIDTH} {
+  if {[info exists ::env($var)] && $::env($var) ne ""} {
+    set $var $::env($var)
+  }
+}

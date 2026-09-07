@@ -143,8 +143,13 @@ using F9 = StdFloat<3, 5>;
 // Number of bits used to represent the data type index
 #define DTYPE_INDEX_WIDTH 2
 
+// Keep explicit port overrides consistent with HLS and the mapping target
+#ifndef IC_PORT_WIDTH
 #define IC_PORT_WIDTH (IC_DIMENSION * 4)
+#endif
+#ifndef OC_PORT_WIDTH
 #define OC_PORT_WIDTH (OC_DIMENSION * 4)
+#endif
 #define MV_UNIT_WIDTH (OC_DIMENSION * 2)
 #define SPMM_UNIT_WIDTH OC_DIMENSION
 #define VECTOR_UNIT_WIDTH OC_DIMENSION
