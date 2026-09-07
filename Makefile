@@ -179,6 +179,10 @@ BACKEND_BUILD_SIGNATURE = $(if $(filter 1,$(MATRIX_BACKEND)),_cim_$(CIM_BUILD_SI
 BUILD_DIR ?= build/$(DATATYPE)_$(IC_DIMENSION)x$(OC_DIMENSION)_$(INPUT_BUFFER_SIZE)x$(WEIGHT_BUFFER_SIZE)x$(ACCUM_BUFFER_SIZE)_$(DOUBLE_BUFFERED_ACCUM_BUFFER)_$(SUPPORT_MVM)_$(SUPPORT_SPMM)$(BACKEND_BUILD_SIGNATURE)$(PORT_BUILD_SIGNATURE)
 CC_BUILD_DIR = $(BUILD_DIR)/cc
 
+MAPPING_PYTHON = PYTHONPATH=voyager-compiler/src:interstellar/src:test/compiler:$(PYTHONPATH) python
+export MAPPING_TARGET = $(BUILD_DIR)/mapping-target.json
+MAPPING_TARGET_HEADER = $(BUILD_DIR)/mapping-target.h
+
 # Report the effective build directory so external tools stay consistent with
 # this Makefile instead of duplicating the naming scheme
 .PHONY: print-build-dir
@@ -548,6 +552,13 @@ $(CC_BUILD_DIR)/Tiling.o: test/common/Tiling.cc test/common/Tiling.h
 ###########################################################
 toolchain: $(CC_BUILD_DIR)/MapOperation.o $(CC_BUILD_DIR)/Tiling.o $(CC_BUILD_DIR)/Network.o $(CC_BUILD_DIR)/param.pb.o $(CC_BUILD_DIR)/tiling.pb.o
 
+# Export the selected backend and preserve timestamps when resolved inputs match
+.PHONY: mapping-target FORCE_MAPPING_TARGET
+mapping-target: $(MAPPING_TARGET)
+$(MAPPING_TARGET): FORCE_MAPPING_TARGET voyager-compiler/src/voyager_compiler/codegen/tiling_pb2.py voyager-compiler/src/voyager_compiler/codegen/param_pb2.py
+	$(CC) $(C17FLAGS) -DNO_SYSC -DMAPPING_DATATYPE=\"$(DATATYPE)\" -o $(CC_BUILD_DIR)/ExportMappingTarget test/compiler/ExportMappingTarget.cc
+	$(MAPPING_PYTHON) test/compiler/mapping_target.py export --config-binary $(CC_BUILD_DIR)/ExportMappingTarget --target $@ --header $(MAPPING_TARGET_HEADER)
+
 ###########################################################
 # Networks
 ###########################################################
@@ -559,6 +570,12 @@ test/compiler/proto/param.pb.cc: voyager-compiler/src/voyager_compiler/codegen/p
 
 test/compiler/proto/tiling_pb2.py: test/compiler/proto/tiling.proto
 	protoc --proto_path=test/compiler/proto/ --python_out=test/compiler/proto $<
+
+voyager-compiler/src/voyager_compiler/codegen/tiling_pb2.py: voyager-compiler/src/voyager_compiler/codegen/tiling.proto
+	protoc -I=voyager-compiler/src/voyager_compiler/codegen --python_out=voyager-compiler/src/voyager_compiler/codegen $<
+
+voyager-compiler/src/voyager_compiler/codegen/param_pb2.py: voyager-compiler/src/voyager_compiler/codegen/param.proto
+	protoc -I=voyager-compiler/src/voyager_compiler/codegen --python_out=voyager-compiler/src/voyager_compiler/codegen $<
 
 test/compiler/proto/tiling.pb.cc: test/compiler/proto/tiling.proto
 	protoc -I=test/compiler/proto --cpp_out=test/compiler/proto $<
