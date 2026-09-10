@@ -75,7 +75,7 @@ SC_MODULE(CIMProcessor) {
   // Carry arithmetic inputs and storage selection into the accumulation datapath
   //
   // A matrix command is one accepted MatrixParams command and its full semantic
-  // loop. The boundary bit resets every statically assigned local accum context
+  // loop. The boundary bit resets every local accum context
   // before the command's first operation
   struct AccumulationMetadata {
     Pack1D<Psum, N> result;
@@ -605,7 +605,7 @@ SC_MODULE(CIMProcessor) {
             loop_counters[1][params.y_loop_idx[1]] == 0);
   }
 
-  // Count live [OC@L1][OY][OX] partial sums required by the schedule
+  // Count SRAM addresses for partial sums and buffered final outputs
   //
   // An outer output dimension contributes only when a reduction loop
   // encloses it because those coordinates remain live across later terms
@@ -1063,11 +1063,10 @@ SC_MODULE(CIMProcessor) {
     }
   }
 
-  // Flatten the live semantic loop as [OC@L1][combined OY][combined OX]
+  // Flatten SRAM output addresses as [OC@L1][combined OY][combined OX]
   //
   // OX is innermost, OY is next, and OC@L1 is outermost, so the index is
-  // ((oc * combined_oy_extent) + oy) * combined_ox_extent + ox. Local accum
-  // contexts 0..R-1 use this index directly and need no address search
+  // ((oc * combined_oy_extent) + oy) * combined_ox_extent + ox
   //
   // Outer OX/OY participates only when nested inside an unfinished reduction;
   // otherwise that outer loop completes one output before starting the next and
@@ -1104,6 +1103,70 @@ SC_MODULE(CIMProcessor) {
            y * x_extent + x;
   }
 
+  // Keep only output coordinates enclosed by a nonunit reduction
+  static bool output_loop_is_live(const MatrixParams &params, int level,
+                                  int position) {
+    const bool outer =
+        (params.loops[0][params.reduction_loop_idx[0]] > 1 &&
+         (level == 1 || params.reduction_loop_idx[0] < position)) ||
+        (params.loops[0][params.fy_loop_idx[0]] > 1 &&
+         (level == 1 || params.fy_loop_idx[0] < position));
+    return outer ||
+           (level == 1 &&
+            ((params.loops[1][params.reduction_loop_idx[1]] > 1 &&
+              params.reduction_loop_idx[1] < position) ||
+             (params.loops[1][params.fx_loop_idx] > 1 &&
+              params.fx_loop_idx < position) ||
+             (params.loops[1][params.fy_loop_idx[1]] > 1 &&
+              params.fy_loop_idx[1] < position)));
+  }
+
+  // Bind local register lifetimes once per command, independently of SRAM addresses
+  struct LocalAccumLayout {
+    ac_int<LOOP_WIDTH, false> extents[2][3];
+  };
+
+  // Collapse completed output groups while preserving all simultaneously live rows
+  static LocalAccumLayout local_accum_layout(const MatrixParams &params) {
+    LocalAccumLayout layout;
+#pragma hls_unroll yes
+    for (int level = 0; level < LOOP_LEVEL_COUNT; level++) {
+      const ac_int<3, false> positions[3] = {
+          params.weight_loop_idx[level], params.y_loop_idx[level],
+          params.x_loop_idx[level]};
+#pragma hls_unroll yes
+      for (int axis = 0; axis < 3; axis++) {
+        layout.extents[level][axis] =
+            (level != 0 || axis != 0) &&
+                    output_loop_is_live(params, level, positions[axis])
+                ? ac_int<LOOP_WIDTH, false>(params.loops[level][positions[axis]])
+                : ac_int<LOOP_WIDTH, false>(1);
+      }
+    }
+    return layout;
+  }
+
+  // Reuse a slot only after every reduction enclosed by an omitted coordinate ends
+  static ac_int<16, false> local_accum_context_index(
+      const MatrixParams &params, const LocalAccumLayout &layout,
+      const ac_int<LOOP_WIDTH, false> loop_counters[2][6]) {
+    ac_int<16, false> index = 0;
+#pragma hls_unroll yes
+    for (int axis = 0; axis < 3; axis++) {
+#pragma hls_unroll yes
+      for (int level = 0; level < LOOP_LEVEL_COUNT; level++) {
+        const ac_int<3, false> positions[3] = {
+            params.weight_loop_idx[level], params.y_loop_idx[level],
+            params.x_loop_idx[level]};
+        const auto extent = layout.extents[level][axis];
+        index = index * extent +
+                (extent > 1 ? loop_counters[level][positions[axis]]
+                            : ac_int<LOOP_WIDTH, false>(0));
+      }
+    }
+    return index;
+  }
+
   // Return whether this is the first IC/FX/FY contribution to one output
   static bool starts_output_reduction(
       const MatrixParams &params,
@@ -1131,7 +1194,7 @@ SC_MODULE(CIMProcessor) {
                params.loops[1][params.fy_loop_idx[1]] - 1;
   }
 
-  // Select actual accumulation-buffer writes after static local assignment
+  // Spill only nonlocal partial sums and route final buffered outputs separately
   static bool writes_accumulation_buffer(
       const MatrixParams &params,
       const ac_int<LOOP_WIDTH, false> loop_counters[2][6],
@@ -1250,6 +1313,7 @@ SC_MODULE(CIMProcessor) {
 
     while (true) {
       const MatrixParams params = process_accumulation_params_deq.Pop();
+      const LocalAccumLayout layout = local_accum_layout(params);
       ac_int<LOOP_WIDTH, false> loop_counters[2][6];
       reset_loop_counters(loop_counters);
 
@@ -1267,9 +1331,11 @@ SC_MODULE(CIMProcessor) {
         metadata.initial_value = Pack1D<Buffer, N>::zero();
         const ac_int<16, false> address =
             output_context_index(params, loop_counters);
-        metadata.uses_local_accum_context = address < LOCAL_ACCUM_CONTEXTS;
+        const ac_int<16, false> context =
+            local_accum_context_index(params, layout, loop_counters);
+        metadata.uses_local_accum_context = context < LOCAL_ACCUM_CONTEXTS;
         metadata.local_accum_context =
-            metadata.uses_local_accum_context ? LocalAccumContext(address)
+            metadata.uses_local_accum_context ? LocalAccumContext(context)
                                               : LocalAccumContext(0);
         metadata.buffer_bank = accumulation_buffer_bank;
         metadata.begins_matrix_command = step == 0;
@@ -1405,13 +1471,14 @@ SC_MODULE(CIMProcessor) {
               local_accum_context_values[context] =
                   Pack1D<Buffer, N>::zero();
             } else {
-              // Local accum contexts avoid all intermediate buffer traffic
+              // Feed the unfinished row back through its selected register
               local_accum_context_values[context] = previous;
             }
           }
         }
       }
 
+      // Capture the value independently before later rows reuse its register
       accum_to_wb_enq.Push(previous);
     }
   }
@@ -1438,6 +1505,7 @@ SC_MODULE(CIMProcessor) {
 
     while (true) {
       const MatrixParams params = write_back_params_deq.Pop();
+      const LocalAccumLayout layout = local_accum_layout(params);
       ac_int<LOOP_WIDTH, false> loop_counters[2][6];
       reset_loop_counters(loop_counters);
 
@@ -1449,7 +1517,8 @@ SC_MODULE(CIMProcessor) {
         const ac_int<16, false> address =
             output_context_index(params, loop_counters);
         const bool uses_local_accum_context =
-            address < LOCAL_ACCUM_CONTEXTS;
+            local_accum_context_index(params, layout, loop_counters) <
+            LOCAL_ACCUM_CONTEXTS;
         const bool writes_buffer = writes_accumulation_buffer(
             params, loop_counters, uses_local_accum_context);
         const bool emits_output =

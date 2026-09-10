@@ -165,6 +165,7 @@ SC_MODULE(CIMProcessorTb) {
   int done_count[Processor::ACCUM_BUFFER_BANKS];
   unsigned long last_write_completion_cycle[Processor::ACCUM_BUFFER_BANKS]
                                            [BUFFER_DEPTH];
+  unsigned long last_read_write_cycle[Processor::ACCUM_BUFFER_BANKS][BUFFER_DEPTH];
   int ordered_dependent_read_count;
   std::vector<int> read_addresses[Processor::ACCUM_BUFFER_BANKS];
   std::vector<int> write_addresses[Processor::ACCUM_BUFFER_BANKS];
@@ -243,6 +244,7 @@ SC_MODULE(CIMProcessorTb) {
       for (int address = 0; address < BUFFER_DEPTH; address++) {
         accumulation_memory[bank][address] = BufferVector::zero();
         last_write_completion_cycle[bank][address] = 0;
+        last_read_write_cycle[bank][address] = 0;
       }
     }
 
@@ -645,7 +647,7 @@ SC_MODULE(CIMProcessorTb) {
     }
   }
 
-  // Check pinned registers and excess-row spills with arithmetic and address traces
+  // Check register reuse and excess-row spills with independent arithmetic and address traces
   void check_context_rows(int rows, int contributions, bool interleaved,
                           bool banked, int bank, int reduction = 0) {
     MatrixParams params = make_base_params();
@@ -679,7 +681,7 @@ SC_MODULE(CIMProcessorTb) {
       inputs.push_back(20 + row);
       loads.push_back((!interleaved && contributions > 1) || row == 0);
       add_vector(expected[row], expected_partial(inputs.back(), weights.back()));
-      const bool local = row < CIM_LOCAL_ACCUM_CONTEXTS;
+      const bool local = !interleaved || row < CIM_LOCAL_ACCUM_CONTEXTS;
       if (!local && term > 0) expected_reads.push_back(row);
       if ((!local && term + 1 < contributions) ||
           (banked && term + 1 == contributions)) expected_writes.push_back(row);
@@ -1060,8 +1062,11 @@ SC_MODULE(CIMProcessorTb) {
     if (!pending_read[0] && buffer_cycle % 3 == 0 &&
         accumulation_read_address_0.PopNB(address)) {
       require(write_count[0] > read_count[0] &&
-                  last_write_completion_cycle[0][address.to_int()] != 0,
+                  last_write_completion_cycle[0][address.to_int()] >
+                      last_read_write_cycle[0][address.to_int()],
               "bank 0 dependent read preceded its physical write completion");
+      last_read_write_cycle[0][address.to_int()] =
+          last_write_completion_cycle[0][address.to_int()];
       ordered_dependent_read_count++;
       pending_read[0] = true;
       pending_read_address[0] = address;
@@ -1096,8 +1101,11 @@ SC_MODULE(CIMProcessorTb) {
     if (!pending_read[1] && buffer_cycle % 3 == 1 &&
         accumulation_read_address_1.PopNB(address)) {
       require(write_count[1] > read_count[1] &&
-                  last_write_completion_cycle[1][address.to_int()] != 0,
+                  last_write_completion_cycle[1][address.to_int()] >
+                      last_read_write_cycle[1][address.to_int()],
               "bank 1 dependent read preceded its physical write completion");
+      last_read_write_cycle[1][address.to_int()] =
+          last_write_completion_cycle[1][address.to_int()];
       ordered_dependent_read_count++;
       pending_read[1] = true;
       pending_read_address[1] = address;
@@ -1312,8 +1320,8 @@ SC_MODULE(CIMProcessorTb) {
     static constexpr int kStridedOutputCount =
         kStridedK * kStridedX * kStridedY;
     static constexpr int kBufferBackedStridedContexts =
-        kStridedOutputCount > CIM_LOCAL_ACCUM_CONTEXTS
-            ? kStridedOutputCount - CIM_LOCAL_ACCUM_CONTEXTS
+        kStridedY > CIM_LOCAL_ACCUM_CONTEXTS
+            ? kStridedK * kStridedX * (kStridedY - CIM_LOCAL_ACCUM_CONTEXTS)
             : 0;
     static constexpr int kBufferBackedWritesPerStridedJob =
         kBufferBackedStridedContexts * (kStridedReduction - 1);
@@ -1461,7 +1469,7 @@ SC_MODULE(CIMProcessorTb) {
       tick();
     }
     static constexpr int kBufferBackedTwoContextJobs =
-        CIM_LOCAL_ACCUM_CONTEXTS < 2 ? 3 : 0;
+        CIM_LOCAL_ACCUM_CONTEXTS < 2 ? 2 : 0;
     static constexpr int kExpectedPartialSumTransfers =
         kBufferBackedTwoContextJobs +
         kStridedJobCount * kBufferBackedWritesPerStridedJob;
@@ -1475,7 +1483,7 @@ SC_MODULE(CIMProcessorTb) {
     }
     std::cout << "CIM_ACCUMULATION_TRAFFIC local_accum_contexts="
               << CIM_LOCAL_ACCUM_CONTEXTS
-              << " strided_live=" << kStridedOutputCount
+              << " strided_live=" << kStridedY
               << " buffer_backed_strided=" << kBufferBackedStridedContexts
               << " reads=" << read_count[0]
               << " writes=" << write_count[0]
@@ -1545,6 +1553,25 @@ SC_MODULE(CIMProcessorTb) {
       check_independent_sram_read();
     }
 
+    // Reuse contexts across complete rows and alternate final SRAM banks
+    check_context_rows(4, 4, false, false, 0);
+    check_context_rows(8, 4, false, false, 0, 1);
+    check_context_rows(8, 4, false, false, 0, 2);
+    check_context_rows(4, 4, true, false, 0);
+    if constexpr (CIM_LOCAL_ACCUM_CONTEXTS < BUFFER_DEPTH) {
+      // Keep all local contexts occupied while an excess row repeatedly uses SRAM
+      check_context_rows(CIM_LOCAL_ACCUM_CONTEXTS + 1,
+                         34, true, false, 0);
+      require(ordered_dependent_read_count > 0, "missing ordered SRAM fallback reads");
+    }
+#if DOUBLE_BUFFERED_ACCUM_BUFFER
+    check_context_rows(4, 4, false, true, 0);
+    check_context_rows(8, 4, false, true, 1, 1);
+    check_context_rows(4, 4, true, true, 0);
+    check_context_rows(4, 1, false, true, 1);
+    check_context_rows(4, 4, false, false, 0);
+#endif
+
     if (!test_failed) {
       if constexpr (CIM_PROCESSOR_TEST_STRICT_CADENCE) {
         std::cout << "[PASS] cim_processor_result_throughput" << std::endl;
@@ -1553,6 +1580,7 @@ SC_MODULE(CIMProcessorTb) {
       }
       std::cout << "[PASS] cim_processor_nominal_accumulation" << std::endl;
       std::cout << "[PASS] cim_processor_local_accumulation" << std::endl;
+      std::cout << "[PASS] cim_processor_context_reuse" << std::endl;
       std::cout << "[PASS] cim_processor_buffer_write_completion_ordering"
                 << std::endl;
       std::cout << "[PASS] cim_processor_strided_accumulation" << std::endl;

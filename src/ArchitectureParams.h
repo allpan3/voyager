@@ -373,7 +373,7 @@ using F9 = StdFloat<3, 5>;
 #define CIM_ARRAY_RESULT_SLOTS_PER_OUTPUT_LANE CIM_INPUT_AXIS_TILES
 #endif
 
-// Keep the first live output indices in local accum contexts during reduction
+// Retain live partial sums locally and reuse contexts across completed output groups
 #ifndef CIM_LOCAL_ACCUM_CONTEXTS
 #define CIM_LOCAL_ACCUM_CONTEXTS 4
 #endif
