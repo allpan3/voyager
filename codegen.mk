@@ -116,3 +116,4 @@ MAPPING_SOURCES = $(shell find voyager-compiler/src/voyager_compiler/mapping int
 $(TILING_DIR)/tilings.txtpb: $(CODEGEN_DIR)/networks/$(NETWORK)/$(DATATYPE)/$(CODEGEN_BACKEND_GEOMETRY)/model.txt test/compiler/run_tiler.py $(MAPPING_SOURCES) voyager-compiler/src/voyager_compiler/codegen/tiling_pb2.py voyager-compiler/src/voyager_compiler/codegen/param_pb2.py $(MAPPING_TARGET) FORCE_MAPPING_TARGET
 	mkdir -p $(dir $@)
 	$(MAPPING_PYTHON) test/compiler/run_tiler.py --backend $(CODEGEN_BACKEND) --target $(MAPPING_TARGET) --output_dir $(dir $@) --codegen_dir $(dir $<) $(MAPPING_FLAGS) > $(dir $@)/tiler.log 2>&1
+	@echo "Mapping report: $(TILING_DIR)/mapping-report.md"
