@@ -105,10 +105,12 @@ test/compiler/networks/layertest/CFLOAT/$(CODEGEN_BACKEND_GEOMETRY)/model.txt: $
 # Tilings
 ################################################################################
 # Map either backend through one resolved target and report workflow
+# Control live search detail independently of analytical model options
 ifneq ($(strip $(MAPPING_ENERGY_COSTS)),)
 $(error MAPPING_ENERGY_COSTS is unsupported: Voyager energy requires hardware characterization)
 endif
-MAPPING_FLAGS = $(if $(MAPPING_TIMING_OPTIONS),--timing_options $(MAPPING_TIMING_OPTIONS))
+MAPPING_VERBOSE ?= 0
+MAPPING_FLAGS = $(if $(MAPPING_TIMING_OPTIONS),--timing_options $(MAPPING_TIMING_OPTIONS)) --verbose $(MAPPING_VERBOSE)
 MAPPING_SOURCES = $(shell find voyager-compiler/src/voyager_compiler/mapping interstellar/src/interstellar -name '*.py')
 
 $(TILING_DIR)/tilings.txtpb: $(CODEGEN_DIR)/networks/$(NETWORK)/$(DATATYPE)/$(CODEGEN_BACKEND_GEOMETRY)/model.txt test/compiler/run_tiler.py $(MAPPING_SOURCES) voyager-compiler/src/voyager_compiler/codegen/tiling_pb2.py voyager-compiler/src/voyager_compiler/codegen/param_pb2.py $(MAPPING_TARGET) FORCE_MAPPING_TARGET
