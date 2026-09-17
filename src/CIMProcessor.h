@@ -152,7 +152,7 @@ SC_MODULE(CIMProcessor) {
   // Narrowing the B port splits one row into more array writes
   static constexpr int WEIGHT_BEATS_PER_ROW = OUTPUT_AXIS_TILES / B_PORT_TILES;
 
-  static constexpr int ACCUM_TO_WB_FIFO_DEPTH = SUPPORT_MX ? 8 : 1;
+  static constexpr int ACCUM_TO_WB_FIFO_DEPTH = MATRIX_ACCUM_TO_WB_FIFO_DEPTH;
 
   // Carry only the accumulated value; write_back rederives retirement actions
   using AccumulationResult = Pack1D<Buffer, N>;
@@ -368,8 +368,8 @@ SC_MODULE(CIMProcessor) {
       result_to_accum_channel);
 
   // Decouple accumulator reads from their ordered response/addition stage
-  Connections::Fifo<AccumulationMetadata, 2> CCS_INIT_S1(
-      accumulation_metadata_fifo);
+  Connections::Fifo<AccumulationMetadata, CIM_ACCUM_METADATA_FIFO_DEPTH>
+      CCS_INIT_S1(accumulation_metadata_fifo);
   Connections::Combinational<AccumulationMetadata> CCS_INIT_S1(
       accumulation_metadata_enq);
   Connections::Combinational<AccumulationMetadata> CCS_INIT_S1(

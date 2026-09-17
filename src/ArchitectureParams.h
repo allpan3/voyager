@@ -450,6 +450,12 @@ using WeightTypeList = std::tuple<WEIGHT_DATATYPE>;
 #define ACCUM_BUFFER_SIZE 1024
 #endif
 
+// Explicit result storage shared by hardware declarations and mapping export
+constexpr int MATRIX_ACCUM_TO_WB_FIFO_DEPTH = SUPPORT_MX ? 8 : 1;
+constexpr int CIM_ACCUM_METADATA_FIFO_DEPTH = 2;
+constexpr int SA_RESULT_FIFO_MIN_DEPTH = 3;
+constexpr int VECTOR_STAGE3_FIFO_EXTRA_DEPTH = 8;
+
 // ================================================================
 // DwC Configurations
 // ================================================================

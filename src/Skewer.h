@@ -175,9 +175,10 @@ SC_MODULE(DeserializedSkewer) {
 
   Connections::In<T> din[size];
   Connections::Out<Pack1D<T, size>, Connections::SYN_PORT> CCS_INIT_S1(dout);
-#define DECL_FIFO(z, i, data)                                        \
-  Connections::Fifo<T, OC_DIMENSION - i + 2> GEN_NAMED_VAR(fifo, i); \
-  Connections::Combinational<T> GEN_NAMED_VAR(fifo_din, i);          \
+#define DECL_FIFO(z, i, data)                                            \
+  Connections::Fifo<T, OC_DIMENSION - i - 1 + SA_RESULT_FIFO_MIN_DEPTH>  \
+      GEN_NAMED_VAR(fifo, i);                                            \
+  Connections::Combinational<T> GEN_NAMED_VAR(fifo_din, i);              \
   Connections::Combinational<T> GEN_NAMED_VAR(fifo_dout, i);
   REPEAT_OC(DECL_FIFO)
 #undef DECL_FIFO

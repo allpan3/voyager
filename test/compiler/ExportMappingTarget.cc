@@ -79,7 +79,23 @@ int main() {
   parameter("ic_port_bits", IC_PORT_WIDTH);
   parameter("oc_port_bits", OC_PORT_WIDTH);
   std::cout << ",\n  \"vector_config\": {\n    \"lanes\": " << VECTOR_UNIT_WIDTH;
-  parameter("output_fifo_packets", MATRIX_OUTPUT_FIFO_DEPTH);
+  std::cout << "\n  }";
+  // Count complete result elements, excluding metadata and parallel-lane duplicates
+  std::cout << ",\n  \"output_storage\": {\n    \"matrix_results\": ";
+#if MATRIX_BACKEND == MATRIX_BACKEND_CIM
+  std::cout << OC_DIMENSION * CIM_ARRAY_RESULT_SLOTS_PER_OUTPUT_LANE;
+  parameter("accumulation_metadata",
+            OC_DIMENSION * CIM_ACCUM_METADATA_FIFO_DEPTH);
+#else
+  // Earlier lane FIFOs also hold the skew; only their common minimum adds complete groups
+  std::cout << OC_DIMENSION * SA_RESULT_FIFO_MIN_DEPTH;
+  parameter("accumulation_metadata", 0);
+#endif
+  parameter("accumulation_writeback", OC_DIMENSION * MATRIX_ACCUM_TO_WB_FIFO_DEPTH);
+  parameter("matrix_output", OC_DIMENSION * MATRIX_OUTPUT_FIFO_DEPTH);
+  parameter("vector_pipeline", SUPPORT_MX && VECTOR_UNIT_WIDTH != OC_DIMENSION
+      ? VECTOR_UNIT_WIDTH * (OC_DIMENSION / VECTOR_UNIT_WIDTH +
+                             VECTOR_STAGE3_FIFO_EXTRA_DEPTH) : 0);
   std::cout << "\n  }";
   std::cout << ",\n  \"hardware_options\": {\n    \"support_mvm\": " << std::boolalpha << bool(SUPPORT_MVM);
   parameter("support_spmm", bool(SUPPORT_SPMM));

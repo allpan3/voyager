@@ -22,7 +22,7 @@ struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
                        Input, Weight, Psum, Buffer, Scale, rows, cols,
                        buffer_size> : public sc_module {
   static constexpr int LOOP_WIDTH = 10;
-  static constexpr int FIFO_DEPTH = SUPPORT_MX ? 8 : 1;
+  static constexpr int FIFO_DEPTH = MATRIX_ACCUM_TO_WB_FIFO_DEPTH;
 
 #if DOUBLE_BUFFERED_ACCUM_BUFFER
   static constexpr int ACCUM_BUFFER_BANKS = 2;

@@ -61,7 +61,8 @@ SC_MODULE(VectorPipeline) {
   Connections::Combinational<Pack1D<VectorPack, 2>> stage_3_input;
 
 #if MX_SPLIT_MODE
-  Connections::Fifo<Pack1D<VectorPack, 2>, mu_width / vu_width + 8>
+  Connections::Fifo<Pack1D<VectorPack, 2>,
+                    mu_width / vu_width + VECTOR_STAGE3_FIFO_EXTRA_DEPTH>
       stage_3_input_fifo;
   Connections::Combinational<Pack1D<VectorPack, 2>> stage_3_input_fifo_in;
 

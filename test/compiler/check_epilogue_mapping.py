@@ -41,7 +41,9 @@ def tiny_model(epilogue="dequantize"):
 def targets():
     sa = SATarget(k=8, n=8, input_buffer_words=256, weight_buffer_words=256,
                  accum_buffer_words=32, double_buffered_accum=False, ic_port_bits=64,
-                 oc_port_bits=64, input_bits=8, weight_bits=8, accum_bits=24, datatype="INT8", vector_config=dict(lanes=8, output_fifo_packets=8))
+                 oc_port_bits=64, input_bits=8, weight_bits=8, accum_bits=24, datatype="INT8", vector_config=dict(lanes=8),
+                 output_storage=dict(matrix_results=24, accumulation_metadata=0,
+                                     accumulation_writeback=8, matrix_output=64, vector_pipeline=0))
     cim = CIMTarget(datatype="INT8", input_bits=8, weight_bits=8, accum_bits=24, ch_in=8, ch_out=8, b_sets=8, base_a_width=8,
                     base_b_width=8, base_c_width=24, write_ch_in=1, mac_latency=3, mode=0,
                     tile_input_axis_elements=1, tile_output_axis_elements=1,
@@ -49,7 +51,9 @@ def targets():
                     c_port_tiles=1, c_beat_layout=1, result_slots_per_output_lane=8,
                     local_accum_contexts=4, input_buffer_words=256, accum_buffer_words=32,
                     double_buffered_accum=False, ic_port_bits=64, oc_port_bits=64,
-                    accumulation_policy="loop-lifetime-prefix", vector_config=dict(lanes=8, output_fifo_packets=8))
+                    accumulation_policy="loop-lifetime-prefix", vector_config=dict(lanes=8),
+                    output_storage=dict(matrix_results=64, accumulation_metadata=16,
+                                        accumulation_writeback=8, matrix_output=64, vector_pipeline=0))
     return sa, cim
 
 
