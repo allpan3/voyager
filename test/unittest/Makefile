@@ -385,11 +385,21 @@ HLS_ENV = \
 
 .PHONY: test test-macro test-element build-systemc build-systemc-element build-systemc-tile build-systemc-array build-systemc-processor build-systemc-processor-double-buffered build-systemc-processor-large build-systemc-matrix-unit test-systemc-element test-systemc-tile test-systemc-array test-systemc-processor test-systemc-processor-standard test-systemc-processor-cadence test-systemc-processor-double-buffered test-systemc-processor-large test-systemc-matrix-unit check-systemc-env check-verilator-env clean hls hls-tile hls-array hls-processor hls-processor-double-buffered hls-processor-run scverify-array scverify-array-run scverify-processor scverify-processor-cadence scverify-processor-double-buffered scverify-processor-run check-catapult-root check-catapult-env FORCE
 
+DUAL_PORT_BUFFER_BUILD := $(THIS_DIR)/build/systemc/dual-port-buffer
+.PHONY: test-systemc-dual-port-buffer
+test-systemc-dual-port-buffer: $(DUAL_PORT_BUFFER_BUILD)/single $(DUAL_PORT_BUFFER_BUILD)/double
+	LD_LIBRARY_PATH="$(CONDA_ENV)/lib:$(CATAPULT_ROOT)/shared/lib:$(LD_LIBRARY_PATH)" $(DUAL_PORT_BUFFER_BUILD)/single
+	LD_LIBRARY_PATH="$(CONDA_ENV)/lib:$(CATAPULT_ROOT)/shared/lib:$(LD_LIBRARY_PATH)" $(DUAL_PORT_BUFFER_BUILD)/double
+
+$(DUAL_PORT_BUFFER_BUILD)/single $(DUAL_PORT_BUFFER_BUILD)/double: $(THIS_DIR)/systemc/DualPortBufferTb.cc $(REPO_ROOT)/src/DualPortBuffer.h $(REPO_ROOT)/src/AccelTypes.h | check-systemc-env
+	mkdir -p $(DUAL_PORT_BUFFER_BUILD)
+	$(SYSTEMC_CC) $(SYSTEMC_CXXFLAGS) -DDOUBLE_BUFFERED_ACCUM_BUFFER=$(if $(filter double,$(@F)),true,false) -o $@ $< $(SYSTEMC_LDFLAGS)
+
 .PHONY: test-tiling-lowering
 test-tiling-lowering: check-catapult-root $(TILING_LOWERING_BUILD)/TilingLoweringTb
 	$(TILING_LOWERING_BUILD)/TilingLoweringTb
 
-test: test-tiling-lowering test-macro test-element test-systemc-element test-systemc-tile test-systemc-array test-systemc-processor test-systemc-matrix-unit
+test: test-systemc-dual-port-buffer test-tiling-lowering test-macro test-element test-systemc-element test-systemc-tile test-systemc-array test-systemc-processor test-systemc-matrix-unit
 
 test-macro:
 	$(PYTHON) $(THIS_DIR)/verilog/test_cim_macro.py $(JOBS_ARG) $(WAVEFORM_ARG) $(TEST_ARGS) $(MODEL_TEST_ARGS)

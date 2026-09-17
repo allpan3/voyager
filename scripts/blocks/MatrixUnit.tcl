@@ -89,8 +89,8 @@ proc pre_architect {} {
     "DualPortBuffer<Pack1D<$ACCUM_BUFFER_DATATYPE,${OC_DIMENSION}UL>,$ACCUM_BUFFER_SIZE>"
   set accum_name [string map {" " ""} $accum_template]
   set accum_width [expr {$OC_DIMENSION * $ACCUM_DATATYPE_WIDTH}]
-  set bank0_path "/MatrixUnit/$accum_name/bank0_run/bank0.value.$ACC_BUF_C_DATA_REP_NAME"
-  set bank1_path "/MatrixUnit/$accum_name/bank1_run/bank1.value.$ACC_BUF_C_DATA_REP_NAME"
+  set bank0_path "/MatrixUnit/$accum_name/bank0.d.value.$ACC_BUF_C_DATA_REP_NAME"
+  set bank1_path "/MatrixUnit/$accum_name/bank1.d.value.$ACC_BUF_C_DATA_REP_NAME"
   directive set $bank0_path -WORD_WIDTH $accum_width
   if {$DOUBLE_BUFFERED_ACCUM_BUFFER == true} {
     directive set $bank1_path -WORD_WIDTH $accum_width
@@ -102,14 +102,5 @@ proc pre_architect {} {
     if {$DOUBLE_BUFFERED_ACCUM_BUFFER == true} {
       directive set ${bank1_path}:rsc -MAP_TO_MODULE $memory_library
     }
-  }
-}
-
-# Removes false MatrixUnit memory ordering constraints before RTL extraction
-proc pre_extract {} {
-  global DOUBLE_BUFFERED_ACCUM_BUFFER
-  ignore_memory_precedences -from WRITE_BANK_0* -to READ_BANK_0*
-  if {$DOUBLE_BUFFERED_ACCUM_BUFFER == true} {
-    ignore_memory_precedences -from WRITE_BANK_1* -to READ_BANK_1*
   }
 }

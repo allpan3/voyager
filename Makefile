@@ -419,6 +419,7 @@ $(CATAPULT_BUILD_DIR)/DwCUnit/DwCUnit.v1/concat_rtl.v: $(HLS_BUILD_DEPENDENCIES)
 $(MATRIX_UNIT_RTL): $(HLS_BUILD_DEPENDENCIES) \
 	src/MatrixUnit.h \
 	src/DoubleBuffer.h \
+	src/DualPortBuffer.h \
 	scripts/blocks/MatrixUnit.tcl \
 	$(CATAPULT_BUILD_DIR)/InputController/InputController.v1/concat_rtl.v \
 	$(CATAPULT_BUILD_DIR)/WeightController/WeightController.v1/concat_rtl.v \
@@ -431,6 +432,7 @@ $(MATRIX_UNIT_RTL): $(HLS_BUILD_DEPENDENCIES) \
 $(ACCELERATOR_RTL): $(HLS_BUILD_DEPENDENCIES) \
 	src/Accelerator.h \
 	src/DoubleBuffer.h \
+	src/DualPortBuffer.h \
 	src/MatrixUnit.h \
 	scripts/blocks/Accelerator.tcl \
 	$(CATAPULT_BUILD_DIR)/InputController/InputController.v1/concat_rtl.v \

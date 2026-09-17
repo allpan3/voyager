@@ -197,8 +197,8 @@ proc pre_architect {} {
   set accum_width [expr $OC_DIMENSION * $ACCUM_DATATYPE_WIDTH]
 
   # Define the path to the memory resource
-  set bank0_path "/Accelerator/$accum_stripped/bank0_run/bank0.value.$ACC_BUF_C_DATA_REP_NAME"
-  set bank1_path "/Accelerator/$accum_stripped/bank1_run/bank1.value.$ACC_BUF_C_DATA_REP_NAME"
+  set bank0_path "/Accelerator/$accum_stripped/bank0.d.value.$ACC_BUF_C_DATA_REP_NAME"
+  set bank1_path "/Accelerator/$accum_stripped/bank1.d.value.$ACC_BUF_C_DATA_REP_NAME"
 
   # Configure Bank 0
   directive set $bank0_path -WORD_WIDTH $accum_width
@@ -217,16 +217,5 @@ proc pre_architect {} {
     if {$DOUBLE_BUFFERED_ACCUM_BUFFER == true} {
       directive set ${bank1_path}:rsc -MAP_TO_MODULE $mem_lib
     }
-  }
-}
-
-# ==============================================================================
-# Pre-Extract
-# ==============================================================================
-proc pre_extract {} {
-  global DOUBLE_BUFFERED_ACCUM_BUFFER
-  ignore_memory_precedences -from WRITE_BANK_0* -to READ_BANK_0*
-  if {$DOUBLE_BUFFERED_ACCUM_BUFFER == true} {
-    ignore_memory_precedences -from WRITE_BANK_1* -to READ_BANK_1*
   }
 }
