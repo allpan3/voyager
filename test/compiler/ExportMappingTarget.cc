@@ -78,6 +78,9 @@ int main() {
   parameter("double_buffered_accum", bool(DOUBLE_BUFFERED_ACCUM_BUFFER));
   parameter("ic_port_bits", IC_PORT_WIDTH);
   parameter("oc_port_bits", OC_PORT_WIDTH);
+  std::cout << ",\n  \"vector_config\": {\n    \"lanes\": " << VECTOR_UNIT_WIDTH;
+  parameter("output_fifo_packets", MATRIX_OUTPUT_FIFO_DEPTH);
+  std::cout << "\n  }";
   std::cout << ",\n  \"hardware_options\": {\n    \"support_mvm\": " << std::boolalpha << bool(SUPPORT_MVM);
   parameter("support_spmm", bool(SUPPORT_SPMM));
   parameter("support_dwc", bool(SUPPORT_DWC));

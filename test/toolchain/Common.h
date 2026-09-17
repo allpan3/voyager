@@ -10,24 +10,7 @@
 
 constexpr int MAX_LOOP_VALUE = 65535;
 
-const std::set<std::string> poly_ops = {
-    "gelu",        "gelu_",        "silu",        "silu_",        "elu",
-    "elu_",        "tanh",         "tanh_",       "tanh_1",       "tanh_1_",
-    "sigmoid",     "sigmoid_",     "hardsigmoid", "hardsigmoid_", "hardswish",
-    "hardswish_",  "mish",         "mish_",       "softplus",     "softplus_",
-    "log_sigmoid", "log_sigmoid_", "selu",        "selu_",        "celu",
-    "celu_",       "hardshrink",   "hardshrink_", "hardtanh",     "hardtanh_",
-    "leaky_relu",  "leaky_relu_",  "rrelu",       "rrelu_",       "softshrink",
-    "softshrink_", "threshold",    "threshold_"};
-
-const std::vector<std::set<std::string>> vector_unit_ops = {
-    {"add", "add_", "sub", "sub_", "mul", "mul_", "div", "div_", "neg",
-     "quantize"},
-    {"exp", "abs", "relu", "relu_"},
-    {"add", "add_", "mul", "mul_", "div", "div_", "square", "quantize"},
-    {"mul", "mul_", "div", "div_", "quantize", "quantize_mx",
-     "quantize_mx_outlier"},
-};
+#include "test/toolchain/EpilogueLowering.h"
 
 // --------------------------------------------------------------------------
 // Stage 0: Basic Arithmetic (Add, Sub, Mult)

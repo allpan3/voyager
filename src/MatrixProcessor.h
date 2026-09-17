@@ -51,7 +51,7 @@ struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
   Connections::Combinational<Pack1D<Buffer, cols>> CCS_INIT_S1(accum_to_wb_enq);
   Connections::Combinational<Pack1D<Buffer, cols>> CCS_INIT_S1(accum_to_wb_deq);
 
-  Connections::Fifo<Pack1D<Buffer, cols>, 8> CCS_INIT_S1(accum_output_fifo);
+  Connections::Fifo<Pack1D<Buffer, cols>, MATRIX_OUTPUT_FIFO_DEPTH> CCS_INIT_S1(accum_output_fifo);
   Connections::Combinational<Pack1D<Buffer, cols>> CCS_INIT_S1(
       accum_output_enq);
 

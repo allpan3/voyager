@@ -30,3 +30,9 @@ JSON metrics include `dense_ideal_cycles`, `useful_ideal_cycles`, `utilization`,
 and `true_utilization`. The existing `ideal_cycles` and `effective_utilization`
 fields retain the useful-work definitions. Rendering an existing JSON report
 derives the new display metrics without modifying that JSON or rerunning search.
+
+## Evaluation ownership
+
+Interstellar enumerates and ranks mappings. Both SA and CIM provide complete Voyager evaluations containing runtime, traffic, and utilization. Ranking is lowest cycles, retaining the first enumerated candidate on an exact tie. Shared vector service and finite buffering are described in [the compiler mapping service](../voyager-compiler/doc/mapping-service.md).
+
+Voyager accepts backend-specific `MAPPING_TIMING_OPTIONS`. `MAPPING_ENERGY_COSTS` is rejected because no characterized energy model is supplied. SA reports logical scalar accesses; CIM reports named physical event counters. Neither is converted into energy using default prices.

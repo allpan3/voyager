@@ -110,10 +110,10 @@ ifneq ($(strip $(MAPPING_ENERGY_COSTS)),)
 $(error MAPPING_ENERGY_COSTS is unsupported: Voyager energy requires hardware characterization)
 endif
 MAPPING_VERBOSE ?= 0
-MAPPING_FLAGS = $(if $(MAPPING_TIMING_OPTIONS),--timing_options $(MAPPING_TIMING_OPTIONS)) --verbose $(MAPPING_VERBOSE)
+MAPPING_FLAGS = --epilogue_exporter $(CC_BUILD_DIR)/ExportEpilogue $(if $(MAPPING_TIMING_OPTIONS),--timing_options $(MAPPING_TIMING_OPTIONS)) --verbose $(MAPPING_VERBOSE)
 MAPPING_SOURCES = $(shell find voyager-compiler/src/voyager_compiler/mapping interstellar/src/interstellar -name '*.py')
 
-$(TILING_DIR)/tilings.txtpb: $(CODEGEN_DIR)/networks/$(NETWORK)/$(DATATYPE)/$(CODEGEN_BACKEND_GEOMETRY)/model.txt test/compiler/run_tiler.py $(MAPPING_SOURCES) voyager-compiler/src/voyager_compiler/codegen/tiling_pb2.py voyager-compiler/src/voyager_compiler/codegen/param_pb2.py $(MAPPING_TARGET) FORCE_MAPPING_TARGET
+$(TILING_DIR)/tilings.txtpb: $(CODEGEN_DIR)/networks/$(NETWORK)/$(DATATYPE)/$(CODEGEN_BACKEND_GEOMETRY)/model.txt test/compiler/run_tiler.py $(MAPPING_SOURCES) voyager-compiler/src/voyager_compiler/codegen/tiling_pb2.py voyager-compiler/src/voyager_compiler/codegen/param_pb2.py $(MAPPING_TARGET) FORCE_MAPPING_TARGET $(CC_BUILD_DIR)/ExportEpilogue
 	mkdir -p $(dir $@)
 	$(MAPPING_PYTHON) test/compiler/run_tiler.py --backend $(CODEGEN_BACKEND) --target $(MAPPING_TARGET) --output_dir $(dir $@) --codegen_dir $(dir $<) $(MAPPING_FLAGS) > $(dir $@)/tiler.log 2>&1
 	@echo "Mapping report: $(TILING_DIR)/mapping-report.md"

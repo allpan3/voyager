@@ -562,6 +562,10 @@ $(CC_BUILD_DIR)/Tiling.o: test/common/Tiling.cc test/common/Tiling.h
 ###########################################################
 toolchain: $(CC_BUILD_DIR)/MapOperation.o $(CC_BUILD_DIR)/Tiling.o $(CC_BUILD_DIR)/Network.o $(CC_BUILD_DIR)/param.pb.o $(CC_BUILD_DIR)/tiling.pb.o
 
+# Export compiler-selected epilogue execution descriptions before mapping
+$(CC_BUILD_DIR)/ExportEpilogue: test/compiler/ExportEpilogue.cc test/toolchain/EpilogueLowering.h $(CC_BUILD_DIR)/param.pb.o
+	$(CC) $(C17FLAGS) -DNO_SYSC -o $@ $< $(CC_BUILD_DIR)/param.pb.o -L$(CONDA_PREFIX)/lib $(LDFLAGS_NO_SYSC) -labsl_status
+
 # Export the selected backend and preserve timestamps when resolved inputs match
 .PHONY: mapping-target FORCE_MAPPING_TARGET
 mapping-target: $(MAPPING_TARGET)

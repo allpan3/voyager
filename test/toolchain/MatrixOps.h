@@ -787,8 +787,8 @@ void map_matrix_operation(const Operation& operation,
 
   // If there are no vector operations, we don't need to setup the vector
   // instruction config
-  if (!is_dwc && !is_fc && !has_fused_spmm(matrix_op) && op_list.size() == 1 &&
-      !output.has_reshape()) {
+  const auto lowered_epilogue = lower_epilogue(op_list, output, !is_dwc && !is_fc);
+  if (lowered_epilogue.direct) {
     matrix_params->output_to_memory = true;
     matrix_params->output_offset = get_address(output);
     matrix_params->output_dtype =
@@ -892,13 +892,13 @@ void map_matrix_operation(const Operation& operation,
     }
   }
 
-  int stage = 0;
-  for (int i = 1; i < op_list.size(); i++) {
-    const auto op = op_list[i];
+  for (const auto& step : lowered_epilogue.steps) {
+    const auto& op = op_list[step.operation];
+    const int stage = step.stage;
     const std::string opcode = op.target();
 
     // Dequantization doesn't take a stage in the pipeline
-    if (opcode == "dequantize") {
+    if (step.dequantize) {
       inst.vdequantize = true;
 
       const auto other = op.kwargs().at("scale").tensor();
@@ -912,12 +912,7 @@ void map_matrix_operation(const Operation& operation,
       continue;
     }
 
-    if (poly_ops.count(opcode)) {
-      if (stage != 0) {
-        throw std::runtime_error(
-            "Polynomial approximation must be the first vector operation!\n");
-      }
-
+    if (step.polynomial) {
       // Grab kwargs that are relevant for some activation functions
       std::map<std::string, float> kwargs;
 
@@ -931,32 +926,7 @@ void map_matrix_operation(const Operation& operation,
       inst.vector_op0 = VectorInstructions::op0_poly;
       inst.vector_op2 = VectorInstructions::op2_poly;
 
-      stage = 3;
       continue;
-    }
-
-    for (; stage < vector_unit_ops.size(); stage++) {
-      // Stage 0 and 2 can only perform per-tensor quantization
-      if (opcode == "quantize") {
-        const auto scale = op.kwargs().at("scale").tensor();
-        const int size = get_size(scale);
-        if (stage != 3 && size > 1) {
-          continue;
-        }
-      }
-      if ((opcode == "add" || opcode == "add_") && stage == 0 &&
-          has_fused_spmm(matrix_op)) {
-        // stage 0 add is used for summing dense and sparse results
-        continue;
-      }
-
-      if (vector_unit_ops[stage].count(opcode)) {
-        break;
-      }
-    }
-
-    if (stage == vector_unit_ops.size()) {
-      throw std::runtime_error("Vector operation not supported!\n");
     }
 
     spdlog::debug("stage {} target: {}\n", stage, opcode);
@@ -976,12 +946,11 @@ void map_matrix_operation(const Operation& operation,
         break;
     }
 
-    if (opcode == "quantize_mx" || opcode == "quantize_mx_outlier") {
+    if (step.microscaling) {
       set_quantize_mx_params(param, vector_params, inst,
                              vector_instruction_config);
-    } else if (op.kwargs().contains("other") || opcode == "quantize") {
-      std::string other_key = opcode == "quantize" ? "scale" : "other";
-      const auto other = op.kwargs().at(other_key);
+    } else if (!step.argument.empty()) {
+      const auto& other = op.kwargs().at(step.argument);
 
       if (other.has_float_value()) {
         float scalar = other.float_value();
@@ -994,9 +963,7 @@ void map_matrix_operation(const Operation& operation,
         set_immediate(array[0], stage, opcode, inst);
         delete[] array;
       } else {
-        auto self = op.kwargs().at("input").tensor();
-        auto tensor = other.tensor();
-        auto tensor_to_load = tensor.has_memory() ? tensor : self;
+        const auto& tensor_to_load = op.kwargs().at(step.tensor_key).tensor();
 
         bool has_dequant = tensor_to_load.has_dequant();
         VECTOR_DATATYPE scale = get_tensor_scalar_scale(tensor_to_load);
@@ -1028,8 +995,6 @@ void map_matrix_operation(const Operation& operation,
         }
       }
     }
-
-    stage++;
   }
 
 #if DOUBLE_BUFFERED_ACCUM_BUFFER

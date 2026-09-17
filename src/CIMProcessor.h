@@ -157,7 +157,7 @@ SC_MODULE(CIMProcessor) {
   // Carry only the accumulated value; write_back rederives retirement actions
   using AccumulationResult = Pack1D<Buffer, N>;
 
-  static constexpr int OUTPUT_FIFO_DEPTH = 8;
+  static constexpr int OUTPUT_FIFO_DEPTH = MATRIX_OUTPUT_FIFO_DEPTH;
   static constexpr int RESIDENT_SET_COUNT = B_SETS;
 #if DOUBLE_BUFFERED_ACCUM_BUFFER
   static constexpr int ACCUM_BUFFER_BANKS = 2;

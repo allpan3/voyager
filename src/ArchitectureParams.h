@@ -4,6 +4,9 @@
 // IWYU thinks that this header is not used, even though it is.
 #include "datatypes/DataTypes.h"  // IWYU pragma: keep
 
+// Final-result storage shared by the matrix backends
+constexpr int MATRIX_OUTPUT_FIFO_DEPTH = 8;
+
 // Constants for Approximation Unit
 constexpr int NUM_MAXES = 6;
 constexpr int NUM_RANGES = 7;
