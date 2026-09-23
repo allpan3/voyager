@@ -567,6 +567,10 @@ $(CC_BUILD_DIR)/ExportEpilogue: test/compiler/ExportEpilogue.cc test/toolchain/E
 	$(CC) $(C17FLAGS) -DNO_SYSC -o $@ $< $(CC_BUILD_DIR)/param.pb.o -L$(CONDA_PREFIX)/lib $(LDFLAGS_NO_SYSC) -labsl_status
 
 # Export the selected backend and preserve timestamps when resolved inputs match
+.PHONY: mapping-tests
+mapping-tests:
+	$(MAPPING_PYTHON) -m pytest -q test/compiler/tests voyager-compiler/test --ignore=voyager-compiler/test/test_codegen.py
+
 .PHONY: mapping-target FORCE_MAPPING_TARGET
 mapping-target: $(MAPPING_TARGET)
 $(MAPPING_TARGET): FORCE_MAPPING_TARGET voyager-compiler/src/voyager_compiler/codegen/tiling_pb2.py voyager-compiler/src/voyager_compiler/codegen/param_pb2.py
