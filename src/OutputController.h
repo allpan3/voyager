@@ -29,8 +29,15 @@ bool send_output_data_and_addr(
   bits = BitsToType<decltype(bits)>(TypeToBits(outputs));
 
   for (int i = 0; i < num_words; i++) {
+#if DOUBLE_BUFFERED_ACCUM_BUFFER
+    // The tile-draining pipeline sends the address first so an address-first
+    // consumer can accept data without a per-beat handshake round trip.
+    address_channel.Push(offset + address * T::width / 8 + i * port_width / 8);
+    output_channel.Push(bits.template slc<port_width>(i * port_width));
+#else
     output_channel.Push(bits.template slc<port_width>(i * port_width));
     address_channel.Push(offset + address * T::width / 8 + i * port_width / 8);
+#endif
   }
 
   return true;
