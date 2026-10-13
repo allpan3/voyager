@@ -21,6 +21,7 @@ struct ScratchpadConfig {
   bool banked = false;
   uint64_t size = 0, banks = 0, word_bytes = 0, reserved = 0;
   double compiler_frequency_ghz = 0;
+  uint64_t bank_switch_cycles = 0;
   std::string source = "legacy independent streams (no memory_config.txt)";
 
   void validate() const {
@@ -57,6 +58,7 @@ struct ScratchpadConfig {
         throw std::runtime_error("Malformed scratchpad config: " + path);
       config.source = path;
       config.compiler_frequency_ghz = fields.frequency_ghz();
+      config.bank_switch_cycles = fields.bank_switch_cycles();
     }
 
     std::string mode = fields.mode() == voyager::MemoryConfig::BANKED
@@ -99,13 +101,14 @@ struct ScratchpadConfig {
 };
 
 // Testbench bandwidth model: one read OR write bank word per accelerator
-// cycle per bank. Different banks operate concurrently. No extra SRAM access
-// latency or DRAM/DMA timing is implied. Each calling stream has at most one
+// cycle per bank. Different banks operate concurrently. Bank changes lose
+// the configured number of idle cycles per port. DMA bypasses this SRAM model. Each calling stream has at most one
 // outstanding word reservation; SystemC's cooperative execution orders ties.
 class ScratchpadTiming {
  public:
   struct Counts {
     uint64_t reads = 0, writes = 0, wait_cycles = 0;
+    uint64_t bank_switches = 0, bank_switch_wait_cycles = 0;
   };
 
   ScratchpadTiming(const ScratchpadConfig& config, sc_core::sc_time period)
@@ -146,7 +149,26 @@ class ScratchpadTiming {
       const uint64_t chunk = std::min(
           bytes - offset, config.word_bytes - current % config.word_bytes);
       const uint64_t now = sc_core::sc_time_stamp().value() / period_ticks;
-      const uint64_t slot = std::max(now, next_cycle[bank]);
+      auto& previous = previous_request[port];
+      const bool switched = previous.valid && previous.bank != bank;
+      // memory_config.txt delivers the compiler's BANK_SWITCH_CYCLES.
+      // The harness keeps no second copy. Apply it to read and write ports.
+      // Both SoC interfaces use requestFifo and TLFIFOFixer(all).
+      const uint64_t port_ready = switched
+          ? previous.cycle + config.bank_switch_cycles + 1 : now;
+      if (switched) {
+        ++ports[port].bank_switches;
+        // Wait before reserving the bank. Other ports can use it while this
+        // port waits for its bank-switch idle cycles.
+        const auto issue = sc_core::sc_time::from_value(port_ready * period_ticks);
+        if (issue > sc_core::sc_time_stamp()) {
+          ports[port].bank_switch_wait_cycles += port_ready - now;
+          sc_core::wait(issue - sc_core::sc_time_stamp());
+        }
+      }
+      const uint64_t eligible = sc_core::sc_time_stamp().value() / period_ticks;
+      const uint64_t slot = std::max(eligible, next_cycle[bank]);
+      previous = {true, bank, slot};
       next_cycle[bank] = slot + 1;
       counts[bank].wait_cycles += slot - now;
       ports[port].wait_cycles += slot - now;
@@ -180,6 +202,8 @@ class ScratchpadTiming {
       const auto& c = entry.second;
       out << "ScratchpadPort: port=" << entry.first << " read_words=" << c.reads
           << " write_words=" << c.writes << " wait_cycles=" << c.wait_cycles
+          << " bank_switches=" << c.bank_switches
+          << " bank_switch_wait_cycles=" << c.bank_switch_wait_cycles
           << '\n';
     }
   }
@@ -191,5 +215,10 @@ class ScratchpadTiming {
   uint64_t period_ticks;
   std::vector<uint64_t> next_cycle;
   std::map<std::string, Counts> ports;
+  struct PreviousRequest {
+    bool valid = false;
+    uint64_t bank = 0, cycle = 0;
+  };
+  std::map<std::string, PreviousRequest> previous_request;
   std::ofstream trace;
 };
