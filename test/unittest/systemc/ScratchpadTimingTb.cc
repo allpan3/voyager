@@ -229,12 +229,50 @@ int sc_main(int argc, char** argv) {
   setenv("SCRATCHPAD_MODEL", "independent", 1);
   assert(!ScratchpadConfig::load(path).banked);
   unsetenv("SCRATCHPAD_MODEL");
+  voyager::MemoryConfig fields;
+  auto dram = DramTimingConfig::load(fields);
+  assert(!dram.present && !dram.timed && dram.cycles(64) == 0);
+  dram.validate_clock(sc_time(7, SC_NS));  // legacy does not check the clock
+  fields.set_frequency_ghz(0.1);
+  fields.set_dram_mode(voyager::MemoryConfig::TIMED);
+  fields.set_dram_bytes_per_cycle(64);
+  fields.set_dram_access_latency_cycles(100);
+  dram = DramTimingConfig::load(fields);
+  assert(dram.cycles(0) == 0 && dram.cycles(1) == 101 &&
+         dram.cycles(64) == 101 && dram.cycles(65) == 102);
+  dram.validate_clock(sc_time(10, SC_NS));
+  rejected = false;
+  try { dram.validate_clock(sc_time(1, SC_NS)); }
+  catch (const std::runtime_error& error) {
+    rejected = std::string(error.what()).find("compiler frequency") != std::string::npos;
+  }
+  assert(rejected);
+  fields.set_dram_access_latency_cycles(0.5);
+  assert(DramTimingConfig::load(fields).cycles(65) == 2.5);
+  fields.set_dram_mode(voyager::MemoryConfig::UNTIMED);
+  fields.set_dram_bytes_per_cycle(INFINITY);
+  fields.set_dram_access_latency_cycles(0);
+  dram = DramTimingConfig::load(fields);
+  assert(dram.present && !dram.timed && dram.cycles(65) == 0);
+  fields.clear_dram_access_latency_cycles();
+  rejected = false;
+  try { DramTimingConfig::load(fields); }
+  catch (const std::runtime_error&) { rejected = true; }
+  assert(rejected);
+  fields.set_dram_access_latency_cycles(0);
+  fields.set_dram_bytes_per_cycle(0);
+  rejected = false;
+  try { DramTimingConfig::load(fields); }
+  catch (const std::runtime_error&) { rejected = true; }
+  assert(rejected);
   {
     std::ofstream f(path, std::ios::app);
-    f << "bank_switch_cycles: 8\n";
+    f << "dram_mode: UNTIMED\ndram_bytes_per_cycle: inf\n"
+         "dram_access_latency_cycles: 0\nbank_switch_cycles: 8\n";
   }
   c = ScratchpadConfig::load(path);
-  assert(c.bank_switch_cycles == 8);
+  assert(c.dram.present && !c.dram.timed && c.bank_switch_cycles == 8);
+  std::cout << "PASS DRAM mode, rounding, fractional latency, clock mismatch, config\n";
   std::filesystem::remove(path);
   std::cout
       << "PASS config, missing geometry, conflicting override, legacy mode\n";

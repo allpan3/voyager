@@ -109,7 +109,8 @@ test-systemc-scratchpad: $(SYSTEMC_BUILD)/ScratchpadTimingTb
 	$<
 
 $(SYSTEMC_BUILD)/ScratchpadTimingTb: $(THIS_DIR)/systemc/ScratchpadTimingTb.cc \
-    $(REPO_ROOT)/test/common/ScratchpadTiming.h $(MATRIX_PROTO) \
+    $(REPO_ROOT)/test/common/ScratchpadTiming.h \
+    $(REPO_ROOT)/test/common/DramTiming.h $(MATRIX_PROTO) \
     $(SYSTEMC_BUILD)/voyager_ir.pb.o | check-systemc-env
 	mkdir -p $(@D)
 	$(SYSTEMC_CC) -std=c++17 -O2 -I$(SYSTEMC_GENERATED) -I$(REPO_ROOT) \

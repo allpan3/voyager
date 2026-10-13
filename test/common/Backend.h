@@ -70,6 +70,29 @@ class Backend {
   virtual void data_op(const voyager::Operation& op,
                        const voyager::PrimOp& prim, const ScalarEnv& env) {}
 
+  // A copy owns its completion post. Timed backends defer both the memory
+  // effect and the post. Sequential and recording backends keep their order.
+  virtual void execute_async_copy(const voyager::Operation& op,
+                                  const voyager::PrimOp& prim,
+                                  const ScalarEnv& env,
+                                  MemoryInterface* memory) {
+    if (intercepts_data_ops())
+      data_op(op, prim, env);
+    else
+      run_async_copy(prim, env, memory);
+    const auto sem = prim.kwargs().find("semaphore");
+    if (sem != prim.kwargs().end()) {
+      const auto& ref = sem->second.tensor_box();
+      post_semaphore(ref.box().node(), resolve_bank(ref, env, prim.name()),
+                     has_arg(prim, "post_count")
+                         ? arg_int(prim, "post_count", env) : 1);
+    }
+  }
+
+  // Host memory effects have no completion semaphore. Timed backends must
+  // finish prior asynchronous effects before the interpreter reads or clears.
+  virtual void synchronize_memory() {}
+
   // A scalar the program reads out of memory at run time -- the CSR cursors a
   // sparse layer appends against. A backend that records rather than executes
   // has not populated that memory yet, so it takes the read here and performs
