@@ -91,9 +91,13 @@ SC_MODULE(CIMProcessor) {
     LocalAccumContext local_accum_context;
     ac_int<1, false> buffer_bank;
     ac_int<1, false> begins_matrix_command;
+    ac_int<16, false> address;
+    ac_int<1, false> writes_buffer;
+    ac_int<1, false> emits_output;
+    ac_int<1, false> retires_bank;
 
     static const unsigned int width = Pack1D<Psum, OUTPUT_LANES>::width +
-                                      Pack1D<Buffer, OUTPUT_LANES>::width + 6 +
+                                      Pack1D<Buffer, OUTPUT_LANES>::width + 25 +
                                       LocalAccumContext::width;
 
     template <unsigned int Size>
@@ -107,6 +111,10 @@ SC_MODULE(CIMProcessor) {
       m & local_accum_context;
       m & buffer_bank;
       m & begins_matrix_command;
+      m & address;
+      m & writes_buffer;
+      m & emits_output;
+      m & retires_bank;
     }
 
     inline friend void sc_trace(sc_trace_file* tf,
@@ -122,6 +130,10 @@ SC_MODULE(CIMProcessor) {
                name + ".reads_accumulation_buffer");
       sc_trace(tf, metadata.local_accum_context, name + ".local_accum_context");
       sc_trace(tf, metadata.buffer_bank, name + ".buffer_bank");
+      sc_trace(tf, metadata.address, name + ".address");
+      sc_trace(tf, metadata.writes_buffer, name + ".writes_buffer");
+      sc_trace(tf, metadata.emits_output, name + ".emits_output");
+      sc_trace(tf, metadata.retires_bank, name + ".retires_bank");
       sc_trace(tf, metadata.begins_matrix_command,
                name + ".begins_matrix_command");
     }
@@ -136,7 +148,9 @@ SC_MODULE(CIMProcessor) {
       os << metadata.reads_accumulation_buffer << " ";
       os << metadata.local_accum_context << " ";
       os << metadata.buffer_bank << " ";
-      os << metadata.begins_matrix_command;
+      os << metadata.begins_matrix_command << " " << metadata.address << " "
+         << metadata.writes_buffer << " " << metadata.emits_output << " "
+         << metadata.retires_bank;
       return os;
     }
 
@@ -150,7 +164,11 @@ SC_MODULE(CIMProcessor) {
              lhs.reads_accumulation_buffer == rhs.reads_accumulation_buffer &&
              lhs.local_accum_context == rhs.local_accum_context &&
              lhs.buffer_bank == rhs.buffer_bank &&
-             lhs.begins_matrix_command == rhs.begins_matrix_command;
+             lhs.begins_matrix_command == rhs.begins_matrix_command &&
+             lhs.address == rhs.address &&
+             lhs.writes_buffer == rhs.writes_buffer &&
+             lhs.emits_output == rhs.emits_output &&
+             lhs.retires_bank == rhs.retires_bank;
     }
   };
 
@@ -163,8 +181,41 @@ SC_MODULE(CIMProcessor) {
 
   static constexpr int ACCUM_TO_WB_FIFO_DEPTH = cim::ACCUM_TO_WB_FIFO_DEPTH;
 
-  // Carry only the accumulated value; write_back rederives retirement actions
-  using AccumulationResult = Pack1D<Buffer, OUTPUT_LANES>;
+  // Carry output routing with each accumulated value.
+  struct AccumulationResult {
+    Pack1D<Buffer, OUTPUT_LANES> value;
+    ac_int<1, false> emits_output;
+    ac_int<1, false> retires_bank;
+    ac_int<1, false> buffer_bank;
+    static const unsigned int width = Pack1D<Buffer, OUTPUT_LANES>::width + 3;
+
+    template <unsigned int Size>
+    void Marshall(Marshaller<Size>& m) {
+      m & value;
+      m & emits_output;
+      m & retires_bank;
+      m & buffer_bank;
+    }
+    inline friend void sc_trace(sc_trace_file* tf,
+                                const AccumulationResult& result,
+                                const std::string& name) {
+      sc_trace(tf, result.value, name + ".value");
+      sc_trace(tf, result.emits_output, name + ".emits_output");
+      sc_trace(tf, result.retires_bank, name + ".retires_bank");
+      sc_trace(tf, result.buffer_bank, name + ".buffer_bank");
+    }
+    inline friend std::ostream& operator<<(std::ostream& os,
+                                           const AccumulationResult& result) {
+      return os << result.value << " " << result.emits_output << " "
+                << result.retires_bank << " " << result.buffer_bank;
+    }
+    inline friend bool operator==(const AccumulationResult& lhs,
+                                  const AccumulationResult& rhs) {
+      return lhs.value == rhs.value && lhs.emits_output == rhs.emits_output &&
+             lhs.retires_bank == rhs.retires_bank &&
+             lhs.buffer_bank == rhs.buffer_bank;
+    }
+  };
 
   static constexpr int OUTPUT_FIFO_DEPTH = cim::OUTPUT_FIFO_DEPTH;
   static constexpr int RESIDENT_SET_COUNT = WEIGHT_SETS;
@@ -1392,6 +1443,14 @@ SC_MODULE(CIMProcessor) {
                                            : LocalAccumContext(0);
         metadata.buffer_bank = accumulation_buffer_bank;
         metadata.begins_matrix_command = step == 0;
+        metadata.address = address;
+        metadata.writes_buffer = writes_accumulation_buffer(
+            params, layout, loop_counters, metadata.uses_local_accum_context);
+        metadata.emits_output =
+            metadata.finishes_reduction && !metadata.writes_buffer;
+        metadata.retires_bank = DOUBLE_BUFFERED_ACCUM_BUFFER &&
+            params.write_output_to_accum_buffer &&
+            finishes_output_tile(params, loop_counters);
 
         if (metadata.starts_reduction) {
           if (params.has_bias) {
@@ -1432,8 +1491,7 @@ SC_MODULE(CIMProcessor) {
         accumulation_metadata_enq.Push(metadata);
 
 #if DOUBLE_BUFFERED_ACCUM_BUFFER
-        if (params.write_output_to_accum_buffer &&
-            finishes_output_tile(params, loop_counters)) {
+        if (metadata.retires_bank) {
           accumulation_buffer_bank = !accumulation_buffer_bank;
         }
 #endif
@@ -1450,6 +1508,10 @@ SC_MODULE(CIMProcessor) {
 #pragma hls_unroll yes
     for (int bank = 0; bank < ACCUM_BUFFER_BANKS; bank++) {
       accumulation_buffer_read_data[bank].Reset();
+      accumulation_buffer_write_request[bank].Reset();
+#if DOUBLE_BUFFERED_ACCUM_BUFFER
+      accumulation_buffer_done[bank].Reset();
+#endif
     }
 
     wait();
@@ -1542,71 +1604,52 @@ SC_MODULE(CIMProcessor) {
         }
       }
 
-      // Capture the value independently before later rows reuse its register
-      accum_to_wb_enq.Push(previous);
+      if (metadata.writes_buffer) {
+        AccumulationWriteRequest request;
+        request.address = metadata.address;
+        request.data = previous;
+        request.last = false;
+        accumulation_buffer_write_request[metadata.buffer_bank].Push(request);
+      }
+
+#if DOUBLE_BUFFERED_ACCUM_BUFFER
+      // The writer owns bank release. A later tile must not write through
+      // the old ownership phase while a separate retire process is blocked.
+      if (metadata.retires_bank) {
+        accumulation_buffer_done[metadata.buffer_bank].SyncPush();
+      }
+#endif
+
+      // Preserve output order after the SRAM write.
+      AccumulationResult result;
+      result.value = previous;
+      result.emits_output = metadata.emits_output;
+      result.retires_bank = metadata.retires_bank;
+      result.buffer_bank = metadata.buffer_bank;
+      accum_to_wb_enq.Push(result);
     }
   }
 
-  // Rederive retirement from synchronized loop state and write completed values
+  // Deliver final outputs after the accumulation stage.
   void write_back() {
     write_back_params_deq.ResetRead();
     accum_to_wb_deq.ResetRead();
     accum_output_enq.ResetWrite();
-#pragma hls_unroll yes
-    for (int bank = 0; bank < ACCUM_BUFFER_BANKS; bank++) {
-      accumulation_buffer_write_request[bank].Reset();
-#if DOUBLE_BUFFERED_ACCUM_BUFFER
-      accumulation_buffer_done[bank].Reset();
-#endif
-    }
-
 #if ENABLE_PERF_COUNTERS
     perf_completion_toggle.write(false);
 #endif
-    bool accumulation_buffer_bank = false;
     wait();
 
     while (true) {
       const MatrixParams params = write_back_params_deq.Pop();
-      const LocalAccumLayout layout = local_accum_layout(params);
-      ac_int<LOOP_WIDTH, false> loop_counters[2][6];
-      reset_loop_counters(loop_counters);
-
       const ac_int<32, false> total_ops = total_operations(params);
 #pragma hls_pipeline_init_interval 1
 #pragma hls_pipeline_stall_mode flush
       for (ac_int<32, false> step = 0; step < total_ops; step++) {
-        const Pack1D<Buffer, OUTPUT_LANES> accumulated = accum_to_wb_deq.Pop();
-        const ac_int<16, false> address =
-            output_context_index(params, loop_counters);
-        const bool uses_local_accum_context =
-            local_accum_context_index(params, layout, loop_counters) <
-            LOCAL_ACCUM_CONTEXTS;
-        const bool writes_buffer = writes_accumulation_buffer(
-            params, layout, loop_counters, uses_local_accum_context);
-        const bool emits_output =
-            finishes_output_reduction(params, loop_counters) && !writes_buffer;
-
-        if (emits_output) {
-          accum_output_enq.Push(accumulated);
-        } else if (writes_buffer) {
-          AccumulationWriteRequest request;
-          request.address = address;
-          request.data = accumulated;
-          request.last = false;
-          accumulation_buffer_write_request[accumulation_buffer_bank].Push(
-              request);
+        const AccumulationResult result = accum_to_wb_deq.Pop();
+        if (result.emits_output) {
+          accum_output_enq.Push(result.value);
         }
-
-#if DOUBLE_BUFFERED_ACCUM_BUFFER
-        if (params.write_output_to_accum_buffer &&
-            finishes_output_tile(params, loop_counters)) {
-          accumulation_buffer_done[accumulation_buffer_bank].SyncPush();
-          accumulation_buffer_bank = !accumulation_buffer_bank;
-        }
-#endif
-
-        advance_loop_counters(loop_counters, params);
       }
 #if ENABLE_PERF_COUNTERS
       perf_completion_toggle.write(!perf_completion_toggle.read());
