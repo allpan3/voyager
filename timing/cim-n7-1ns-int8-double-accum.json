@@ -1,0 +1,160 @@
+{
+  "name": "cim-n7-1ns-int8-double-accum",
+  "accelerator": {
+    "kernel_launch_overhead_cycles": 96,
+    "sa_output_slack_cycles": 24,
+    "spmm_row_cycles": 8,
+    "cim": {
+      "output_cycles_per_vector": 1,
+      "accumulation_feedback_cycles": null,
+      "weight_release_cycles": 1,
+      "weight_ready_cycles": 1,
+      "output_bank_drain_cycles": 11,
+      "output_pipeline": null
+    }
+  },
+  "soc": {
+    "name": "sphinx",
+    "bank_switch_cycles": 8,
+    "memory_request_latency_cycles": 0
+  },
+  "evidence": {
+    "accelerator.kernel_launch_overhead_cycles": {
+      "status": "reference",
+      "source": "Jeffrey Yu, compiler 2c1c1be: 96 cycles per vector pass measured on Sphinx. Reused as a reference assumption for other hardware."
+    },
+    "accelerator.sa_output_slack_cycles": {
+      "status": "reference",
+      "source": "Jeffrey Yu, compiler 7df1cd8: measured range 20\u201340 on E4M3x16x16. Preserve the original subtraction of 24 from a cycle difference."
+    },
+    "accelerator.spmm_row_cycles": {
+      "status": "reference",
+      "source": "Jeffrey Yu, compiler 2f0ae93: 7.3\u20137.5 cycles per row on Sphinx, rounded to 8."
+    },
+    "soc.bank_switch_cycles": {
+      "status": "measured",
+      "source": "Jeffrey Yu, compiler ebbb003: 8-cycle Sphinx read round trip. This describes the Sphinx fabric model, not accelerator HLS."
+    },
+    "soc.memory_request_latency_cycles": {
+      "status": "assumed",
+      "source": "Compiler a9fa461: no extra per-request initiation cost. This is not SRAM response latency."
+    },
+    "accelerator.cim.output_cycles_per_vector": {
+      "status": "assumed",
+      "source": "Compiler a9fa461: one-cycle minimum service. Payload beat count and resource costs still apply."
+    },
+    "accelerator.cim.accumulation_feedback_cycles": {
+      "status": "unknown",
+      "source": "No proven stall-safe feedback bound. Null preserves the existing unvalidated safety result; it does not assert zero latency."
+    },
+    "accelerator.cim.weight_release_cycles": {
+      "status": "derived",
+      "source": "Compiler a9fa461 and CIMProcessor::set_scoreboard: one registered release transition. Extra HLS stages remain unmeasured."
+    },
+    "accelerator.cim.weight_ready_cycles": {
+      "status": "derived",
+      "source": "Compiler a9fa461 and CIMProcessor::set_scoreboard: one registered ready transition. Extra HLS stages remain unmeasured."
+    },
+    "accelerator.cim.output_bank_drain_cycles": {
+      "status": "measured",
+      "source": "Fix 1 hardware, accelerator 2e79da8865a6e155dec6ce5abbee623476394658. Hardware files match the measured cim-final snapshot. N7 svttt 0.75 V, 1 ns, Catapult 2024.2, 64 int24 lanes, 512-bit port, 5 local contexts. final-integration-20261013/drain-measurement.json: minimum output idle gap 11 cycles for both CIM2 and CIM18 double. Trace SHA-256 c3203702272318fd2b54737d5a399b0d552a2c5914cef3194b3fc19e481c0196. This is a minimum control cost; other waits remain separate. Build settings are recorded in metadata."
+    },
+    "accelerator.cim.output_pipeline": {
+      "status": "unknown",
+      "source": "No complete fused output pipeline record. Null retains architectural output storage with no added scheduled stages."
+    }
+  },
+  "metadata": {
+    "purpose": "recorded",
+    "matrix_operand_widths": [
+      [
+        8,
+        8,
+        24
+      ]
+    ],
+    "builds": [
+      {
+        "parameters": {
+          "DATATYPE": "INT8",
+          "TECHNOLOGY": "tsmc7",
+          "CLOCK_PERIOD": 1.0,
+          "IC_DIMENSION": 64,
+          "OC_DIMENSION": 64,
+          "IC_PORT_WIDTH": 512,
+          "OC_PORT_WIDTH": 512,
+          "INPUT_BUFFER_SIZE": 1024,
+          "WEIGHT_BUFFER_SIZE": 1024,
+          "ACCUM_BUFFER_SIZE": 1024,
+          "DOUBLE_BUFFERED_ACCUM_BUFFER": true,
+          "SUPPORT_MVM": false,
+          "SUPPORT_SPMM": false,
+          "SUPPORT_DWC": false,
+          "MATRIX_BACKEND": 1,
+          "ENABLE_PERF_COUNTERS": 1,
+          "CIM_MACRO_INPUT_LANES": 64,
+          "CIM_MACRO_OUTPUT_LANES": 8,
+          "CIM_WEIGHT_SETS": 2,
+          "CIM_BASE_A_WIDTH": 8,
+          "CIM_BASE_B_WIDTH": 8,
+          "CIM_BASE_C_WIDTH": 24,
+          "CIM_MACRO_WRITE_INPUT_LANES": 1,
+          "CIM_MAC_LATENCY": 3,
+          "CIM_MODE": 0,
+          "CIM_SIGNED": true,
+          "CIM_TILE_INPUT_AXIS_ELEMENTS": 1,
+          "CIM_TILE_OUTPUT_AXIS_ELEMENTS": 8,
+          "CIM_INPUT_AXIS_TILES": 1,
+          "CIM_OUTPUT_AXIS_TILES": 1,
+          "CIM_A_PORT_TILES": 1,
+          "CIM_B_PORT_TILES": 1,
+          "CIM_C_PORT_TILES": 1,
+          "CIM_C_BEAT_LAYOUT": 1,
+          "CIM_ARRAY_RESULT_SLOTS": 8,
+          "CIM_LOCAL_ACCUM_CONTEXTS": 5
+        }
+      },
+      {
+        "parameters": {
+          "DATATYPE": "INT8",
+          "TECHNOLOGY": "tsmc7",
+          "CLOCK_PERIOD": 1.0,
+          "IC_DIMENSION": 64,
+          "OC_DIMENSION": 64,
+          "IC_PORT_WIDTH": 512,
+          "OC_PORT_WIDTH": 512,
+          "INPUT_BUFFER_SIZE": 1024,
+          "WEIGHT_BUFFER_SIZE": 1024,
+          "ACCUM_BUFFER_SIZE": 1024,
+          "DOUBLE_BUFFERED_ACCUM_BUFFER": true,
+          "SUPPORT_MVM": false,
+          "SUPPORT_SPMM": false,
+          "SUPPORT_DWC": false,
+          "MATRIX_BACKEND": 1,
+          "ENABLE_PERF_COUNTERS": 1,
+          "CIM_MACRO_INPUT_LANES": 64,
+          "CIM_MACRO_OUTPUT_LANES": 8,
+          "CIM_WEIGHT_SETS": 18,
+          "CIM_BASE_A_WIDTH": 8,
+          "CIM_BASE_B_WIDTH": 8,
+          "CIM_BASE_C_WIDTH": 24,
+          "CIM_MACRO_WRITE_INPUT_LANES": 1,
+          "CIM_MAC_LATENCY": 3,
+          "CIM_MODE": 0,
+          "CIM_SIGNED": true,
+          "CIM_TILE_INPUT_AXIS_ELEMENTS": 1,
+          "CIM_TILE_OUTPUT_AXIS_ELEMENTS": 8,
+          "CIM_INPUT_AXIS_TILES": 1,
+          "CIM_OUTPUT_AXIS_TILES": 1,
+          "CIM_A_PORT_TILES": 1,
+          "CIM_B_PORT_TILES": 1,
+          "CIM_C_PORT_TILES": 1,
+          "CIM_C_BEAT_LAYOUT": 1,
+          "CIM_ARRAY_RESULT_SLOTS": 8,
+          "CIM_LOCAL_ACCUM_CONTEXTS": 5
+        }
+      }
+    ],
+    "hardware_source": "Accelerator 2e79da8865a6e155dec6ce5abbee623476394658: address-first output, early accumulation writes, and CIM_LOCAL_ACCUM_CONTEXTS=5. Hardware files match the measured cim-final snapshot. Measurements: final-integration-20261013/drain-measurement.json."
+  }
+}
