@@ -33,6 +33,7 @@ Harness::Harness(sc_module_name name, const Model& model,
             << " size_bytes=" << config.size << " banks=" << config.banks
             << " bank_word_bytes=" << config.word_bytes
             << " reserved_bytes=" << config.reserved
+            << " bank_switch_cycles=" << config.bank_switch_cycles
             << " clock_ns=" << clk.period().to_seconds() * 1e9
             << " compiler_frequency_ghz=" << config.compiler_frequency_ghz
             << " DMA=untimed source=" << config.source << std::endl;
