@@ -114,6 +114,64 @@ struct ScratchpadTimingTb : sc_module {
         << "PASS bank/word boundaries, partial words, backpressure, bounds\n";
   }
 
+  void bank_switches() {
+    wait(period * 3);
+    auto c = config();
+    c.bank_switch_cycles = 8;
+    ScratchpadTiming timing(c, period);
+    const auto access = [](uint64_t, uint64_t, uint64_t) {};
+    const auto start = sc_time_stamp();
+    timing.transfer(0, 16, false, "input", access);
+    timing.transfer(16, 16, false, "input", access);
+    assert((sc_time_stamp() - start) / period == 1);
+    timing.transfer(128, 16, false, "input", access);
+    assert((sc_time_stamp() - start) / period == 10);
+    // Another port has no bank history from the first port.
+    timing.transfer(32, 16, false, "weight", access);
+    assert((sc_time_stamp() - start) / period == 10);
+    // An idle port has already paid the interval.
+    wait(period * 10);
+    timing.transfer(0, 16, true, "input", access);
+    assert((sc_time_stamp() - start) / period == 20);
+    // A request that crosses a bank also obeys the interval.
+    timing.transfer(120, 32, false, "crossing", access);
+    assert((sc_time_stamp() - start) / period == 31);
+    // The waiting port must leave its target bank available to other ports.
+    ScratchpadTiming concurrent(c, period);
+    const auto concurrent_start = sc_time_stamp();
+    sc_time peer_done;
+    parallel({[&]() {
+                concurrent.transfer(0, 16, false, "switching", access);
+                concurrent.transfer(128, 16, false, "switching", access);
+              }, [&]() {
+                concurrent.transfer(144, 16, false, "peer", access);
+                peer_done = sc_time_stamp();
+              }});
+    assert(peer_done == concurrent_start);
+    assert((sc_time_stamp() - concurrent_start) / period == 9);
+    // A write port loses eight idle cycles after a bank change.
+    ScratchpadTiming writes(c, period);
+    const auto write_start = sc_time_stamp();
+    writes.transfer(0, 16, true, "output", access);
+    writes.transfer(128, 16, true, "output", access);
+    assert((sc_time_stamp() - write_start) / period == 9);
+    // A zero cost adds no idle cycles but retains request order.
+    auto disabled = config();
+    ScratchpadTiming no_cost(disabled, period);
+    const auto no_cost_start = sc_time_stamp();
+    no_cost.transfer(0, 16, false, "read", access);
+    no_cost.transfer(128, 16, false, "read", access);
+    assert((sc_time_stamp() - no_cost_start) / period == 1);
+    auto independent = config(false);
+    independent.bank_switch_cycles = 8;
+    ScratchpadTiming untimed(independent, period);
+    const auto before = sc_time_stamp();
+    untimed.transfer(0, 16, false, "input", access);
+    untimed.transfer(128, 16, true, "input", access);
+    assert(sc_time_stamp() == before);
+    std::cout << "PASS per-port bank switches, idle overlap, crossing, independent\n";
+  }
+
   void run() {
     bandwidth(true, false, true);
     bandwidth(false, false, true);
@@ -121,6 +179,7 @@ struct ScratchpadTimingTb : sc_module {
     bandwidth(false, true, true);
     bandwidth(true, true, false);
     boundaries_and_backpressure();
+    bank_switches();
     sc_stop();
   }
 };
@@ -170,6 +229,12 @@ int sc_main(int argc, char** argv) {
   setenv("SCRATCHPAD_MODEL", "independent", 1);
   assert(!ScratchpadConfig::load(path).banked);
   unsetenv("SCRATCHPAD_MODEL");
+  {
+    std::ofstream f(path, std::ios::app);
+    f << "bank_switch_cycles: 8\n";
+  }
+  c = ScratchpadConfig::load(path);
+  assert(c.bank_switch_cycles == 8);
   std::filesystem::remove(path);
   std::cout
       << "PASS config, missing geometry, conflicting override, legacy mode\n";
