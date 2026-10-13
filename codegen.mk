@@ -21,6 +21,9 @@ INT8_32_FLAGS := --activation int8,qs=per_tensor_symmetric --weight int8,qs=per_
 BLOCK_SIZE := $(shell [ $(IC_DIMENSION) -gt $(OC_DIMENSION) ] && echo $(IC_DIMENSION) || echo $(OC_DIMENSION))
 MXINT8_FLAGS := --activation int8,qs=microscaling,bs=$(BLOCK_SIZE),pot=1 --weight int8,qs=microscaling,bs=$(BLOCK_SIZE),pot=1 --bf16 --bank_width $(BYTE_BANK_WIDTH)
 MXNF4_FLAGS := --activation lut4_to_int6,qs=microscaling,bs=$(BLOCK_SIZE),scale=fp8_e5m3 --weight lut4_to_int6,qs=microscaling,bs=$(BLOCK_SIZE),scale=fp8_e5m3 --bf16 --residual fp8_e4m3 --quantize_fc --bank_width $(NIBBLE_BANK_WIDTH)
+BF16_FLAGS := --bank_width $(shell expr $(OC_DIMENSION) \* 2)
+FP32_FLAGS := --bank_width $(shell expr $(OC_DIMENSION) \* 4)
+CFLOAT_FLAGS := --bank_width $(shell expr $(OC_DIMENSION) \* 4)
 COMMON_FLAGS := --matrix_backend $(MATRIX_BACKEND) --layout_policy $(if $(filter 1,$(MATRIX_BACKEND)),cim,systolic) --pe_array_size $(IC_DIMENSION),$(OC_DIMENSION) --dump_tensors --double_buffered_l2 --scratchpad_size $(SCRATCHPAD_SIZE) --scratchpad_offset $(SCRATCHPAD_OFFSET) --num_banks $(NUM_BANKS) --input_buffer_size $(INPUT_BUFFER_SIZE) --weight_buffer_size $(WEIGHT_BUFFER_SIZE) --accum_buffer_size $(ACCUM_BUFFER_SIZE)
 EXTRA_COMPILER_FLAGS ?=
 
@@ -126,11 +129,11 @@ $(CODEGEN_DIR)/networks/mobilenet_v2/%/model.txt:
 ################################################################################
 $(CODEGEN_DIR)/networks/gesture/CFLOAT/model.txt:
 	mkdir -p $(dir $@)
-	python voyager-compiler/test/test_codegen.py gesture --model_name_or_path models/gesture/model.pth --model_output_dir $(dir $@) > $(dir $@)/codegen.log 2>&1
+	python voyager-compiler/test/test_codegen.py gesture --model_name_or_path models/gesture/model.pth --model_output_dir $(dir $@) $(CFLOAT_FLAGS) > $(dir $@)/codegen.log 2>&1
 
 ################################################################################
 # Layer Tests
 ################################################################################
 test/compiler/networks/layertest/CFLOAT/model.txt:
 	mkdir -p $(dir $@)
-	python voyager-compiler/test/test_codegen.py layertest --model_output_dir $(dir $@) > $(dir $@)/codegen.log 2>&1
+	python voyager-compiler/test/test_codegen.py layertest --model_output_dir $(dir $@) $(CFLOAT_FLAGS) > $(dir $@)/codegen.log 2>&1
