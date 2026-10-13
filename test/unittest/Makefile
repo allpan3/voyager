@@ -32,8 +32,10 @@ SYSTEMC_CXXFLAGS := -std=c++17 -O2 -MMD -MP -DENABLE_PERF_COUNTERS=$(ENABLE_PERF
 SYSTEMC_LDFLAGS := -L$(CATAPULT_ROOT)/shared/lib \
     -Wl,-rpath,$(CATAPULT_ROOT)/shared/lib -lsystemc -pthread
 
+# SRAM acceptance checks require unbuffered ready/valid ports.
 SYSTEMC_PROCESSOR_CXXFLAGS := $(filter-out -DIC_DIMENSION=4,$(SYSTEMC_CXXFLAGS)) \
-    -DIC_DIMENSION=8
+    -DIC_DIMENSION=8 -DCIM_LOCAL_ACCUM_CONTEXTS=4 \
+    -DFORCE_AUTO_PORT=Connections::SYN_PORT
 PROCESSOR_CASES := parallel serial banked
 PROCESSOR_FLAGS_parallel := -DCIM_PROCESSOR_TEST_MODE=0
 PROCESSOR_FLAGS_serial := -DCIM_PROCESSOR_TEST_MODE=1

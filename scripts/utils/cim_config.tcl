@@ -17,7 +17,7 @@ foreach {name value} {
   CIM_INPUT_AXIS_TILES 1
   CIM_OUTPUT_AXIS_TILES 1
   CIM_C_BEAT_LAYOUT 1
-  CIM_LOCAL_ACCUM_CONTEXTS 4
+  CIM_LOCAL_ACCUM_CONTEXTS 5
 } {
   if {![info exists $name]} { set $name $value }
 }

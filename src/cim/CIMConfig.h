@@ -83,7 +83,7 @@
 #endif
 
 #ifndef CIM_LOCAL_ACCUM_CONTEXTS
-#define CIM_LOCAL_ACCUM_CONTEXTS 4
+#define CIM_LOCAL_ACCUM_CONTEXTS 5
 #endif
 
 namespace cim {

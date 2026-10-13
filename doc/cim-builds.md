@@ -117,15 +117,14 @@ output lanes across the array.
 one logical weight row into multiple writes. The processor requires one
 complete reduced result in each output-major C beat (`CIM_C_BEAT_LAYOUT=1`).
 `CIM_ARRAY_RESULT_SLOTS` defaults to `CIM_INPUT_AXIS_TILES`, and
-`CIM_LOCAL_ACCUM_CONTEXTS` defaults to 4.
+`CIM_LOCAL_ACCUM_CONTEXTS` defaults to 5.
 
 `IC_PORT_WIDTH` and `OC_PORT_WIDTH` override the external memory port widths
 in bits. Leaving them unset retains the datatype's derived defaults.
 Non-MXNF4 builds warn when a width is implicit; their defaults use the full
 datatype width per lane. MXNF4 retains its four-bit-per-lane port defaults.
 `DOUBLE_BUFFERED_ACCUM_BUFFER` selects one or two accumulation SRAM banks.
-Use one bank for CIM. With two banks, CIM RTL does not yet give correct
-results for every schedule.
+CIM supports both accumulation buffering modes.
 
 ## HLS and RTL simulation
 
