@@ -257,6 +257,11 @@ struct Harness : public sc_module, public Backend {
 
   // Backend: run one accelerator operation on the DUT.
   void execute(const voyager::Operation& op, const ScalarEnv& env) override;
+  void execute_async_copy(const voyager::Operation& op,
+                          const voyager::PrimOp& prim, const ScalarEnv& env,
+                          MemoryInterface* memory) override;
+
+  void synchronize_memory() override;
 
   // Backend: asynchronous commits. The walk pushes a commit's params and moves
   // on -- the units' double-buffered controllers start fetching the next
@@ -280,6 +285,19 @@ struct Harness : public sc_module, public Backend {
   Model::Selection selection;
   MemoryInterface* memory;
   ScratchpadTiming scratchpad;
+  struct DmaCopy {
+    voyager::PrimOp prim;
+    ScalarEnv env;
+    uint64_t bytes = 0, sequence = 0;
+    bool has_post = false;
+    std::string post_node;
+    int64_t post_slot = 0, post_amount = 0;
+  };
+  std::deque<DmaCopy> dma_queue;
+  sc_event dma_pushed, dma_completed;
+  uint64_t dma_submitted = 0, dma_retired = 0, dma_bytes = 0;
+  double dma_busy_cycles = 0;
+  void run_dma();
   unsigned pending_memory_writes = 0;
   sc_event memory_writes_completed;
   AccessCounter* access_counter;
@@ -397,6 +415,7 @@ struct Harness : public sc_module, public Backend {
     const voyager::Operation* op_end = nullptr;
     sc_time start_time;
     bool has_post = false;
+    uint64_t dma_sequence = 0;
     std::string post_node;
     int64_t post_slot = 0;
     int64_t post_amount = 0;

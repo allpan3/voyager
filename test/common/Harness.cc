@@ -29,6 +29,7 @@ Harness::Harness(sc_module_name name, const Model& model,
                      (std::filesystem::path(model.data_dir).parent_path() /
                       "memory_config.txt").string()), clk.period()) {
   const auto& config = scratchpad.config;
+  config.dram.validate_clock(clk.period());
   std::cout << "ScratchpadTiming: mode=" << (config.banked ? "banked" : "independent")
             << " size_bytes=" << config.size << " banks=" << config.banks
             << " bank_word_bytes=" << config.word_bytes
@@ -36,7 +37,10 @@ Harness::Harness(sc_module_name name, const Model& model,
             << " bank_switch_cycles=" << config.bank_switch_cycles
             << " clock_ns=" << clk.period().to_seconds() * 1e9
             << " compiler_frequency_ghz=" << config.compiler_frequency_ghz
-            << " DMA=untimed source=" << config.source << std::endl;
+            << " DMA=" << (config.dram.timed ? "timed" : "untimed")
+            << " dram_bytes_per_cycle=" << config.dram.bytes_per_cycle
+            << " dram_access_latency_cycles=" << config.dram.access_latency_cycles
+            << " source=" << config.source << std::endl;
   accelerator.clk(clk);
   accelerator.rstn(rstn);
   accelerator.matrix_unit_params_in(matrix_unit_params_in);
@@ -150,6 +154,7 @@ Harness::Harness(sc_module_name name, const Model& model,
   REGISTER_FN(read_##NAME##_request); \
   REGISTER_FN(send_##NAME##_response);
 
+  REGISTER_FN(run_dma)
   REGISTER_IO_FN(matrix_unit_input)
   REGISTER_IO_FN(matrix_unit_weight)
   REGISTER_IO_FN(matrix_unit_bias)
@@ -610,6 +615,7 @@ void Harness::retire_dones() {
       // A done handshake and its final store can wake in either order.
       wait(SC_ZERO_TIME);
       while (pending_memory_writes) wait(memory_writes_completed);
+      while (dma_retired < group.dma_sequence) wait(dma_completed);
       post_semaphore(group.post_node, group.post_slot, group.post_amount);
     }
 
@@ -744,8 +750,67 @@ void Harness::matrix_performance_monitor() {
 #endif
 
 void Harness::drain() {
+  while (dma_retired < dma_submitted) wait(dma_completed);
   while (pending_groups > 0) wait(group_retired);
   while (pending_memory_writes) wait(memory_writes_completed);
+}
+
+void Harness::execute_async_copy(const voyager::Operation& op,
+                                  const voyager::PrimOp& prim,
+                                  const ScalarEnv& env,
+                                  MemoryInterface* copy_memory) {
+  if (!scratchpad.config.dram.timed) {
+    Backend::execute_async_copy(op, prim, env, copy_memory);
+    if (scratchpad.config.dram.present) {
+      dma_bytes += async_copy_dram_bytes(prim, env);
+      dma_retired = ++dma_submitted;
+    }
+    return;
+  }
+  DmaCopy copy;
+  copy.prim = prim;
+  copy.env = env;
+  copy.bytes = async_copy_dram_bytes(prim, env);
+  copy.sequence = ++dma_submitted;
+  const auto sem = prim.kwargs().find("semaphore");
+  copy.has_post = sem != prim.kwargs().end();
+  if (copy.has_post) {
+    const auto& ref = sem->second.tensor_box();
+    copy.post_node = ref.box().node();
+    copy.post_slot = resolve_bank(ref, env, prim.name());
+    copy.post_amount = has_arg(prim, "post_count")
+                           ? arg_int(prim, "post_count", env) : 1;
+  }
+  const auto sequence = copy.sequence;
+  const bool has_post = copy.has_post;
+  dma_queue.push_back(std::move(copy));
+  dma_pushed.notify(SC_ZERO_TIME);
+  // A copy without a completion semaphore has implicit sequential use.
+  if (!has_post)
+    while (dma_retired < sequence) wait(dma_completed);
+}
+
+void Harness::run_dma() {
+  wait();
+  while (true) {
+    while (dma_queue.empty()) wait(dma_pushed);
+    auto copy = std::move(dma_queue.front());
+    dma_queue.pop_front();
+    const double cycles = scratchpad.config.dram.cycles(copy.bytes);
+    if (cycles) wait(clk.period() * cycles);
+    // Keep the copy atomic. No data or semaphore credit is visible early.
+    run_async_copy(copy.prim, copy.env, memory);
+    if (copy.has_post)
+      post_semaphore(copy.post_node, copy.post_slot, copy.post_amount);
+    dma_bytes += copy.bytes;
+    dma_busy_cycles += cycles;
+    dma_retired = copy.sequence;
+    dma_completed.notify(SC_ZERO_TIME);
+  }
+}
+
+void Harness::synchronize_memory() {
+  if (scratchpad.config.dram.timed) drain();
 }
 
 void Harness::begin_commit() { in_commit = true; }
@@ -760,6 +825,7 @@ void Harness::end_commit(bool has_post, const std::string& post_node,
 
   InvocationGroup token;
   token.has_post = true;
+  token.dma_sequence = dma_submitted;
   token.post_node = post_node;
   token.post_slot = post_slot;
   token.post_amount = post_amount;
@@ -823,6 +889,11 @@ void Harness::run_walker() {
 
   const sc_time end = sc_time_stamp();
   scratchpad.report(std::cout);
+  if (scratchpad.config.dram.present)
+    std::cout << "DramTiming: copies=" << dma_retired
+              << " bytes=" << dma_bytes << " busy_cycles=" << dma_busy_cycles
+              << " mode=" << (scratchpad.config.dram.timed ? "timed" : "untimed")
+              << std::endl;
   std::cout << "Total Runtime: "
             << static_cast<long long>(end.to_default_time_units() -
                                       start.to_default_time_units())
