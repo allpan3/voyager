@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "test/compiler/proto/voyager_ir.pb.h"
+#include "test/common/DramTiming.h"
 
 // The allocator uses contiguous banks, not word-interleaved addresses.
 // scratchpad_offset reserves low addresses; it is not a bank-address origin.
@@ -21,6 +22,7 @@ struct ScratchpadConfig {
   bool banked = false;
   uint64_t size = 0, banks = 0, word_bytes = 0, reserved = 0;
   double compiler_frequency_ghz = 0;
+  DramTimingConfig dram;
   uint64_t bank_switch_cycles = 0;
   std::string source = "legacy independent streams (no memory_config.txt)";
 
@@ -58,6 +60,7 @@ struct ScratchpadConfig {
         throw std::runtime_error("Malformed scratchpad config: " + path);
       config.source = path;
       config.compiler_frequency_ghz = fields.frequency_ghz();
+      config.dram = DramTimingConfig::load(fields);
       config.bank_switch_cycles = fields.bank_switch_cycles();
     }
 

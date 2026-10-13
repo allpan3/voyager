@@ -546,6 +546,30 @@ int64_t resolve_bank(const voyager::TensorBoxRef& ref, const ScalarEnv& env,
 // Data movement
 // ===========================================================================
 
+uint64_t async_copy_dram_bytes(const voyager::PrimOp& prim,
+                               const ScalarEnv& env) {
+  const Tensor src = resolve(prim, "src", env);
+  const Tensor dst = resolve(prim, "dst", env);
+  if (src.partition != DRAM_PARTITION && dst.partition != DRAM_PARTITION)
+    return 0;
+  const auto sizes = arg_int64s(prim, "sizes", env);
+  const auto count = arg_int64s(prim, "count", env);
+  const bool transposed = has_arg(prim, "transposed") &&
+                          arg_bool(prim, "transposed", env);
+  const auto& extent = transposed || count.empty() ? sizes : count;
+  uint64_t elements = 1;
+  for (const auto n : extent) {
+    if (n < 0) throw std::runtime_error("Negative async_copy extent");
+    if (n && elements > UINT64_MAX / static_cast<uint64_t>(n))
+      throw std::runtime_error("async_copy extent overflow");
+    elements *= n;
+  }
+  const auto width = get_width(src.partition == DRAM_PARTITION ? src : dst);
+  if (elements > (UINT64_MAX - 7) / width)
+    throw std::runtime_error("async_copy byte count overflow");
+  return (elements * width + 7) / 8;
+}
+
 void run_async_copy(const voyager::PrimOp& prim, const ScalarEnv& env,
                     MemoryInterface* memory) {
   const std::string& name = prim.name();
