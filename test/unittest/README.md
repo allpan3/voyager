@@ -26,6 +26,9 @@ fast SystemC; the targets select `CONNECTIONS_FAST_SIM` for that build only.
   bit-serial macros and double-buffered accumulation. They check resident-set
   replay and ring refills, bias and IC/FX/FY reductions, local-context reuse,
   SRAM fallback, independent read/write progress, and output backpressure.
+  Processor ports use explicit ready/valid handshakes. The SRAM reader and
+  writer run independently. A C+1 interleave test holds the first spill write
+  for 400 cycles. Another test holds the first of sixteen outputs for 800 cycles.
 - `test-systemc-matrix`: both matrix backends run against an independent
   signed-integer GEMM/convolution calculation. They use the actual controllers,
   parameter deserializer, and SRAMs. Three CIM 8x2 builds cover bit-parallel and bit-serial macros,

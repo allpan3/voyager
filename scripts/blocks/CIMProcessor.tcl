@@ -24,3 +24,14 @@ proc pre_architect {} {
   set local_context_path "/$full_block_name_stripped/$full_block_name_stripped:complete_accumulation/complete_accumulation/local_accum_context_values.value.int_val:rsc"
   directive set $local_context_path -MAP_TO_MODULE {[Register]}
 }
+
+proc pre_extract {} {
+  global DOUBLE_BUFFERED_ACCUM_BUFFER
+  # The writer releases each bank after its final store.
+  if {$DOUBLE_BUFFERED_ACCUM_BUFFER == true} {
+    cycle set accumulation_buffer_done.sync_out() -from accumulation_buffer_write_request.Push() -equal 1
+    cycle set accumulation_buffer_done.sync_out()#1 -from accumulation_buffer_write_request.Push()#1 -equal 1
+    cycle set accum_to_wb_enq.Push() -from accumulation_buffer_write_request.Push() -min 1
+    cycle set accum_to_wb_enq.Push() -from accumulation_buffer_write_request.Push()#1 -min 1
+  }
+}

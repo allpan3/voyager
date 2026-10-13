@@ -115,10 +115,12 @@ SC_MODULE(CIMProcessorTb) {
   std::vector<int> read_addresses[Processor::ACCUM_BUFFER_BANKS];
   std::vector<int> write_addresses[Processor::ACCUM_BUFFER_BANKS];
   unsigned long buffer_cycle;
-  bool independent_read_probe = false;
-  bool independent_read_seen = false;
-  int independent_probe_writes_begin = 0;
-  unsigned long independent_probe_hold_begin = 0;
+  bool write_backpressure_probe = false;
+  bool delayed_write_probe = false;
+  unsigned long delayed_write_release_cycle = 0;
+  bool probe_read_seen = false;
+  int probe_writes_begin = 0;
+  unsigned long probe_hold_begin = 0;
 
   std::deque<ExpectedOutput> expected_outputs;
   std::deque<BufferVector> pending_biases;
@@ -208,6 +210,16 @@ SC_MODULE(CIMProcessorTb) {
 
     SC_THREAD(run_accumulation_buffer);
     sensitive << clk.posedge_event();
+    SC_THREAD(run_accumulation_writer_0);
+    sensitive << clk.posedge_event();
+    SC_THREAD(track_buffer_cycle);
+    sensitive << clk.posedge_event();
+#if DOUBLE_BUFFERED_ACCUM_BUFFER
+    SC_THREAD(run_accumulation_reader_1);
+    sensitive << clk.posedge_event();
+    SC_THREAD(run_accumulation_writer_1);
+    sensitive << clk.posedge_event();
+#endif
 
 #if DOUBLE_BUFFERED_ACCUM_BUFFER
     SC_THREAD(consume_done_0);
@@ -553,7 +565,8 @@ SC_MODULE(CIMProcessorTb) {
   // Check register reuse and excess-row spills with independent arithmetic and
   // address traces
   void check_context_rows(int rows, int contributions, bool interleaved,
-                          bool banked, int bank, int reduction = 0) {
+                          bool banked, int bank, int reduction = 0,
+                          int output_stall = 25) {
     MatrixParams params = make_base_params();
     const int reduction_position = interleaved ? 4 : 5;
     params.x_loop_idx[1] = interleaved ? 5 : 4;
@@ -597,7 +610,7 @@ SC_MODULE(CIMProcessorTb) {
     if (!banked) {
       for (int row = 0; row < rows; row++) {
         expect_output("reusable context row " + std::to_string(row),
-                      expected[row], 25);
+                      expected[row], row == 0 ? output_stall : 0);
       }
     }
     send_job(params, weights, loads,
@@ -632,37 +645,37 @@ SC_MODULE(CIMProcessorTb) {
               << " final_writes=" << (banked ? rows : 0) << std::endl;
   }
 
-  // Hold one spill write until a later spill reads its committed partial sum
-  void check_independent_sram_read() {
-    independent_read_probe = true;
-    independent_read_seen = false;
-    independent_probe_writes_begin = write_count[0];
-    independent_probe_hold_begin = 0;
+  // Hold one spill write until an unrelated read makes progress.
+  void check_sram_write_backpressure() {
+    write_backpressure_probe = true;
+    probe_read_seen = false;
+    probe_writes_begin = write_count[0];
+    probe_hold_begin = 0;
     check_context_rows(CIM_LOCAL_ACCUM_CONTEXTS + 3, 3, true, false, 0);
-    independent_read_probe = false;
-    require(independent_read_seen,
-            "independent SRAM read waited for an unrelated write");
-    if (independent_read_seen) {
-      std::cout << "[PASS] cim_processor_independent_sram_read" << std::endl;
+    write_backpressure_probe = false;
+    require(probe_read_seen,
+            "SRAM read did not complete after write backpressure");
+    if (probe_read_seen) {
+      std::cout << "[PASS] cim_processor_sram_write_backpressure" << std::endl;
     }
   }
 
-  // Release a deliberately stalled write only after the unrelated read
-  // progresses
-  bool hold_independent_probe_write() {
-    if (!independent_read_probe || independent_read_seen ||
-        write_count[0] < independent_probe_writes_begin + 3) {
+  // A later independent read releases this stalled write.
+  bool hold_probe_write() {
+    if (delayed_write_probe && buffer_cycle < delayed_write_release_cycle)
+      return true;
+    if (!write_backpressure_probe || probe_read_seen ||
+        write_count[0] < probe_writes_begin + 3) {
       return false;
     }
-    if (independent_probe_hold_begin == 0) {
-      independent_probe_hold_begin = buffer_cycle;
+    if (probe_hold_begin == 0) {
+      probe_hold_begin = buffer_cycle;
     }
-    if (buffer_cycle - independent_probe_hold_begin < 1000) {
+    if (buffer_cycle - probe_hold_begin < 1000) {
       return true;
     }
-    require(false,
-            "unrelated SRAM write blocked read progress for 1000 cycles");
-    independent_read_probe = false;
+    require(false, "unrelated SRAM write blocked read progress for 1000 cycles");
+    write_backpressure_probe = false;
     return false;
   }
 
@@ -855,19 +868,11 @@ SC_MODULE(CIMProcessorTb) {
       pending_read_ready_cycle[0] = buffer_cycle + 2;
       read_addresses[0].push_back(address.to_int());
       read_count[0]++;
-      if (independent_read_probe && address == CIM_LOCAL_ACCUM_CONTEXTS + 2) {
-        independent_read_seen = true;
+      if (write_backpressure_probe && address == CIM_LOCAL_ACCUM_CONTEXTS + 1) {
+        probe_read_seen = true;
       }
     }
 
-    WriteRequest write;
-    if (!hold_independent_probe_write() && buffer_cycle % 4 == 0 &&
-        accumulation_write_request_0.PopNB(write)) {
-      accumulation_memory[0][write.address.to_int()] = write.data;
-      last_write_completion_cycle[0][write.address.to_int()] = buffer_cycle + 1;
-      write_addresses[0].push_back(write.address.to_int());
-      write_count[0]++;
-    }
   }
 
 #if DOUBLE_BUFFERED_ACCUM_BUFFER
@@ -896,37 +901,71 @@ SC_MODULE(CIMProcessorTb) {
       read_count[1]++;
     }
 
-    WriteRequest write;
-    if (buffer_cycle % 4 == 1 && accumulation_write_request_1.PopNB(write)) {
-      accumulation_memory[1][write.address.to_int()] = write.data;
-      last_write_completion_cycle[1][write.address.to_int()] = buffer_cycle + 1;
-      write_addresses[1].push_back(write.address.to_int());
-      write_count[1]++;
-    }
   }
 #endif
 
-  // Emulate MatrixUnit's persistent accumulation memory and ready/valid ports
-  void run_accumulation_buffer() {
-    accumulation_read_address_0.ResetRead();
-    accumulation_read_data_0.ResetWrite();
+  void run_accumulation_writer_0() {
     accumulation_write_request_0.ResetRead();
-#if DOUBLE_BUFFERED_ACCUM_BUFFER
-    accumulation_read_address_1.ResetRead();
-    accumulation_read_data_1.ResetWrite();
-    accumulation_write_request_1.ResetRead();
-#endif
     wait();
-
     while (true) {
-      service_bank_0();
-#if DOUBLE_BUFFERED_ACCUM_BUFFER
-      service_bank_1();
-#endif
-      buffer_cycle++;
+      WriteRequest write;
+      if (!hold_probe_write() && buffer_cycle % 4 == 0 &&
+          accumulation_write_request_0.PopNB(write)) {
+        accumulation_memory[0][write.address.to_int()] = write.data;
+        last_write_completion_cycle[0][write.address.to_int()] = buffer_cycle + 1;
+        write_addresses[0].push_back(write.address.to_int());
+        write_count[0]++;
+      }
       wait();
     }
   }
+
+#if DOUBLE_BUFFERED_ACCUM_BUFFER
+  void run_accumulation_writer_1() {
+    accumulation_write_request_1.ResetRead();
+    wait();
+    while (true) {
+      WriteRequest write;
+      if (buffer_cycle % 4 == 1 && accumulation_write_request_1.PopNB(write)) {
+        accumulation_memory[1][write.address.to_int()] = write.data;
+        last_write_completion_cycle[1][write.address.to_int()] = buffer_cycle + 1;
+        write_addresses[1].push_back(write.address.to_int());
+        write_count[1]++;
+      }
+      wait();
+    }
+  }
+#endif
+
+  // Each SRAM port advances independently, including under response stalls.
+  void track_buffer_cycle() {
+    while (true) {
+      wait();
+      buffer_cycle++;
+    }
+  }
+
+  void run_accumulation_buffer() {
+    accumulation_read_address_0.ResetRead();
+    accumulation_read_data_0.ResetWrite();
+    wait();
+    while (true) {
+      service_bank_0();
+      wait();
+    }
+  }
+
+#if DOUBLE_BUFFERED_ACCUM_BUFFER
+  void run_accumulation_reader_1() {
+    accumulation_read_address_1.ResetRead();
+    accumulation_read_data_1.ResetWrite();
+    wait();
+    while (true) {
+      service_bank_1();
+      wait();
+    }
+  }
+#endif
 
 #if DOUBLE_BUFFERED_ACCUM_BUFFER
   // Consume the bank-0 completion handshake
@@ -1044,7 +1083,19 @@ SC_MODULE(CIMProcessorTb) {
     check_context_rows(CIM_LOCAL_ACCUM_CONTEXTS + 1, 3, true, false, 0);
     check_context_rows(3, 3, false, false, 0, 1);
     check_context_rows(3, 3, false, false, 0, 2);
-    check_independent_sram_read();
+    // Five interleaved outputs exceed the four register contexts. Delaying
+    // the first spill exposes an issuer that can pass its pending store.
+    delayed_write_probe = true;
+    delayed_write_release_cycle = buffer_cycle + 400;
+    check_context_rows(CIM_LOCAL_ACCUM_CONTEXTS + 1, 4, true, false, 0);
+    delayed_write_probe = false;
+    std::cout << "[PASS] cim_processor_short_spacing_write_backpressure"
+              << std::endl;
+    check_sram_write_backpressure();
+    // Sixteen rows fill the eight-entry output FIFO while SRAM reductions
+    // remain in flight. The consumer then releases the finite pause.
+    check_context_rows(16, 4, true, false, 0, 0, 800);
+    std::cout << "[PASS] cim_processor_sram_output_backpressure" << std::endl;
 #if DOUBLE_BUFFERED_ACCUM_BUFFER
     check_context_rows(3, 3, false, true, 0);
     check_context_rows(3, 3, true, true, 1);
