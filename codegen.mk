@@ -8,19 +8,23 @@ SCRATCHPAD_SIZE ?= 2097152
 SCRATCHPAD_OFFSET ?= 0
 NUM_BANKS ?= 16
 
-# One input beat in bytes: the PE array's column count times the activation
-# element size. The store bus writes that word whole, so the memory planner
-# aligns allocations to it and reserves the tail a sub-word beat overshoots by.
-BYTE_BANK_WIDTH := $(OC_DIMENSION)
-NIBBLE_BANK_WIDTH := $(shell expr $(OC_DIMENSION) / 2)
+# Bank words are in bytes. The accelerator port width is in bits and can
+# differ from the bank. Default banks match the datatype's hardware port.
+BYTE_BANK_WIDTH := $(if $(strip $(BANK_WIDTH)),$(BANK_WIDTH),$(OC_DIMENSION))
+NIBBLE_BANK_WIDTH := $(if $(strip $(BANK_WIDTH)),$(BANK_WIDTH),$(shell expr $(OC_DIMENSION) / 2))
+# The argument is the hardware datatype's default number of bits per lane.
+OC_PORT_FLAGS = --oc_port_width $(if $(strip $(OC_PORT_WIDTH)),$(OC_PORT_WIDTH),$(shell expr $(OC_DIMENSION) \* $(1)))
 
-E4M3_FLAGS := --activation fp8_e4m3 --weight fp8_e4m3 --bf16 --bank_width $(BYTE_BANK_WIDTH)
-P8_1_FLAGS := --activation posit8_1 --weight posit8_1 --bf16 --bank_width $(BYTE_BANK_WIDTH)
-INT8_FLAGS := --activation int8,qs=per_tensor_symmetric --weight int8,qs=per_tensor_symmetric --bias int24 --bf16 --calibration_steps 3 --bank_width $(BYTE_BANK_WIDTH)
-INT8_32_FLAGS := --activation int8,qs=per_tensor_symmetric --weight int8,qs=per_tensor_symmetric --bias int32 --bf16 --calibration_steps 3 --bank_width $(BYTE_BANK_WIDTH)
+E4M3_FLAGS := --activation fp8_e4m3 --weight fp8_e4m3 --bf16 --bank_width $(BYTE_BANK_WIDTH) $(call OC_PORT_FLAGS,8)
+P8_1_FLAGS := --activation posit8_1 --weight posit8_1 --bf16 --bank_width $(BYTE_BANK_WIDTH) $(call OC_PORT_FLAGS,8)
+INT8_FLAGS := --activation int8,qs=per_tensor_symmetric --weight int8,qs=per_tensor_symmetric --bias int24 --bf16 --calibration_steps 3 --bank_width $(BYTE_BANK_WIDTH) $(call OC_PORT_FLAGS,8)
+INT8_32_FLAGS := --activation int8,qs=per_tensor_symmetric --weight int8,qs=per_tensor_symmetric --bias int32 --bf16 --calibration_steps 3 --bank_width $(BYTE_BANK_WIDTH) $(call OC_PORT_FLAGS,8)
 BLOCK_SIZE := $(shell [ $(IC_DIMENSION) -gt $(OC_DIMENSION) ] && echo $(IC_DIMENSION) || echo $(OC_DIMENSION))
-MXINT8_FLAGS := --activation int8,qs=microscaling,bs=$(BLOCK_SIZE),pot=1 --weight int8,qs=microscaling,bs=$(BLOCK_SIZE),pot=1 --bf16 --bank_width $(BYTE_BANK_WIDTH)
-MXNF4_FLAGS := --activation lut4_to_int6,qs=microscaling,bs=$(BLOCK_SIZE),scale=fp8_e5m3 --weight lut4_to_int6,qs=microscaling,bs=$(BLOCK_SIZE),scale=fp8_e5m3 --bf16 --residual fp8_e4m3 --quantize_fc --bank_width $(NIBBLE_BANK_WIDTH)
+MXINT8_FLAGS := --activation int8,qs=microscaling,bs=$(BLOCK_SIZE),pot=1 --weight int8,qs=microscaling,bs=$(BLOCK_SIZE),pot=1 --bf16 --bank_width $(BYTE_BANK_WIDTH) $(call OC_PORT_FLAGS,8)
+MXNF4_FLAGS := --activation lut4_to_int6,qs=microscaling,bs=$(BLOCK_SIZE),scale=fp8_e5m3 --weight lut4_to_int6,qs=microscaling,bs=$(BLOCK_SIZE),scale=fp8_e5m3 --bf16 --residual fp8_e4m3 --quantize_fc --bank_width $(NIBBLE_BANK_WIDTH) $(call OC_PORT_FLAGS,4)
+BF16_FLAGS := $(call OC_PORT_FLAGS,16)
+FP32_FLAGS := $(call OC_PORT_FLAGS,32)
+CFLOAT_FLAGS := $(call OC_PORT_FLAGS,32)
 COMMON_FLAGS := --matrix_backend $(MATRIX_BACKEND) --layout_policy $(if $(filter 1,$(MATRIX_BACKEND)),cim,systolic) --pe_array_size $(IC_DIMENSION),$(OC_DIMENSION) --dump_tensors --double_buffered_l2 --scratchpad_size $(SCRATCHPAD_SIZE) --scratchpad_offset $(SCRATCHPAD_OFFSET) --num_banks $(NUM_BANKS) --input_buffer_size $(INPUT_BUFFER_SIZE) --weight_buffer_size $(WEIGHT_BUFFER_SIZE) --accum_buffer_size $(ACCUM_BUFFER_SIZE)
 EXTRA_COMPILER_FLAGS ?=
 
@@ -126,11 +130,11 @@ $(CODEGEN_DIR)/networks/mobilenet_v2/%/model.txt:
 ################################################################################
 $(CODEGEN_DIR)/networks/gesture/CFLOAT/model.txt:
 	mkdir -p $(dir $@)
-	python voyager-compiler/test/test_codegen.py gesture --model_name_or_path models/gesture/model.pth --model_output_dir $(dir $@) > $(dir $@)/codegen.log 2>&1
+	python voyager-compiler/test/test_codegen.py gesture --model_name_or_path models/gesture/model.pth --model_output_dir $(dir $@) $(CFLOAT_FLAGS) > $(dir $@)/codegen.log 2>&1
 
 ################################################################################
 # Layer Tests
 ################################################################################
 test/compiler/networks/layertest/CFLOAT/model.txt:
 	mkdir -p $(dir $@)
-	python voyager-compiler/test/test_codegen.py layertest --model_output_dir $(dir $@) > $(dir $@)/codegen.log 2>&1
+	python voyager-compiler/test/test_codegen.py layertest --model_output_dir $(dir $@) $(CFLOAT_FLAGS) > $(dir $@)/codegen.log 2>&1
