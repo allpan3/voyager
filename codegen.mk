@@ -27,6 +27,10 @@ FP32_FLAGS := $(call OC_PORT_FLAGS,32)
 CFLOAT_FLAGS := $(call OC_PORT_FLAGS,32)
 COMMON_FLAGS := --matrix_backend $(MATRIX_BACKEND) --layout_policy $(if $(filter 1,$(MATRIX_BACKEND)),cim,systolic) --pe_array_size $(IC_DIMENSION),$(OC_DIMENSION) --dump_tensors --double_buffered_l2 --scratchpad_size $(SCRATCHPAD_SIZE) --scratchpad_offset $(SCRATCHPAD_OFFSET) --num_banks $(NUM_BANKS) --input_buffer_size $(INPUT_BUFFER_SIZE) --weight_buffer_size $(WEIGHT_BUFFER_SIZE) --accum_buffer_size $(ACCUM_BUFFER_SIZE)
 EXTRA_COMPILER_FLAGS ?=
+# Choose a recorded timing file explicitly. The compiler checks its contents.
+TIMING_PROFILE ?=
+TIMING_FLAGS = $(if $(strip $(TIMING_PROFILE)),--timing_profile "$(TIMING_PROFILE)")
+COMMON_FLAGS += $(TIMING_FLAGS)
 
 ifeq ($(MATRIX_BACKEND),1)
 # Forward the selected hardware values to the compiler's AcceleratorConfig.
@@ -130,11 +134,11 @@ $(CODEGEN_DIR)/networks/mobilenet_v2/%/model.txt:
 ################################################################################
 $(CODEGEN_DIR)/networks/gesture/CFLOAT/model.txt:
 	mkdir -p $(dir $@)
-	python voyager-compiler/test/test_codegen.py gesture --model_name_or_path models/gesture/model.pth --model_output_dir $(dir $@) $(CFLOAT_FLAGS) > $(dir $@)/codegen.log 2>&1
+	python voyager-compiler/test/test_codegen.py gesture --model_name_or_path models/gesture/model.pth --model_output_dir $(dir $@) $(CFLOAT_FLAGS) $(TIMING_FLAGS) > $(dir $@)/codegen.log 2>&1
 
 ################################################################################
 # Layer Tests
 ################################################################################
 test/compiler/networks/layertest/CFLOAT/model.txt:
 	mkdir -p $(dir $@)
-	python voyager-compiler/test/test_codegen.py layertest --model_output_dir $(dir $@) $(CFLOAT_FLAGS) > $(dir $@)/codegen.log 2>&1
+	python voyager-compiler/test/test_codegen.py layertest --model_output_dir $(dir $@) $(CFLOAT_FLAGS) $(TIMING_FLAGS) > $(dir $@)/codegen.log 2>&1
