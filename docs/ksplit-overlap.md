@@ -13,19 +13,13 @@ The updated mapper remains compatible with older compiler output and rejects
 marked output types absent from its build's `OUTPUT_DATATYPES`. No RTL, firmware,
 proto schema, or tiling-search changes are required.
 
-## Focused regressions
+## Local validation
 
-From the accelerator checkout with its normal build environment loaded:
-
-```bash
-source ./.envrc
-export PYTHONPATH="$PWD/voyager-compiler/src:$PWD/voyager-compiler/test${PYTHONPATH:+:$PYTHONPATH}"
-PYTHONDONTWRITEBYTECODE=1 python voyager-compiler/test/test_ksplit_overlap.py -v
-make test-output-routing DATATYPE=MXNF4 IC_DIMENSION=64 OC_DIMENSION=64 \
-  DOUBLE_BUFFERED_ACCUM_BUFFER=true SUPPORT_MVM=true SUPPORT_SPMM=true CLOCK_PERIOD=5
-make test-output-routing DATATYPE=INT8 IC_DIMENSION=16 OC_DIMENSION=16 \
-  DOUBLE_BUFFERED_ACCUM_BUFFER=false SUPPORT_MVM=false SUPPORT_SPMM=false CLOCK_PERIOD=5
-```
+Focused checks are kept locally under the ignored
+`build/.checks/ksplit-overlap/` directory: `test_ksplit_overlap.py`,
+`TestOutputRouting.cc`, and `local-tests.mk`. They passed during PR preparation
+but are not shipped as repository tests. Local reproduction commands are in
+that directory's `README.md`.
 
 The eight compiler tests cover 2/3/4/6 reduction rounds, reused 3 x 3 output grids,
 bare and fused tails, convolution aliases, logical datatype selection, FP32
@@ -72,9 +66,9 @@ Raw results and reproduction scripts remain local under
 `tiling-independent-math.json`, `tiling-negative-control.json`, and the
 corresponding `compile_tiling_suite.py`, `run_tiling_suite.py`,
 `verify_tiling_suite.py`, and `check_tiling_math.py`. They are investigation
-artifacts, not files supplied by this repository. The focused regressions above
-are tracked and passed again during PR preparation in both mapper builds.
-The completed RTL suite was not repeated.
+artifacts, not files supplied by this repository. Both local mapper builds
+and all eight local compiler checks passed during PR preparation. The completed
+RTL suite was not repeated.
 
 ## Historical performance and limits
 

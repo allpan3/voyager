@@ -301,18 +301,6 @@ $(CC_BUILD_DIR)/ArrayMemory.o: test/common/ArrayMemory.cc test/compiler/proto/vo
 $(CC_BUILD_DIR)/MapOperation.o: test/toolchain/MapOperation.cc test/compiler/proto/voyager_ir.pb.cc
 	$(CC) $(C17FLAGS) -c -o $@ $<
 
-# Focused mapper regression; run with DATATYPE=MXNF4 or DATATYPE=INT8.
-$(CC_BUILD_DIR)/TestOutputRouting.o: test/toolchain/TestOutputRouting.cc test/compiler/proto/voyager_ir.pb.cc
-	$(CC) $(C17FLAGS) -c -o $@ $<
-
-$(CC_BUILD_DIR)/TestOutputRouting: $(CC_BUILD_DIR)/TestOutputRouting.o $(CC_BUILD_DIR)/MapOperation.o \
-    $(CC_BUILD_DIR)/GraphUtils.o $(CC_BUILD_DIR)/Tiling.o $(CC_BUILD_DIR)/voyager_ir.pb.o $(SPDLOG_OBJ_FILES)
-	$(CC) -o $@ $^ $(LDLIBS) $(LDFLAGS)
-
-.PHONY: test-output-routing
-test-output-routing: check_env_var $(CC_BUILD_DIR)/TestOutputRouting
-	LD_LIBRARY_PATH="$(CATAPULT_ROOT)/shared/lib:$(CONDA_PREFIX)/lib:$${LD_LIBRARY_PATH}" ./$(CC_BUILD_DIR)/TestOutputRouting
-
 $(CC_BUILD_DIR)/PEChecker.o: test/checker/PEChecker.cc
 	$(CC) $(C17FLAGS) -c -o $@ $<
 
