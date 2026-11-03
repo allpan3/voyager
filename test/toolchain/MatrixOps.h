@@ -599,9 +599,19 @@ void map_matrix_operation(const voyager::Operation& operation,
     }
   }
 
-  // If there are no vector operations, we don't need to setup the vector
-  // instruction config
-  if (!is_dwc && !is_fc && !has_fused_spmm(matrix_op) && op_list.size() == 1) {
+  // A K-split first partial can use the vector output so the next
+  // vector read waits for it while the next matrix pass overlaps the drain.
+  const bool output_via_vector = has_arg(matrix_op, "output_via_vector") &&
+                                 arg_bool(matrix_op, "output_via_vector", env);
+  if (output_via_vector &&
+      get_index_from_type_name<OUTPUT_DATATYPES>(output.dtype) < 0) {
+    throw std::runtime_error("Vector output does not support " + output.dtype +
+                             " for " + matrix_op.name());
+  }
+
+  // Bare matrix outputs otherwise retain their direct memory path.
+  if (!is_dwc && !is_fc && !has_fused_spmm(matrix_op) && op_list.size() == 1 &&
+      !output_via_vector) {
     matrix_params->output_to_memory = true;
     matrix_params->output_offset = get_address(output);
     matrix_params->output_dtype =

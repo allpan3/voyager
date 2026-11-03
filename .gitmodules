@@ -9,7 +9,7 @@
 	url = https://github.com/gabime/spdlog.git
 [submodule "voyager-compiler"]
 	path = voyager-compiler
-	url = https://github.com/jeffreyyu0602/voyager-compiler.git
+	url = https://github.com/allpan3/voyager-compiler.git
 [submodule "physical-design"]
 	path = physical-design
 	url = git@code.stanford.edu:voyager/physical-design.git
