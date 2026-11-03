@@ -599,8 +599,13 @@ void map_matrix_operation(const voyager::Operation& operation,
     }
   }
 
-  // A K-split first partial can use the vector output so the next
-  // vector read waits for it while the next matrix pass overlaps the drain.
+  // Work around the missing dependency from a direct matrix write to a
+  // vector read.
+  // Route each output tile's bare first K-split partial through the existing
+  // vector path, with no arithmetic or extra scratchpad copy. Its completion
+  // gates the next round's vector fetch while that round's matrix work can
+  // start early. Later rounds already use the vector unit for accumulation.
+  // This reuses the vector start gate; it adds no write-acknowledgement fence.
   const bool output_via_vector = has_arg(matrix_op, "output_via_vector") &&
                                  arg_bool(matrix_op, "output_via_vector", env);
   if (output_via_vector &&
