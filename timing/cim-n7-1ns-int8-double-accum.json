@@ -1,8 +1,8 @@
 {
   "name": "cim-n7-1ns-int8-double-accum",
   "accelerator": {
-    "kernel_launch_overhead_cycles": null,
-    "spmm_row_cycles": null,
+    "kernel_launch_overhead_cycles": 96,
+    "spmm_row_cycles": 8,
     "cim": {
       "accumulation_feedback_cycles": null,
       "output_bank_drain_cycles": 11,
@@ -15,12 +15,12 @@
   },
   "evidence": {
     "accelerator.kernel_launch_overhead_cycles": {
-      "status": "unknown",
-      "source": "Standalone vector launch, instruction dispatch and pipeline startup have not been separately characterized for this build."
+      "status": "reference",
+      "source": "Reference measurement from the existing compiler: vector parameter dispatch, instruction issue and pipeline fill/drain per pass on Sphinx. Reused without a separate measurement for this build."
     },
     "accelerator.spmm_row_cycles": {
-      "status": "unknown",
-      "source": "Sparse-row control is not characterized; the recorded hardware disables the sparse matrix unit."
+      "status": "reference",
+      "source": "Reference measurement from the existing compiler: sparse accumulator turnaround per row on Sphinx, rounded to eight cycles. Used when the sparse path is enabled; not separately characterized for this build."
     },
     "soc.bank_switch_cycles": {
       "status": "measured",

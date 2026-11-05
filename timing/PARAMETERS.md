@@ -3,6 +3,8 @@
 The [CIM timing profile](cim-n7-1ns-int8-double-accum.json)
 supplies timing inputs to the compiler's timing model. Numeric values are
 in cycles; `null` means unknown. These fields describe hardware behavior.
+Inherited reference measurements are explicitly labeled; they are not fresh
+measurements of each build.
 The bank-switch cost also configures the simulation harness.
 
 The profile covers N7, 1 ns, INT8 builds with 2 or 18 CIM weight sets.
@@ -17,8 +19,8 @@ These fields are under `accelerator`.
 
 | Parameter | Value | Role | Hardware path and evidence |
 | --- | --- | --- | --- |
-| `kernel_launch_overhead_cycles` | `null` | Uncharacterized standalone vector startup. The former aggregate reference allowance is not a measurement for this build. | [VectorUnit::send_instructions](../src/vector_unit/main.h#L300), [output completion](../src/vector_unit/OutputController.h#L574), and [SoC launch/completion control](../soc/src/main/scala/Voyager.scala#L726). No isolated build measurement. |
-| `spmm_row_cycles` | `null` | Uncharacterized sparse-row turnaround. Weight-gather traffic is counted separately. | [SpMMUnit::run_accumulation](../src/SpMMUnit.h#L1059) and [send_outputs](../src/SpMMUnit.h#L1165). The recorded builds disable SpMM. |
+| `kernel_launch_overhead_cycles` | 96 | Existing compiler reference for parameter dispatch, instruction issue and pipeline fill/drain per standalone vector pass. | [VectorUnit::send_instructions](../src/vector_unit/main.h#L300), [output completion](../src/vector_unit/OutputController.h#L574), and [SoC launch/completion control](../soc/src/main/scala/Voyager.scala#L726). Inherited Sphinx measurement; no separate measurement for this build. |
+| `spmm_row_cycles` | 8 | Existing compiler reference for sparse-row turnaround. Weight-gather traffic is counted separately. | [SpMMUnit::run_accumulation](../src/SpMMUnit.h#L1059) and [send_outputs](../src/SpMMUnit.h#L1165). Inherited Sphinx measurement of 7.3–7.5 cycles, rounded to 8. The recorded builds disable SpMM. |
 
 The compiler derives the eight-vector output FIFO, payload beat count and
 reduction-completion sequence in code. The former `sa_output_slack_cycles: 24`
@@ -42,21 +44,19 @@ Each stage has a capacity in complete vectors and an unstalled forward delay:
 | Store controller | 2 | 3 |
 
 The store delay ends at its first beat. The compiler calculates extra beats
-from output width and port width. `vector_start_cycles: 5` is start acceptance
-to processing the first prefetched router input; `vector_done_cycles: 3` is
-last store acceptance to done. The next start requires that done handshake.
-The same record describes writeback control and direct matrix stores:
+from output width and port width. `direct_store_forward_cycles: 2` measures
+from a direct-output FIFO dequeue to its first accepted memory beat. This
+per-vector interval places recurring stores relative to shared-bank reads.
 
-| Parameter | Cycles | Measured interval |
-| --- | ---: | --- |
-| `writeback_restart_cycles` | 16 | Last final-output enqueue to the earliest next-command input handshake, including loop drain and setup. |
-| `writeback_forward_cycles` | 2 | Writeback input to final-output enqueue without backpressure. |
-| `direct_store_forward_cycles` | 2 | Direct-output FIFO dequeue to first accepted memory beat. |
-| `direct_done_cycles` | 2 | Last accepted direct-store beat to matrix done. |
+`writeback_restart_cycles: 18` is the minimum gap from one command's last
+output enqueue to the next command's first output enqueue. It combines the
+16-cycle controller restart and 2-cycle forwarding measurements in one record.
+The scheduler applies this repeated constraint alongside data readiness, so
+input/DMA waits can overlap it. It is not added unconditionally to every tile.
 
-These are fixed build characteristics. The scheduler uses restart as a
-readiness constraint. It calculates reduction work, queue occupancy, memory
-beats and command waits from the mapping and compiler overlap window.
+The scheduler omits small parameter-forwarding, vector-start and completion
+delays. It approximates completion at the final accepted store beat, while
+retaining command ordering, DMA completion and output-slot ownership constraints.
 
 The record covers the 64×64 INT8/INT24, BF16 vector, 512-bit-port,
 single-accumulation-bank build with performance counters enabled. It applies
@@ -68,13 +68,10 @@ operand that occupies only the first region. Bank reservations approximate
 requester arbitration; array propagation does not simulate every PE's flush
 pipeline. These limits affect estimate accuracy, not the recorded constants.
 
-The optional `accelerator.sa_input_pipeline` records unstalled startup paths:
+The optional `accelerator.sa_input_pipeline` records local-buffer and data-path timing:
 
 | Parameter | Cycles | Measured interval |
 | --- | ---: | --- |
-| `parameter_forward_cycles` | 2 | Final serialized parameter word to controller parameter acceptance. |
-| `input_request_start_cycles` | 9 | Input-controller parameters to its first request. |
-| `weight_request_start_cycles` | 11 | Weight-controller parameters to its first request. |
 | `input_buffer_forward_cycles` | 9 | Final input fill response to the first local-buffer output. |
 | `weight_buffer_forward_cycles` | 9 | Final weight fill response to the first local-buffer output. |
 | `input_buffer_read_cycles` | 4 | Input-buffer read request to its array-input handshake, without backpressure. |
@@ -82,8 +79,13 @@ The optional `accelerator.sa_input_pipeline` records unstalled startup paths:
 | `array_forward_cycles` | 8 | Input-to-deskewed-result delay beyond array-dimension propagation. |
 | `accumulation_forward_cycles` | 10 | Deskewed partial sum to final-output enqueue, without waiting. |
 
+The estimate omits short parameter-forwarding and request-start delays.
+Buffer forwarding and read timing remain because they control repeated local
+refills and slot release. Array/accumulation forwarding places output traffic
+relative to those reads, affecting shared-bank contention during execution.
+
 The compiler counts serialized parameter words from the source layout and
-payload beats from hardware widths. It places each startup path after its
+payload beats from hardware widths. It places each local-buffer fill after its
 required DMA and buffer availability. Read forwarding relates array
 consumption to the release of a local ping-pong slot. Refill duration, slot
 reuse and shared-bank waits are calculated in code; none is a recorded

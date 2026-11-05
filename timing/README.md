@@ -31,6 +31,13 @@ still applies; regenerate a model when changing its compilation settings.
 
 ## Record contents
 
+Keep records focused on measured properties that materially affect runtime
+estimates or mapping decisions. A measurable delay does not by itself justify
+a profile field; the estimator may omit small effects.
+The SA record omits small parameter-forwarding, vector-start and completion
+corrections. It retains writeback turnaround and timing that governs recurring
+fills, stores, resource reuse and stalls.
+
 See [the parameter reference](PARAMETERS.md) for each value's role and hardware path.
 
 - `accelerator` holds SA, vector, and CIM timing inputs, in cycles.
@@ -93,10 +100,12 @@ recorded build measurements.
 
 The CIM record includes the two tested N7, 1 ns, INT8, double-buffered
 configurations with 2 and 18 weight sets. The 11-cycle minimum bank drain
-has RTL evidence. The former standalone-vector and sparse-row reference
-allowances are now `null`, because they were not measurements of these builds.
-Using an unknown delay emits a warning: the estimate omits that physical
-delay and remains a lower bound for that path.
+has RTL evidence. The existing compiler references for standalone-vector
+startup (96 cycles per pass) and sparse-row turnaround (8 cycles) are retained
+with `reference` status. They are inherited Sphinx measurements, not fresh
+characterizations of these builds. A record may instead mark an uncharacterized
+delay as `null`; consuming such a delay emits a warning and omits it from the
+estimate.
 The record does not claim that all paths were calibrated on these builds.
 
 Prepare new values from existing reports or targeted measurements when
