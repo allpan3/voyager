@@ -1,0 +1,107 @@
+{
+  "name": "sa-n7-1ns-int8-single-accum",
+  "accelerator": {
+    "kernel_launch_overhead_cycles": null,
+    "spmm_row_cycles": null,
+    "sa_output_pipeline": {
+      "target": {
+        "array_rows": 64,
+        "array_columns": 64,
+        "vector_lanes": 64,
+        "input_bits": 8,
+        "weight_bits": 8,
+        "accum_bits": 24,
+        "output_bits": 16,
+        "port_bits": 512
+      },
+      "stages": [
+        {
+          "name": "matrix_output",
+          "capacity_vectors": 2,
+          "forward_cycles": 1
+        },
+        {
+          "name": "router",
+          "capacity_vectors": 8,
+          "forward_cycles": 7
+        },
+        {
+          "name": "stage_0",
+          "capacity_vectors": 7,
+          "forward_cycles": 6
+        },
+        {
+          "name": "stage_1",
+          "capacity_vectors": 8,
+          "forward_cycles": 7
+        },
+        {
+          "name": "stage_2",
+          "capacity_vectors": 7,
+          "forward_cycles": 6
+        },
+        {
+          "name": "stage_3",
+          "capacity_vectors": 10,
+          "forward_cycles": 9
+        },
+        {
+          "name": "vector_output",
+          "capacity_vectors": 2,
+          "forward_cycles": 1
+        },
+        {
+          "name": "store",
+          "capacity_vectors": 2,
+          "forward_cycles": 3
+        }
+      ],
+      "vector_start_cycles": 5,
+      "vector_done_cycles": 3,
+      "writeback_restart_cycles": 16,
+      "writeback_forward_cycles": 2,
+      "direct_store_forward_cycles": 2,
+      "direct_done_cycles": 2
+    },
+    "sa_input_pipeline": {
+      "parameter_forward_cycles": 2,
+      "input_request_start_cycles": 9,
+      "weight_request_start_cycles": 11,
+      "input_buffer_forward_cycles": 9,
+      "weight_buffer_forward_cycles": 9,
+      "array_forward_cycles": 8,
+      "accumulation_forward_cycles": 10,
+      "input_buffer_read_cycles": 4,
+      "weight_buffer_read_cycles": 3
+    }
+  },
+  "soc": {
+    "name": "sphinx",
+    "bank_switch_cycles": 8
+  },
+  "evidence": {
+    "accelerator.kernel_launch_overhead_cycles": {
+      "status": "unknown",
+      "source": "Standalone vector launch, instruction dispatch and pipeline startup have not been separately characterized for this build."
+    },
+    "accelerator.spmm_row_cycles": {
+      "status": "unknown",
+      "source": "Sparse-row control is not characterized; the recorded hardware disables the sparse matrix unit."
+    },
+    "soc.bank_switch_cycles": {
+      "status": "measured",
+      "source": "Scratchpad read round-trip delay used when a request stream switches banks."
+    },
+    "accelerator.sa_output_pipeline": {
+      "status": "measured",
+      "source": "Stage storage comes from synthesized RTL; delays come from unstalled RTL handshakes. Writeback restart covers loop drain and next-command setup, ending at its first input; writeback forward ends at final-output enqueue. Store delays end at the first output beat; remaining beats follow payload width. Start and done delays cover command handshakes."
+    },
+    "accelerator.sa_input_pipeline": {
+      "status": "measured",
+      "source": "Unstalled RTL intervals: final parameter word to controller parameters; controller parameters to first input/weight request; last fill response to the first local-buffer output; array input to deskewed partial sum beyond geometric propagation; and partial sum to final-output enqueue. Payload, parameter word count, array dimensions and waits are calculated in code. Buffer-read intervals run from a local read request to the corresponding array-input handshake, without backpressure."
+    }
+  },
+  "metadata": {
+    "scope": "Dense single-bank accumulation with performance counters enabled, direct INT24 stores and riding BF16 vector tails without fetched operands. The target identifies the characterized build. The compiler derives payloads, local-buffer reuse, slot placement and stalls from hardware configuration and mapping loops; bank reservations and array propagation remain architectural approximations."
+  }
+}
