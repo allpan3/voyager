@@ -68,7 +68,8 @@ operand that occupies only the first region. Bank reservations approximate
 requester arbitration; array propagation does not simulate every PE's flush
 pipeline. These limits affect estimate accuracy, not the recorded constants.
 
-The optional `accelerator.sa_input_pipeline` records local-buffer and data-path timing:
+The `accelerator.sa_input_pipeline` records local-buffer and data-path timing.
+The input and output pipeline records must be supplied together or both omitted:
 
 | Parameter | Cycles | Measured interval |
 | --- | ---: | --- |

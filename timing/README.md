@@ -53,8 +53,10 @@ add the recorded accelerator pipeline costs again.
 
 For the characterized 64×64 INT8 SA with single-bank accumulation, select
 [`sa-n7-1ns-int8-single-accum.json`](sa-n7-1ns-int8-single-accum.json).
-Its optional `accelerator.sa_output_pipeline` records synthesized stage
-capacities, forward delays, writeback restart and command start/done delays.
+Its `accelerator.sa_output_pipeline` records synthesized stage capacities,
+forward delays and writeback restart. Supply it together with
+`accelerator.sa_input_pipeline` for the combined output/refill schedule;
+omit both records to use the architectural estimate.
 The compiler derives output beats and reduction completion from the mapping,
 then schedules stage occupancy, output retirement and the compiler's
 two-command overlap. It does not store workload stalls in JSON.
