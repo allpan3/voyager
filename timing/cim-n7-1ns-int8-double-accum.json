@@ -6,7 +6,63 @@
     "cim": {
       "accumulation_feedback_cycles": null,
       "output_bank_drain_cycles": 11,
-      "output_pipeline": null
+      "output_pipeline": null,
+      "banked_pipeline": {
+        "target": {
+          "array_rows": 64,
+          "array_columns": 64,
+          "vector_lanes": 64,
+          "input_bits": 8,
+          "weight_bits": 8,
+          "accum_bits": 24,
+          "output_bits": 16,
+          "port_bits": 512
+        },
+        "producer_handoff_cycles": 4,
+        "forward_cycles": 22,
+        "stages": [
+          {
+            "name": "matrix_output",
+            "capacity_vectors": 2,
+            "forward_cycles": 1
+          },
+          {
+            "name": "router",
+            "capacity_vectors": 7,
+            "forward_cycles": 6
+          },
+          {
+            "name": "stage_0",
+            "capacity_vectors": 7,
+            "forward_cycles": 6
+          },
+          {
+            "name": "stage_1",
+            "capacity_vectors": 8,
+            "forward_cycles": 7
+          },
+          {
+            "name": "stage_2",
+            "capacity_vectors": 7,
+            "forward_cycles": 6
+          },
+          {
+            "name": "stage_3",
+            "capacity_vectors": 10,
+            "forward_cycles": 9
+          },
+          {
+            "name": "vector_output",
+            "capacity_vectors": 2,
+            "forward_cycles": 1
+          },
+          {
+            "name": "store",
+            "capacity_vectors": 2,
+            "forward_cycles": 3
+          }
+        ]
+      }
     }
   },
   "soc": {
@@ -36,11 +92,15 @@
     },
     "accelerator.cim.output_pipeline": {
       "status": "unknown",
-      "source": "Additional storage and delays in the fused output pipeline are not characterized."
+      "source": "The streaming output route has not been separately characterized. Measured banked output uses banked_pipeline."
+    },
+    "accelerator.cim.banked_pipeline": {
+      "status": "measured",
+      "source": "Synthesized accumulation-bank handoff and matrix-to-vector handshakes. The producer handoff is paid per completed bank tile. Forwarding is the additional delay beyond architectural result latency and that handoff. Vector stage capacities come from saturated valid/ready handshakes; minimum transit gives the forward delays. These describe retained data after bank release; the active serialized output vector is counted separately in code."
     }
   },
   "metadata": {
-    "scope": "The bank-drain measurement covers 64\u00d764 INT8/INT24 CIM builds with two accumulation banks, two or eighteen resident weight sets, five local accumulation contexts and performance counters enabled. Sparse, matrix-vector and depthwise units are disabled.",
+    "scope": "The bank-drain measurement covers 64\u00d764 INT8/INT24 CIM builds with two accumulation banks, two or eighteen resident weight sets, five local accumulation contexts and performance counters enabled. Sparse, matrix-vector and depthwise units are disabled. Banked scheduling covers direct INT24 stores and fused BF16 output without fetched operands; other routes retain architectural bounds.",
     "hardware_source": "CIM output path with address-first stores, early accumulation writes and five local accumulation contexts."
   }
 }

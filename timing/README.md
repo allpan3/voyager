@@ -87,8 +87,33 @@ Two optional CIM refinements have explicit unknown values:
 
 - `accumulation_feedback_cycles: null` preserves the existing unvalidated
   feedback-safety result. It does not prove RAW safety.
-- `output_pipeline: null` retains architectural output storage without
-  additional scheduled pipeline stages.
+- `output_pipeline: null` retains architectural storage for the uncharacterized
+  streaming output route.
+
+SA and CIM share the source-defined registered FIFO rules and the compiler's
+command dispatch, DMA and retirement rules. The optional CIM `banked_pipeline`
+record adds measured producer handoff, forwarding, and vector-stage timing.
+Its geometry and width fields restrict where these measurements apply; they
+do not supply workload timing. The compiler derives tile completion, operand
+reuse, port service, and waits from the hardware configuration and mapping.
+
+For characterized banked CIM routes, operand fills, accumulation-bank reuse,
+vector completion and DMA now share one timeline. A bank can become reusable
+before its vectors finish writing to memory. The next vector command still
+waits for the prior command's output completion. Source-defined storage stays
+in code; recorded stage capacities describe synthesized pipeline retention.
+Single-bank output, split reductions, fetched vector operands, bias/scales,
+nonuniform input fills, and bank-switching paths retain resource bounds.
+Alignment therefore remains partial, and code sharing does not establish
+equal accuracy.
+
+Search first finds a candidate with the inexpensive resource model, then ranks
+candidates with the combined schedule. It stops evaluating a candidate only
+when an optimistic completion bound exceeds the best runtime (including any
+configured tolerance). Exact ties remain eligible. Repeated timing states
+are batched without changing the schedule. Reporting uses the same local
+one-command timing, but its whole-graph scalar schedule does not reproduce
+all cross-command overlap modeled during search.
 
 Missing required fields cause an error. An unknown value is not a measured
 zero. Source-defined output issue rate and weight ownership transitions are

@@ -101,11 +101,39 @@ These fields are under `accelerator.cim`.
 | `accumulation_feedback_cycles` | `null` | Required spacing for dependent accumulator SRAM updates. The compiler currently reports unknown feedback safety; this field does not insert hardware stalls. | [issue_accumulation_reads](../src/cim/CIMProcessor.h#L1393) → [complete_accumulation](../src/cim/CIMProcessor.h#L1505) ↔ [DualPortBuffer](../src/DualPortBuffer.h#L14). Write visibility before a dependent read remains unmeasured. |
 | `output_bank_drain_cycles` | 11 | Fixed overhead per completed output tile on the banked accumulation path, including the final non-overlapped drain. | [Tile drain and bank-return handshakes](../src/OutputController.h#L322) ↔ [SRAM ownership handoff](../src/DualPortBuffer.h#L64). Measured minimum RTL gap for the recorded CIM2/CIM18 builds. |
 | `output_pipeline` | `null` | Optional output-stage capacities and forward/backpressure delays. Currently uses architectural storage without added measured stage delays. | [Matrix output buffering](../src/cim/CIMProcessor.h#L419) → [OutputController](../src/OutputController.h#L184) → [vector stages and channels](../src/vector_unit/VectorPipeline.h#L53). A complete stage timing record is unavailable. |
+| `banked_pipeline` | record | Measured bank handoff, forwarding and vector stages for the banked CIM schedule. See below. | [complete_accumulation](../src/cim/CIMProcessor.h#L1505) → [OutputController](../src/OutputController.h#L184) → [vector stages and channels](../src/vector_unit/VectorPipeline.h#L53). Selective RTL traces of the recorded CIM2/CIM18 builds. |
 
 The output controller's initiation interval and the registered resident-set
 ready/release transitions are defined in hardware source and modeled in code.
 Transfer cycles follow payload width and port width. The former extra
 per-request allowance is removed; startup and bank-switch waits are distinct.
+
+### Banked CIM pipeline record
+
+`accelerator.cim.banked_pipeline` drives the compiler's banked CIM schedule.
+`target` restricts it to the measured geometry and datatype widths. Routes
+outside its scope keep the resource bounds.
+
+| Parameter | Value | Measured interval |
+| --- | ---: | --- |
+| `producer_handoff_cycles` | 4 cycles | Accumulation completion handshake, paid once per completed bank tile. |
+| `forward_cycles` | 22 cycles | Last MAC request to the first matrix-to-vector transfer, beyond the source-derived result latency and the handoff. |
+
+Each stage has a capacity in complete vectors and an unstalled forward delay:
+
+| Stage | Capacity (vectors) | Forward delay (cycles) |
+| --- | ---: | ---: |
+| Matrix output controller | 2 | 1 |
+| Vector input router | 7 | 6 |
+| Vector stage 0 | 7 | 6 |
+| Vector stage 1 | 8 | 7 |
+| Vector stage 2 | 7 | 6 |
+| Vector stage 3 | 10 | 9 |
+| Vector output routing | 2 | 1 |
+| Store controller | 2 | 3 |
+
+Capacities count data retained after bank release. The compiler counts the
+active serialized output vector separately.
 
 ## SoC fields
 
