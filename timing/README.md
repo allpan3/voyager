@@ -92,7 +92,12 @@ Two optional CIM refinements have explicit unknown values:
 
 SA and CIM share the source-defined registered FIFO rules and the compiler's
 command dispatch, DMA and retirement rules. The optional CIM `banked_pipeline`
-record adds measured producer handoff, forwarding, and vector-stage timing.
+record adds measured producer handoff, forwarding, vector-stage timing, and
+operand read-ahead. Read-ahead is the number of operand beats each input or
+weight controller accepts before its buffer slot frees. It counts only
+accelerator storage; system and test-harness response queues are excluded.
+Accepted beats shorten later scratchpad port service but do not make a tile
+ready before its slot frees and the fill completes.
 Its geometry and width fields restrict where these measurements apply; they
 do not supply workload timing. The compiler derives tile completion, operand
 reuse, port service, and waits from the hardware configuration and mapping.

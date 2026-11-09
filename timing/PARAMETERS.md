@@ -118,6 +118,14 @@ outside its scope keep the resource bounds.
 | --- | ---: | --- |
 | `producer_handoff_cycles` | 4 cycles | Accumulation completion handshake, paid once per completed bank tile. |
 | `forward_cycles` | 22 cycles | Last MAC request to the first matrix-to-vector transfer, beyond the source-derived result latency and the handoff. |
+| `input_readahead_beats` | 8 beats | Input responses the input controller accepts before the destination buffer slot frees. |
+| `weight_readahead_beats` | 6 beats | Weight responses the weight controller accepts before the destination resident set frees. |
+
+Read-ahead is measured at the [input](../src/InputController.h#L58) and
+[weight](../src/cim/CIMWeightController.h#L72) response handshakes. It counts
+only accelerator storage; harness and SoC response queues are excluded.
+Accepted beats shorten later scratchpad port service. A tile still becomes
+ready only after its slot frees and its fill completes.
 
 Each stage has a capacity in complete vectors and an unstalled forward delay:
 

@@ -20,6 +20,8 @@
         },
         "producer_handoff_cycles": 4,
         "forward_cycles": 22,
+        "input_readahead_beats": 8,
+        "weight_readahead_beats": 6,
         "stages": [
           {
             "name": "matrix_output",
@@ -96,7 +98,7 @@
     },
     "accelerator.cim.banked_pipeline": {
       "status": "measured",
-      "source": "Synthesized accumulation-bank handoff and matrix-to-vector handshakes. The producer handoff is paid per completed bank tile. Forwarding is the additional delay beyond architectural result latency and that handoff. Vector stage capacities come from saturated valid/ready handshakes; minimum transit gives the forward delays. These describe retained data after bank release; the active serialized output vector is counted separately in code."
+      "source": "Synthesized accumulation-bank handoff and matrix-to-vector handshakes. The producer handoff is paid per completed bank tile. Forwarding is the additional delay beyond architectural result latency and that handoff. Vector stage capacities come from saturated valid/ready handshakes; minimum transit gives the forward delays. These describe retained data after bank release; the active serialized output vector is counted separately in code. Read-ahead beats are operand responses the input and weight controllers accept at their response handshakes before the destination buffer slot frees; requests held in system or test-harness response queues are excluded."
     }
   },
   "metadata": {
