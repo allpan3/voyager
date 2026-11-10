@@ -5,6 +5,9 @@
 
 #include <cassert>
 #include <cstdlib>
+#include <filesystem>
+#include <iomanip>
+#include <limits>
 #include <memory>
 
 #include "AccelTypes.h"
@@ -21,7 +24,23 @@ Harness::Harness(sc_module_name name, const Model& model,
           true),
       model(model),
       selection(selection),
-      memory(memory) {
+      memory(memory),
+      scratchpad(ScratchpadConfig::load(
+                     (std::filesystem::path(model.data_dir).parent_path() /
+                      "memory_config.txt").string()), clk.period()) {
+  const auto& config = scratchpad.config;
+  config.dram.validate_clock(clk.period());
+  std::cout << "ScratchpadTiming: mode=" << (config.banked ? "banked" : "independent")
+            << " size_bytes=" << config.size << " banks=" << config.banks
+            << " bank_word_bytes=" << config.word_bytes
+            << " reserved_bytes=" << config.reserved
+            << " bank_switch_cycles=" << config.bank_switch_cycles
+            << " clock_ns=" << clk.period().to_seconds() * 1e9
+            << " compiler_frequency_ghz=" << config.compiler_frequency_ghz
+            << " DMA=" << (config.dram.timed ? "timed" : "untimed")
+            << " dram_bytes_per_cycle=" << config.dram.bytes_per_cycle
+            << " dram_access_latency_cycles=" << config.dram.access_latency_cycles
+            << " source=" << config.source << std::endl;
   accelerator.clk(clk);
   accelerator.rstn(rstn);
   accelerator.matrix_unit_params_in(matrix_unit_params_in);
@@ -41,6 +60,10 @@ Harness::Harness(sc_module_name name, const Model& model,
   accelerator.matrix_unit_output_addr(matrix_unit_output_addr);
   accelerator.matrix_unit_start(matrix_unit_start);
   accelerator.matrix_unit_done(matrix_unit_done);
+#if ENABLE_PERF_COUNTERS
+  accelerator.matrix_perf_counter_select(matrix_perf_counter_select);
+  accelerator.matrix_perf_counter_value(matrix_perf_counter_value);
+#endif
 #if SUPPORT_MVM
   accelerator.matrix_vector_unit_params_in(matrix_vector_unit_params_in);
   accelerator.matrix_vector_unit_input_req(matrix_vector_unit_input_req);
@@ -131,6 +154,7 @@ Harness::Harness(sc_module_name name, const Model& model,
   REGISTER_FN(read_##NAME##_request); \
   REGISTER_FN(send_##NAME##_response);
 
+  REGISTER_FN(run_dma)
   REGISTER_IO_FN(matrix_unit_input)
   REGISTER_IO_FN(matrix_unit_weight)
   REGISTER_IO_FN(matrix_unit_bias)
@@ -183,19 +207,26 @@ Harness::Harness(sc_module_name name, const Model& model,
   REGISTER_FN(run_walker)
   REGISTER_FN(release_starts)
   REGISTER_FN(retire_dones)
+#if ENABLE_PERF_COUNTERS
+  REGISTER_FN(matrix_performance_monitor)
+#endif
 
   access_counter = new AccessCounter();
 // do not set access counters for an RTL simulation
 #ifndef CCS_DUT_RTL
   accelerator.matrix_unit.input_buffer.access_counter = access_counter;
+  accelerator.matrix_unit.input_buffer.access_counter_elements = IC_DIMENSION;
+#if MATRIX_BACKEND == MATRIX_BACKEND_SYSTOLIC
   accelerator.matrix_unit.weight_buffer.access_counter = access_counter;
+  accelerator.matrix_unit.weight_buffer.access_counter_elements = OC_DIMENSION;
+#endif
 #endif
 }
 
 template <int width>
 void Harness::process_read_request(
     Connections::Combinational<MemoryRequest>* request_out,
-    sc_fifo<ac_int<width, false>>* data_fifo) {
+    sc_fifo<ac_int<width, false>>* data_fifo, const char* port) {
   request_out->ResetRead();
 
   constexpr int num_bytes = width / 8;
@@ -216,14 +247,18 @@ void Harness::process_read_request(
 
     access_counter->increment(std::string(name()), total_bytes);
 
-    ac_int<width, false> bits;
-
     for (int i = 0; i < num_words; i++) {
-      for (int j = 0; j < num_bytes; j++) {
-        uint64_t address = base_address + i * num_bytes + j;
-        bits.set_slc(j * 8, static_cast<ac_int<8, false>>(memory[address]));
-      }
-
+      // A stalled consumer cannot reserve an unbounded run of future bank
+      // cycles. Only fetch when its bounded response FIFO has room.
+      while (data_fifo->num_free() == 0) wait(data_fifo->data_read_event());
+      ac_int<width, false> bits = 0;
+      const int bytes = std::min(num_bytes, total_bytes - i * num_bytes);
+      scratchpad.transfer(base_address + i * num_bytes, bytes, false, port,
+          [&](uint64_t address, uint64_t offset, uint64_t count) {
+            for (uint64_t j = 0; j < count; j++)
+              bits.set_slc(static_cast<int>((offset + j) * 8),
+                           static_cast<ac_int<8, false>>(memory[address + j]));
+          });
       data_fifo->write(bits);
     }
   }
@@ -245,7 +280,8 @@ void Harness::send_data_response(
 template <int width>
 void Harness::process_write_request(
     Connections::Combinational<ac_int<width, false>>* data_out,
-    Connections::Combinational<ac_int<ADDRESS_WIDTH, false>>* address_out) {
+    Connections::Combinational<ac_int<ADDRESS_WIDTH, false>>* address_out,
+    const char* port) {
   data_out->ResetRead();
   address_out->ResetRead();
 
@@ -255,6 +291,7 @@ void Harness::process_write_request(
 
   while (true) {
     uint64_t address = address_out->Pop();
+    ++pending_memory_writes;
     auto data = data_out->Pop();
 
     access_counter->increment(std::string(name()) + "_" + "outputs", num_bytes);
@@ -263,14 +300,18 @@ void Harness::process_write_request(
     for (int i = 0; i < num_bytes; i++) {
       bytes[i] = data.template slc<8>(i * 8);
     }
-    this->memory->write_bytes_to_memory(address, SRAM_PARTITION, num_bytes,
-                                        bytes);
+    scratchpad.transfer(address, num_bytes, true, port,
+        [&](uint64_t location, uint64_t offset, uint64_t count) {
+          this->memory->write_bytes_to_memory(location, SRAM_PARTITION, count,
+                                              bytes + offset);
+        });
+    if (--pending_memory_writes == 0) memory_writes_completed.notify(SC_ZERO_TIME);
   }
 }
 
 #define DEFINE_IO_FN(NAME)                                \
   void Harness::read_##NAME##_request() {                 \
-    process_read_request(&NAME##_req, &NAME##_resp_fifo); \
+    process_read_request(&NAME##_req, &NAME##_resp_fifo, #NAME); \
   }                                                       \
                                                           \
   void Harness::send_##NAME##_response() {                \
@@ -322,19 +363,19 @@ DEFINE_IO_FN(vector_fetch_1)
 DEFINE_IO_FN(vector_fetch_2)
 
 void Harness::store_matrix_unit_output() {
-  process_write_request(&matrix_unit_output_data, &matrix_unit_output_addr);
+  process_write_request(&matrix_unit_output_data, &matrix_unit_output_addr, "matrix_unit_output");
 }
 
 void Harness::store_vector_output() {
-  process_write_request(&vector_output_data, &vector_output_addr);
+  process_write_request(&vector_output_data, &vector_output_addr, "vector_output");
 }
 
 void Harness::store_mx_scale_output() {
-  process_write_request(&mx_scale_output_data, &mx_scale_output_addr);
+  process_write_request(&mx_scale_output_data, &mx_scale_output_addr, "mx_scale_output");
 }
 
 void Harness::store_sparse_tensor_output() {
-  process_write_request(&sparse_tensor_output_data, &sparse_tensor_output_addr);
+  process_write_request(&sparse_tensor_output_data, &sparse_tensor_output_addr, "sparse_tensor_output");
 }
 
 void Harness::reset() {
@@ -525,6 +566,9 @@ void Harness::release_starts() {
 // already retired.
 void Harness::retire_dones() {
   matrix_unit_done.ResetRead();
+#if ENABLE_PERF_COUNTERS
+  matrix_perf_retired = 0;
+#endif
   vector_unit_done.ResetRead();
 #if SUPPORT_MVM
   matrix_vector_unit_done.ResetRead();
@@ -543,7 +587,12 @@ void Harness::retire_dones() {
     InvocationGroup group = done_queue.front();
     done_queue.pop_front();
 
-    if (group.matrix) matrix_unit_done.SyncPop();
+    if (group.matrix) {
+      matrix_unit_done.SyncPop();
+#if ENABLE_PERF_COUNTERS
+      ++matrix_perf_retired;
+#endif
+    }
 #if SUPPORT_MVM
     if (group.matrix_vector) matrix_vector_unit_done.SyncPop();
 #endif
@@ -555,11 +604,18 @@ void Harness::retire_dones() {
 #endif
     if (group.vector) {
       vector_unit_done.SyncPop();
+      // Let store threads register transfers accepted on this same edge.
+      wait(SC_ZERO_TIME);
+      while (pending_memory_writes) wait(memory_writes_completed);
       vector_inflight--;
       vector_retired.notify(SC_ZERO_TIME);
     }
 
     if (group.has_post) {
+      // A done handshake and its final store can wake in either order.
+      wait(SC_ZERO_TIME);
+      while (pending_memory_writes) wait(memory_writes_completed);
+      while (dma_retired < group.dma_sequence) wait(dma_completed);
       post_semaphore(group.post_node, group.post_slot, group.post_amount);
     }
 
@@ -584,8 +640,177 @@ void Harness::retire_dones() {
   }
 }
 
+#if ENABLE_PERF_COUNTERS
+MatrixPerformance::Counter Harness::read_matrix_performance(unsigned index) {
+  matrix_perf_counter_select.write(index);
+#ifdef CCS_DUT_RTL
+  // Selection and response each cross an RTL transactor boundary.
+  wait(clk.period());
+  wait(clk.period());
+#else
+  for (int delta = 0; delta < 4; ++delta) wait(SC_ZERO_TIME);
+#endif
+  return matrix_perf_counter_value.read();
+}
+
+// A slow reader may span several completions. Cumulative snapshots let the
+// report cover that entire interval without losing events or stalling commands.
+void Harness::matrix_performance_monitor() {
+  static const char* names[MatrixPerformance::COUNTER_COUNT] = {
+      "snapshot_sequence",
+      "processor_active_cycles",
+      "array_issue_cycles",
+      "input_backpressure_cycles",
+      "result_backpressure_cycles",
+#if MATRIX_BACKEND == MATRIX_BACKEND_CIM
+      "mac_wait_weight_set_load_cycles",
+      "cim_weight_load_cycles",
+#else
+      nullptr,
+      nullptr,
+#endif
+      "input_buffer_reads",
+      "input_buffer_writes",
+      "accum_buffer_reads",
+      "accum_buffer_writes",
+#if MATRIX_BACKEND == MATRIX_BACKEND_SYSTOLIC
+      "weight_buffer_reads",
+      "weight_buffer_writes",
+#else
+      nullptr,
+      nullptr,
+#endif
+  };
+#if MATRIX_BACKEND == MATRIX_BACKEND_CIM
+  uint64_t weight_beats = 0;
+#endif
+  MatrixPerformance::Counter previous[MatrixPerformance::COUNTER_COUNT];
+  for (auto& counter : previous) counter = 0;
+  matrix_perf_counter_select.write(MatrixPerformance::SNAPSHOT_SEQUENCE);
+  matrix_perf_reported = 0;
+  while (true) {
+    wait();
+    MatrixPerformance::Counter values[MatrixPerformance::COUNTER_COUNT];
+    values[0] = read_matrix_performance(MatrixPerformance::SNAPSHOT_SEQUENCE);
+    if (values[0] == matrix_perf_reported) continue;
+    for (int i = 1; i < MatrixPerformance::COUNTER_COUNT; ++i)
+      values[i] = read_matrix_performance(i);
+    if (read_matrix_performance(MatrixPerformance::SNAPSHOT_SEQUENCE) !=
+        values[0])
+      continue;
+
+    const MatrixPerformance::SnapshotSequence commands =
+        values[0] - matrix_perf_reported;
+    std::ostringstream line;
+    line << "MatrixPerfHardware: snapshot_sequence=" << values[0]
+         << " completed_commands=" << commands;
+    MatrixPerformance::Counter deltas[MatrixPerformance::COUNTER_COUNT] = {};
+    for (int i = 1; i < MatrixPerformance::COUNTER_COUNT; ++i) {
+      deltas[i] = values[i] - previous[i];
+      if (names[i]) line << " " << names[i] << "=" << deltas[i];
+      previous[i] = values[i];
+    }
+    using namespace MatrixPerformance;
+    // Preserve fractional bytes for buffer words that are not byte-aligned.
+    line << std::setprecision(std::numeric_limits<double>::max_digits10);
+    const auto buffer_bytes = [&](CounterId id, unsigned width) {
+      return double(deltas[id].to_uint()) * width / 8;
+    };
+#if MATRIX_BACKEND == MATRIX_BACKEND_CIM
+    using Processor = MatrixUnit::ActiveMatrixProcessor;
+    constexpr uint64_t beats_per_set =
+        IC_DIMENSION * Processor::WEIGHT_BEATS_PER_ROW;
+    const uint64_t previous_fills = weight_beats / beats_per_set;
+    weight_beats += deltas[CIM_WEIGHT_LOAD_CYCLES].to_uint();
+    line << " cim_set_fills=" << weight_beats / beats_per_set - previous_fills
+         << " cim_weight_load_bytes="
+         << uint64_t(deltas[CIM_WEIGHT_LOAD_CYCLES].to_uint()) *
+                ((Processor::WEIGHT_WRITE_WIDTH + 7) / 8);
+#else
+    line << " weight_buffer_read_bytes="
+         << buffer_bytes(WEIGHT_BUFFER_READS, WEIGHT_BUFFER_WIDTH)
+         << " weight_buffer_write_bytes="
+         << buffer_bytes(WEIGHT_BUFFER_WRITES, WEIGHT_BUFFER_WIDTH);
+#endif
+    line << " input_buffer_read_bytes="
+         << buffer_bytes(INPUT_BUFFER_READS, INPUT_BUFFER_WIDTH)
+         << " input_buffer_write_bytes="
+         << buffer_bytes(INPUT_BUFFER_WRITES, INPUT_BUFFER_WIDTH)
+         << " accum_buffer_read_bytes="
+         << buffer_bytes(ACCUM_BUFFER_READS,
+                         ACCUM_BUFFER_DATATYPE::width * OC_DIMENSION)
+         << " accum_buffer_write_bytes="
+         << buffer_bytes(ACCUM_BUFFER_WRITES,
+                         ACCUM_BUFFER_DATATYPE::width * OC_DIMENSION);
+    std::cout << line.str() << std::endl;
+    matrix_perf_reported = values[0];
+    matrix_perf_reported_event.notify(SC_ZERO_TIME);
+  }
+}
+#endif
+
 void Harness::drain() {
+  while (dma_retired < dma_submitted) wait(dma_completed);
   while (pending_groups > 0) wait(group_retired);
+  while (pending_memory_writes) wait(memory_writes_completed);
+}
+
+void Harness::execute_async_copy(const voyager::Operation& op,
+                                  const voyager::PrimOp& prim,
+                                  const ScalarEnv& env,
+                                  MemoryInterface* copy_memory) {
+  if (!scratchpad.config.dram.timed) {
+    Backend::execute_async_copy(op, prim, env, copy_memory);
+    if (scratchpad.config.dram.present) {
+      dma_bytes += async_copy_dram_bytes(prim, env);
+      dma_retired = ++dma_submitted;
+    }
+    return;
+  }
+  DmaCopy copy;
+  copy.prim = prim;
+  copy.env = env;
+  copy.bytes = async_copy_dram_bytes(prim, env);
+  copy.sequence = ++dma_submitted;
+  const auto sem = prim.kwargs().find("semaphore");
+  copy.has_post = sem != prim.kwargs().end();
+  if (copy.has_post) {
+    const auto& ref = sem->second.tensor_box();
+    copy.post_node = ref.box().node();
+    copy.post_slot = resolve_bank(ref, env, prim.name());
+    copy.post_amount = has_arg(prim, "post_count")
+                           ? arg_int(prim, "post_count", env) : 1;
+  }
+  const auto sequence = copy.sequence;
+  const bool has_post = copy.has_post;
+  dma_queue.push_back(std::move(copy));
+  dma_pushed.notify(SC_ZERO_TIME);
+  // A copy without a completion semaphore has implicit sequential use.
+  if (!has_post)
+    while (dma_retired < sequence) wait(dma_completed);
+}
+
+void Harness::run_dma() {
+  wait();
+  while (true) {
+    while (dma_queue.empty()) wait(dma_pushed);
+    auto copy = std::move(dma_queue.front());
+    dma_queue.pop_front();
+    const double cycles = scratchpad.config.dram.cycles(copy.bytes);
+    if (cycles) wait(clk.period() * cycles);
+    // Keep the copy atomic. No data or semaphore credit is visible early.
+    run_async_copy(copy.prim, copy.env, memory);
+    if (copy.has_post)
+      post_semaphore(copy.post_node, copy.post_slot, copy.post_amount);
+    dma_bytes += copy.bytes;
+    dma_busy_cycles += cycles;
+    dma_retired = copy.sequence;
+    dma_completed.notify(SC_ZERO_TIME);
+  }
+}
+
+void Harness::synchronize_memory() {
+  if (scratchpad.config.dram.timed) drain();
 }
 
 void Harness::begin_commit() { in_commit = true; }
@@ -600,6 +825,7 @@ void Harness::end_commit(bool has_post, const std::string& post_node,
 
   InvocationGroup token;
   token.has_post = true;
+  token.dma_sequence = dma_submitted;
   token.post_node = post_node;
   token.post_slot = post_slot;
   token.post_amount = post_amount;
@@ -662,11 +888,23 @@ void Harness::run_walker() {
   drain();
 
   const sc_time end = sc_time_stamp();
+  scratchpad.report(std::cout);
+  if (scratchpad.config.dram.present)
+    std::cout << "DramTiming: copies=" << dma_retired
+              << " bytes=" << dma_bytes << " busy_cycles=" << dma_busy_cycles
+              << " mode=" << (scratchpad.config.dram.timed ? "timed" : "untimed")
+              << std::endl;
   std::cout << "Total Runtime: "
             << static_cast<long long>(end.to_default_time_units() -
                                       start.to_default_time_units())
             << " ns" << std::endl;
 
+  // Finish diagnostic reads after recording runtime. Reporting never gates
+  // operation dispatch or retirement.
+#if ENABLE_PERF_COUNTERS
+  while (matrix_perf_reported != matrix_perf_retired)
+    wait(matrix_perf_reported_event);
+#endif
   sc_stop();
 }
 

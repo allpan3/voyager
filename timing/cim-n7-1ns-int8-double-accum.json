@@ -1,0 +1,108 @@
+{
+  "name": "cim-n7-1ns-int8-double-accum",
+  "accelerator": {
+    "kernel_launch_overhead_cycles": 96,
+    "spmm_row_cycles": 8,
+    "cim": {
+      "accumulation_feedback_cycles": null,
+      "output_bank_drain_cycles": 11,
+      "output_pipeline": null,
+      "banked_pipeline": {
+        "target": {
+          "array_rows": 64,
+          "array_columns": 64,
+          "vector_lanes": 64,
+          "input_bits": 8,
+          "weight_bits": 8,
+          "accum_bits": 24,
+          "output_bits": 16,
+          "port_bits": 512
+        },
+        "producer_handoff_cycles": 4,
+        "forward_cycles": 22,
+        "input_readahead_beats": 8,
+        "weight_readahead_beats": 6,
+        "stages": [
+          {
+            "name": "matrix_output",
+            "capacity_vectors": 2,
+            "forward_cycles": 1
+          },
+          {
+            "name": "router",
+            "capacity_vectors": 7,
+            "forward_cycles": 6
+          },
+          {
+            "name": "stage_0",
+            "capacity_vectors": 7,
+            "forward_cycles": 6
+          },
+          {
+            "name": "stage_1",
+            "capacity_vectors": 8,
+            "forward_cycles": 7
+          },
+          {
+            "name": "stage_2",
+            "capacity_vectors": 7,
+            "forward_cycles": 6
+          },
+          {
+            "name": "stage_3",
+            "capacity_vectors": 10,
+            "forward_cycles": 9
+          },
+          {
+            "name": "vector_output",
+            "capacity_vectors": 2,
+            "forward_cycles": 1
+          },
+          {
+            "name": "store",
+            "capacity_vectors": 2,
+            "forward_cycles": 3
+          }
+        ]
+      }
+    }
+  },
+  "soc": {
+    "name": "sphinx",
+    "bank_switch_cycles": 8
+  },
+  "evidence": {
+    "accelerator.kernel_launch_overhead_cycles": {
+      "status": "reference",
+      "source": "Reference measurement from the existing compiler: vector parameter dispatch, instruction issue and pipeline fill/drain per pass on Sphinx. Reused without a separate measurement for this build."
+    },
+    "accelerator.spmm_row_cycles": {
+      "status": "reference",
+      "source": "Reference measurement from the existing compiler: sparse accumulator turnaround per row on Sphinx, rounded to eight cycles. Used when the sparse path is enabled; not separately characterized for this build."
+    },
+    "soc.bank_switch_cycles": {
+      "status": "measured",
+      "source": "Scratchpad read round-trip delay used when a request stream switches banks."
+    },
+    "accelerator.cim.accumulation_feedback_cycles": {
+      "status": "unknown",
+      "source": "The delay before an accumulation write can safely be read again is not characterized."
+    },
+    "accelerator.cim.output_bank_drain_cycles": {
+      "status": "measured",
+      "source": "Measured minimum control delay between draining an output tile and returning its accumulation bank. Other waiting is calculated separately."
+    },
+    "accelerator.cim.output_pipeline": {
+      "status": "unknown",
+      "source": "The streaming output route has not been separately characterized. Measured banked output uses banked_pipeline."
+    },
+    "accelerator.cim.banked_pipeline": {
+      "status": "measured",
+      "source": "Synthesized accumulation-bank handoff and matrix-to-vector handshakes. The producer handoff is paid per completed bank tile. Forwarding is the additional delay beyond architectural result latency and that handoff. Vector stage capacities come from saturated valid/ready handshakes; minimum transit gives the forward delays. These describe retained data after bank release; the active serialized output vector is counted separately in code. Read-ahead beats are operand responses the input and weight controllers accept at their response handshakes before the destination buffer slot frees; requests held in system or test-harness response queues are excluded."
+    }
+  },
+  "metadata": {
+    "scope": "The bank-drain measurement covers 64\u00d764 INT8/INT24 CIM builds with two accumulation banks, two or eighteen resident weight sets, five local accumulation contexts and performance counters enabled. Sparse, matrix-vector and depthwise units are disabled. Banked scheduling covers direct INT24 stores and fused BF16 output without fetched operands; other routes retain architectural bounds.",
+    "hardware_source": "CIM output path with address-first stores, early accumulation writes and five local accumulation contexts."
+  }
+}

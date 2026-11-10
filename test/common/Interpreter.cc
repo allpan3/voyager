@@ -213,6 +213,7 @@ void Interpreter::execute_prim(const voyager::Operation& op,
         if (backend_->intercepts_data_ops()) {
           backend_->data_op(op, prim, env_);
         } else {
+          backend_->synchronize_memory();
           for (uint32_t bank = 0; bank < banks_of(box); bank++) {
             zero_buffer(to_tensor(box, bank), 1, 0, memory_);
           }
@@ -230,23 +231,7 @@ void Interpreter::execute_prim(const voyager::Operation& op,
     return;
   }
   if (target == "voyager::async_copy") {
-    if (backend_->intercepts_data_ops()) {
-      backend_->data_op(op, prim, env_);
-    } else {
-      run_async_copy(prim, env_, memory_);
-    }
-    // The completed transfer signals its slot semaphore, post_count times: a
-    // tile loaded once but consumed by several commits posts once per consumer.
-    const auto sem = prim.kwargs().find("semaphore");
-    if (sem != prim.kwargs().end()) {
-      const auto& ref = sem->second.tensor_box();
-      const int64_t slot = resolve_semaphore_slot(ref, prim.name());
-      const auto post_count = prim.kwargs().find("post_count");
-      const int64_t count = post_count != prim.kwargs().end()
-                                ? eval_int(post_count->second.scalar(), env_)
-                                : 1;
-      backend_->post_semaphore(ref.box().node(), slot, count);
-    }
+    backend_->execute_async_copy(op, prim, env_, memory_);
     return;
   }
   if (target == "voyager::async_wait") {
@@ -335,6 +320,7 @@ void Interpreter::execute_scalar(const voyager::Operation& op,
     // Name the alternative rather than leave the variant's converting
     // assignment to pick one; which conversions it will consider is a point
     // the C++17 compilers here disagree on.
+    backend_->synchronize_memory();
     std::any data = memory_->read_tensor(input);
     if (auto* value =
             std::any_cast<std::shared_ptr<DataTypes::int32[]>>(&data)) {
@@ -398,6 +384,7 @@ void Interpreter::execute_zeros(const voyager::Operation& op,
     backend_->data_op(op, prim, env_);
     return;
   }
+  backend_->synchronize_memory();
   zero_buffer(to_tensor(box), banks_of(box), bank_stride_of(box), memory_);
 }
 

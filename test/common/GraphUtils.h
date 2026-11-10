@@ -305,6 +305,10 @@ int64_t semaphore_slots(const voyager::TensorBox& box);
 //
 // Does not touch the semaphore -- the interpreter posts Operation.semaphore
 // once the op retires, which is where the IR puts it.
+// Nominal DRAM payload. Padding counts as tile traffic, as in the runtime
+// model. Sparse count limits the payload; transposed copies ignore count.
+uint64_t async_copy_dram_bytes(const voyager::PrimOp& prim,
+                               const ScalarEnv& env);
 void run_async_copy(const voyager::PrimOp& prim, const ScalarEnv& env,
                     MemoryInterface* memory);
 
