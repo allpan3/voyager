@@ -83,12 +83,14 @@ Remove the obsolete `sa_output_slack_cycles` and unmeasured draft `sa_output`
 entries from older records. The explicit eight-vector FIFO remains derived
 in code, not a measured-profile constant.
 
-Two optional CIM refinements have explicit unknown values:
+`accumulation_feedback_cycles: 4` makes the compiler reject CIM mappings
+whose dependent accumulation SRAM updates are closer than the measured
+3-cycle read-to-store path. Output stalls are covered by the context count:
+at most five younger operations can be in flight, and five local contexts
+keep them in registers.
 
-- `accumulation_feedback_cycles: null` preserves the existing unvalidated
-  feedback-safety result. It does not prove RAW safety.
-- `output_pipeline: null` retains architectural storage for the uncharacterized
-  streaming output route.
+`output_pipeline: null` retains architectural storage for the uncharacterized
+streaming output route.
 
 SA and CIM share the source-defined registered FIFO rules and the compiler's
 command dispatch, DMA and retirement rules. The optional CIM `banked_pipeline`

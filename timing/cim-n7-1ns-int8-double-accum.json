@@ -4,7 +4,7 @@
     "kernel_launch_overhead_cycles": 96,
     "spmm_row_cycles": 8,
     "cim": {
-      "accumulation_feedback_cycles": null,
+      "accumulation_feedback_cycles": 4,
       "output_bank_drain_cycles": 11,
       "output_pipeline": null,
       "banked_pipeline": {
@@ -85,8 +85,8 @@
       "source": "Scratchpad read round-trip delay used when a request stream switches banks."
     },
     "accelerator.cim.accumulation_feedback_cycles": {
-      "status": "unknown",
-      "source": "The delay before an accumulation write can safely be read again is not characterized."
+      "status": "measured",
+      "source": "1 ns RTL traces of the current accumulation path (complete_accumulation issues the SRAM write; 18 weight sets, single and double banks) store each partial sum 3 cycles after its read request, so a dependent read must follow at least 4 cycles later. Under output stalls the path holds at most five younger operations, which five local contexts keep out of SRAM."
     },
     "accelerator.cim.output_bank_drain_cycles": {
       "status": "measured",
